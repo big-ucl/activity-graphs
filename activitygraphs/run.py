@@ -1,7 +1,6 @@
 """Top-level experiment runners: model builders, baseline evaluation, and result persistence."""
 
 from pathlib import Path
-from typing import Callable
 
 import polars as pl
 import torch_geometric as pyg
@@ -13,7 +12,7 @@ from activitygraphs.ml.baselines import (
     NodeBaseline,
     UniformBaseline,
 )
-from activitygraphs.ml.dataset import load_dataset
+from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.experiment import compute_training_weights, evaluate_baseline, run_experiment
 from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
 
@@ -100,9 +99,10 @@ def comparison_experiment(cfg: Config):
     test_size = 0.2
     seed = 42
 
-    train_dataset, test_dataset, _ = load_dataset(cfg, test_size, seed)
-    train_loader = pyg.loader.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = pyg.loader.DataLoader(test_dataset, batch_size=batch_size)
+    datamodule = ActivityDataModule(cfg, test_size=test_size, seed=seed, batch_size=batch_size)
+    datamodule.setup()
+
+    train_dataset = datamodule.train_dataset
 
     hidden_channels = 128
     dropout = 0.2
@@ -119,7 +119,7 @@ def comparison_experiment(cfg: Config):
     gps_l1 = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
 
     epochs = 50
-    verbose = 5
+    verbose = 1
     lr = 1e-4
 
     gname = f"GATSkip-{gat_layers}-res"
@@ -128,73 +128,16 @@ def comparison_experiment(cfg: Config):
     tlname = tname + "-l1"
 
     num_nodes = train_dataset[0].num_nodes
-    baseline_results = measure_baselines(num_nodes, train_loader, test_loader)
+    baseline_results = measure_baselines(num_nodes, datamodule.train_dataloader(), datamodule.val_dataloader())
 
     models_dir = cfg.paths.models
 
-    results_mlp = run_experiment(
-        mlp,
-        train_loader,
-        test_loader,
-        num_epochs=epochs,
-        verbose=verbose,
-        name="MLP",
-        lr=lr,
-        model_save_dir=models_dir,
-    )
-    results_gat = run_experiment(
-        gat,
-        train_loader,
-        test_loader,
-        num_epochs=epochs,
-        verbose=verbose,
-        name=gname,
-        lr=lr,
-        model_save_dir=models_dir,
-    )
-    results_gps = run_experiment(
-        gps,
-        train_loader,
-        test_loader,
-        num_epochs=epochs,
-        verbose=verbose,
-        name=tname,
-        lr=lr,
-        model_save_dir=models_dir,
-    )
-    results_mlp_l1 = run_experiment(
-        mlp_l1,
-        train_loader,
-        test_loader,
-        num_epochs=epochs,
-        verbose=verbose,
-        name="MLP-l1",
-        lr=lr,
-        reg="l1",
-        model_save_dir=models_dir,
-    )
-    results_gat_l1 = run_experiment(
-        gat_l1,
-        train_loader,
-        test_loader,
-        num_epochs=epochs,
-        verbose=verbose,
-        name=glname,
-        lr=lr,
-        reg="l1",
-        model_save_dir=models_dir,
-    )
-    results_gps_l1 = run_experiment(
-        gps_l1,
-        train_loader,
-        test_loader,
-        num_epochs=epochs,
-        verbose=verbose,
-        name=tlname,
-        lr=lr,
-        reg="l1",
-        model_save_dir=models_dir,
-    )
+    results_mlp = run_experiment(mlp, datamodule, num_epochs=epochs, verbose=verbose, name="MLP", lr=lr, model_save_dir=models_dir)
+    results_gat = run_experiment(gat, datamodule, num_epochs=epochs, verbose=verbose, name=gname, lr=lr, model_save_dir=models_dir)
+    results_gps = run_experiment(gps, datamodule, num_epochs=epochs, verbose=verbose, name=tname, lr=lr, model_save_dir=models_dir)
+    results_mlp_l1 = run_experiment(mlp_l1, datamodule, num_epochs=epochs, verbose=verbose, name="MLP-l1", lr=lr, reg="l1", model_save_dir=models_dir)
+    results_gat_l1 = run_experiment(gat_l1, datamodule, num_epochs=epochs, verbose=verbose, name=glname, lr=lr, reg="l1", model_save_dir=models_dir)
+    results_gps_l1 = run_experiment(gps_l1, datamodule, num_epochs=epochs, verbose=verbose, name=tlname, lr=lr, reg="l1", model_save_dir=models_dir)
 
     save_results(
         cfg.paths.reports,
