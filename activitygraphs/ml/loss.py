@@ -51,31 +51,3 @@ def focal_loss(
         loss = alpha_t * loss
 
     return loss.mean()
-
-
-def bce_metric(inputs: torch.Tensor, targets: torch.Tensor) -> float:
-    """Return the binary cross-entropy between ``inputs`` and ``targets`` as a Python float."""
-    return F.binary_cross_entropy_with_logits(inputs, targets).detach().item()
-
-
-def precision_at_k(scores: torch.Tensor, labels: torch.Tensor, k: int) -> float:
-    top_k_indices = scores.topk(k).indices
-    top_k_labels = labels[top_k_indices]
-
-    return top_k_labels.sum().item() / k
-
-
-def recall_at_k(scores: torch.Tensor, labels: torch.Tensor, k: int) -> float:
-    top_k_indices = scores.topk(k).indices
-    top_k_labels = labels[top_k_indices]
-    num_pos = labels.sum().int().item()
-
-    if num_pos == 0:
-        return 0.0
-
-    return top_k_labels.sum().item() / num_pos
-
-
-def metric_at_k(metric_fn, k) -> MetricFn:
-    """Return a partial application of ``metric_fn`` with ``k`` fixed."""
-    return functools.partial(metric_fn, k=k)

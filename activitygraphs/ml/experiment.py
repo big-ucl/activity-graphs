@@ -1,5 +1,7 @@
 """Training loop, evaluation functions, and ``run_experiment`` orchestrator."""
 
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
@@ -96,7 +98,7 @@ def train(
 
 
 @torch.no_grad()
-def evaluate(
+def evaluate_bce(
     device: torch.device,
     model: torch.nn.Module,
     loader: pyg.loader.DataLoader,
@@ -171,8 +173,8 @@ def evaluate_baseline(
     """Evaluate a baseline model and return a results dict matching the ``run_experiment`` format."""
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     baseline = baseline.to(device)
-    loss = evaluate(device, baseline, loader, full_info)
-    loss_weight = evaluate(device, baseline, loader, full_info, pos_weight=pos_weight)
+    loss = evaluate_bce(device, baseline, loader, full_info)
+    loss_weight = evaluate_bce(device, baseline, loader, full_info, pos_weight=pos_weight)
     metrics = evaluate_at_k(device, baseline, loader, full_info)
 
     log(
@@ -209,7 +211,7 @@ def run_experiment(
     lr: float = 0.01,
     reg: str = None,
     full_info: bool = False,
-    save: bool = False,
+    model_save_dir: Path | None = None,
 ):
     """Train a model and return per-epoch metrics as a dict.
 
@@ -258,9 +260,9 @@ def run_experiment(
 
     for epoch in range(1, num_epochs + 1):
         train_loss = train(device, model, train_loader, optimizer, full_info, pos_weight, loss_fn, reg=reg)
-        train_eval_loss = evaluate(device, model, train_loader, full_info)
-        test_loss = evaluate(device, model, test_loader, full_info)
-        test_loss_weight = evaluate(device, model, test_loader, full_info, pos_weight=pos_weight)
+        train_eval_loss = evaluate_bce(device, model, train_loader, full_info)
+        test_loss = evaluate_bce(device, model, test_loader, full_info)
+        test_loss_weight = evaluate_bce(device, model, test_loader, full_info, pos_weight=pos_weight)
 
         metrics = evaluate_at_k(device, model, test_loader, full_info)
 
@@ -299,8 +301,8 @@ def run_experiment(
         ndcg_at_5=metrics["ndcg@5"],
     )
 
-    if save:
-        torch.save(model.state_dict(), f"models/{name}.pth")
+    if model_save_dir is not None:
+        torch.save(model.state_dict(), model_save_dir / f"{name}.pth")
 
     return {
         "name": name,

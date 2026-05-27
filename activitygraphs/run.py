@@ -130,17 +130,48 @@ def comparison_experiment(cfg: Config):
     num_nodes = train_dataset[0].num_nodes
     baseline_results = measure_baselines(num_nodes, train_loader, test_loader)
 
+    models_dir = cfg.paths.models
+
     results_mlp = run_experiment(
-        mlp, train_loader, test_loader, num_epochs=epochs, verbose=verbose, name="MLP", lr=lr, save=True
+        mlp,
+        train_loader,
+        test_loader,
+        num_epochs=epochs,
+        verbose=verbose,
+        name="MLP",
+        lr=lr,
+        model_save_dir=models_dir,
     )
     results_gat = run_experiment(
-        gat, train_loader, test_loader, num_epochs=epochs, verbose=verbose, name=gname, lr=lr, save=True
+        gat,
+        train_loader,
+        test_loader,
+        num_epochs=epochs,
+        verbose=verbose,
+        name=gname,
+        lr=lr,
+        model_save_dir=models_dir,
     )
     results_gps = run_experiment(
-        gps, train_loader, test_loader, num_epochs=epochs, verbose=verbose, name=tname, lr=lr, save=True
+        gps,
+        train_loader,
+        test_loader,
+        num_epochs=epochs,
+        verbose=verbose,
+        name=tname,
+        lr=lr,
+        model_save_dir=models_dir,
     )
     results_mlp_l1 = run_experiment(
-        mlp_l1, train_loader, test_loader, num_epochs=epochs, verbose=verbose, name="MLP-l1", lr=lr, reg="l1", save=True
+        mlp_l1,
+        train_loader,
+        test_loader,
+        num_epochs=epochs,
+        verbose=verbose,
+        name="MLP-l1",
+        lr=lr,
+        reg="l1",
+        model_save_dir=models_dir,
     )
     results_gat_l1 = run_experiment(
         gat_l1,
@@ -151,7 +182,7 @@ def comparison_experiment(cfg: Config):
         name=glname,
         lr=lr,
         reg="l1",
-        save=True,
+        model_save_dir=models_dir,
     )
     results_gps_l1 = run_experiment(
         gps_l1,
@@ -162,7 +193,7 @@ def comparison_experiment(cfg: Config):
         name=tlname,
         lr=lr,
         reg="l1",
-        save=True,
+        model_save_dir=models_dir,
     )
 
     save_results(
