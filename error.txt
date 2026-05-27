@@ -1,0 +1,79 @@
+/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/torch_geometric/data/dataset.py:115: UserWarning: The `pre_transform` argument differs from the one used in the pre-processed version of this dataset. If you want to make use of another pre-processing technique, pass `force_reload=True` explicitly to reload the dataset.
+  self._process()
+Model: Uniform, val_bce: 0.6931, val_bce_weighted: 0.7787, precision_at_5: 0.0139, recall_at_5: 0.0026, mrr: 0.0120, ndcg_at_5: 0.0172
+Model: GlobalMarginal, val_bce: 0.1033, val_bce_weighted: 0.5785, precision_at_5: 0.0139, recall_at_5: 0.0026, mrr: 0.0120, ndcg_at_5: 0.0172
+Model: NodeMarginal, val_bce: 0.0900, val_bce_weighted: 0.4912, precision_at_5: 0.2703, recall_at_5: 0.0509, mrr: 0.0425, ndcg_at_5: 0.2928
+Model: ConditionalNodeMarginal, val_bce: 0.3247, val_bce_weighted: 1.7775, precision_at_5: 0.1421, recall_at_5: 0.0273, mrr: 0.0237, ndcg_at_5: 0.1491
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/lightning/pytorch/callbacks/model_checkpoint.py:881: Checkpoint directory /home/luca/Coding/activity-graphs/models exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/lightning/pytorch/utilities/_pytree.py:21: 
+`isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/lightning/pytorch/trainer/connectors/data_conne
+ctor.py:434: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the 
+value of the `num_workers` argument` to `num_workers=11` in the `DataLoader` to improve performance.
+/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/lightning/pytorch/trainer/connectors/data_conne
+ctor.py:434: The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the 
+value of the `num_workers` argument` to `num_workers=11` in the `DataLoader` to improve performance.
+/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/lightning/pytorch/loops/fit_loop.py:321: The 
+number of training batches (26) is smaller than the logging interval Trainer(log_every_n_steps=50). Set a lower 
+value for log_every_n_steps if you want to see logs for the training epoch.
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:00 • 0:00:00 83.49it/s v_num: 1.000
+Validation  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╺━━━━━ 6/7   0:00:00 • 0:00:01 25.29it/s             `Trainer.fit` stoEpoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:00 • 0:00:00 83.49it/s v_num: 1.000
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:07 • 0:00:00 3.23it/s v_num: 0.000
+Validation  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╺━━━━━ 6/7   0:00:00 • 0:00:01 6.66it/s             `Trainer.fitEpoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:07 • 0:00:00 3.23it/s v_num: 0.000
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:09 • 0:00:00 2.72it/s v_num: 0.000
+Validation  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╺━━━━━ 6/7   0:00:01 • 0:00:01 5.91it/s             `Trainer.fitEpoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:09 • 0:00:00 2.72it/s v_num: 0.000
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:00 • 0:00:00 78.36it/s v_num: 0.000
+Validation  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╺━━━━━ 6/7   0:00:00 • 0:00:01 25.79it/s             `Trainer.fiEpoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:00 • 0:00:00 78.36it/s v_num: 0.000
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:07 • 0:00:00 3.23it/s v_num: 0.000
+Validation  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╺━━━━━ 6/7   0:00:00 • 0:00:01 6.64it/s             `Trainer.fitEpoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:07 • 0:00:00 3.23it/s v_num: 0.000
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:09 • 0:00:00 2.73it/s v_num: 0.000`Trainer.fit` stopped: `max_epochs=50` reached.
+Epoch 49/49 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26/26 0:00:09 • 0:00:00 2.73it/s v_num: 0.000
+Error executing job with overrides: []
+Traceback (most recent call last):
+  File "/home/luca/Coding/activity-graphs/activitygraphs/main.py", line 15, in main
+    comparison_experiment(cfg)
+  File "/home/luca/Coding/activity-graphs/activitygraphs/run.py", line 142, in comparison_experiment
+    save_results(
+  File "/home/luca/Coding/activity-graphs/activitygraphs/run.py", line 66, in save_results
+    results_df = pl.concat(pl.DataFrame(result) for result in results)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/polars/functions/eager.py", line 174, in concat
+    elems = list(items)
+            ^^^^^^^^^^^
+  File "/home/luca/Coding/activity-graphs/activitygraphs/run.py", line 66, in <genexpr>
+    results_df = pl.concat(pl.DataFrame(result) for result in results)
+                           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/polars/dataframe/frame.py", line 403, in __init__
+    self._df = dict_to_pydf(
+               ^^^^^^^^^^^^^
+  File "/home/luca/Coding/activity-graphs/.venv/lib/python3.12/site-packages/polars/_utils/construction/dataframe.py", line 157, in dict_to_pydf
+    pydf = PyDataFrame(data_series)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+polars.exceptions.ShapeError: could not create a new DataFrame: height of column 'epoch' (50) does not match height of column 'name' (51)
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
+

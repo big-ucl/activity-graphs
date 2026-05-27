@@ -10,6 +10,7 @@ from torch_geometric.logging import log
 from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 from activitygraphs.ml.datamodule import ActivityDataModule
 
+
 def compute_training_weights(loader: pyg.loader.DataLoader) -> torch.Tensor:
     """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the full loader."""
     num_neg = torch.tensor(0, dtype=torch.float)
@@ -107,15 +108,15 @@ def evaluate_baseline(
     name: str,
     full_info: bool = False,
     pos_weight: torch.Tensor = None,
+    k: int = 5,
 ) -> dict:
     """Evaluate a baseline model and return a results dict matching the ``run_experiment`` format."""
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     baseline = baseline.to(device)
     loss = _evaluate_bce(device, baseline, loader, full_info)
     loss_weight = _evaluate_bce(device, baseline, loader, full_info, pos_weight=pos_weight)
-    metrics = _evaluate_at_k(device, baseline, loader, full_info)
+    metrics = _evaluate_at_k(device, baseline, loader, full_info, k=k)
 
-    k = 5
     log(
         Model=name,
         val_bce=loss,
@@ -141,7 +142,7 @@ def evaluate_baseline(
 
 def run_experiment(
     model: torch.nn.Module,
-    datamodule: ActivityDataModule
+    datamodule: ActivityDataModule,
     num_epochs: int = 10,
     verbose: int = 1,
     name: str | None = None,
@@ -150,12 +151,12 @@ def run_experiment(
     full_info: bool = False,
     model_save_dir: Path | None = None,
 ) -> dict:
-    """Train a model with Lightning and return per-epoch metrics as a dict.
+    """Train a model and return per-epoch metrics as a dict.
 
     Uses AdamW with weight decay 1e-4 and ReduceLROnPlateau scheduling.
 
     Args:
-        model: Model to train; must implement ``forward(x, edge_index, edge_attr, batch)``.
+        model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
         datamodule: ``ActivityDataModule`` instance (``setup()`` is called internally if needed).
         num_epochs: Number of training epochs.
         verbose: Non-zero enables the Lightning progress bar.
@@ -192,7 +193,9 @@ def run_experiment(
 
     if model_save_dir is not None:
         callbacks.append(
-            ModelCheckpoint(dirpath=str(model_save_dir), filename=name, save_last=False, save_top_k=1, monitor="val_bce")
+            ModelCheckpoint(
+                dirpath=str(model_save_dir), filename=name, save_last=False, save_top_k=1, monitor="val_bce"
+            )
         )
 
     log_dir = str(model_save_dir) if model_save_dir is not None else "."

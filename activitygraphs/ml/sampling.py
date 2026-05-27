@@ -11,7 +11,7 @@ def poisson_sampling(logits: torch.Tensor, generator: torch.Generator | None) ->
 
 
 def pps_sampling(
-        num_samples: int, logits: torch.Tensor, batch: torch.Tensor, generator: torch.Generator | None = None
+    num_samples: int, logits: torch.Tensor, batch: torch.Tensor, generator: torch.Generator | None = None
 ) -> torch.Tensor:
     """Probability-proportional-to-size sampling: draw exactly ``num_samples`` nodes per graph in the batch."""
     logits, mask = pyg.utils.to_dense_batch(logits, batch, fill_value=0.0)

@@ -18,6 +18,7 @@ from tqdm import tqdm
 from activitygraphs.base import IS_HOME_COL_IDX
 from activitygraphs.config import Config
 from activitygraphs.utils import get_project_root
+from activitygraphs.dataprocessing import load_data, convert_to_torch
 
 
 class GenevaDataset(pyg.data.InMemoryDataset):
@@ -55,6 +56,13 @@ class ActivityDataset(pyg.data.Dataset):
     Each item returned by ``get(i)`` is a ``pyg.data.Data`` with ``x = [network_features || spatial_features[i]]``,
     ``y = spatial_labels[i]``, and ``graph_x = demographics[i]``.
     """
+
+    PROCESSED_FILE_NAMES = [
+        "network_graph.pt",
+        "spatial_features.pt",
+        "spatial_labels.pt",
+        "demographics.pt",
+    ]
 
     def __init__(
         self,
@@ -95,12 +103,7 @@ class ActivityDataset(pyg.data.Dataset):
 
     @property
     def processed_file_names(self) -> list[str]:
-        return [
-            "network_graph.pt",
-            "spatial_features.pt",
-            "spatial_labels.pt",
-            "demographics.pt",
-        ]
+        return self.PROCESSED_FILE_NAMES
 
     def download(self) -> None:
         pass
@@ -210,8 +213,18 @@ def load_or_build_dataset(
 ) -> ActivityDataset:
     """Construct an ``ActivityDataset`` rooted at ``cfg.data.paths.pyg_datasets``."""
     project_root = get_project_root(project_root)
-    root = project_root / cfg.data.paths.pyg_datasets
-    return ActivityDataset(root=str(root), **build_kwargs)
+    dataset_path = project_root / cfg.data.paths.pyg_datasets
+
+    if not all((dataset_path / file).exists() for file in ActivityDataset.PROCESSED_FILE_NAMES):
+        data, network_nodes, network_edges = load_data(cfg.data, project_root)
+        network_graph, spatial_features, spatial_labels, demographics = convert_to_torch(
+            data, network_nodes, network_edges
+        )
+        dataset_path = project_root / cfg.data.paths.pyg_datasets
+
+        return ActivityDataset(str(dataset_path), network_graph, spatial_features, spatial_labels, demographics)
+
+    return ActivityDataset(root=str(dataset_path), **build_kwargs)
 
 
 def split_indices(

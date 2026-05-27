@@ -150,6 +150,7 @@ class GenevaData(NetworkData, DataFrameStore):
 
 def load_files(cfg: GenevaDataConfig, project_root: Path | None = None) -> GenevaInputs:
     """Read all raw Geneva files (journeys, boundaries, GTFS) into a ``GenevaInputs`` container."""
+
     def parse_gtfs_date(*cols: str) -> pl.Expr:
         return pl.col(*cols).cast(pl.String).str.to_date("%Y%m%d")
 

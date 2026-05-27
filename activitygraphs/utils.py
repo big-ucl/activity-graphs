@@ -67,6 +67,7 @@ def check_polars_schema(df: pl.DataFrame, schema: pl.Schema, ignore_extra_cols: 
 
 def check_geopandas_schema(gdf: gpd.GeoDataFrame, schema: PandasSchema, ignore_extra_cols: bool) -> gpd.GeoDataFrame:
     """Validate a GeoPandas/Pandas DataFrame against a column-name -> dtype-string mapping."""
+
     def dtypes_match(dtype: str, expected: str) -> bool:
         return (dtype == "str" and expected == "object") or dtype == expected
 

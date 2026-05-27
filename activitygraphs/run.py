@@ -132,16 +132,35 @@ def comparison_experiment(cfg: Config):
 
     models_dir = cfg.paths.models
 
-    results_mlp = run_experiment(mlp, datamodule, num_epochs=epochs, verbose=verbose, name="MLP", lr=lr, model_save_dir=models_dir)
-    results_gat = run_experiment(gat, datamodule, num_epochs=epochs, verbose=verbose, name=gname, lr=lr, model_save_dir=models_dir)
-    results_gps = run_experiment(gps, datamodule, num_epochs=epochs, verbose=verbose, name=tname, lr=lr, model_save_dir=models_dir)
-    results_mlp_l1 = run_experiment(mlp_l1, datamodule, num_epochs=epochs, verbose=verbose, name="MLP-l1", lr=lr, reg="l1", model_save_dir=models_dir)
-    results_gat_l1 = run_experiment(gat_l1, datamodule, num_epochs=epochs, verbose=verbose, name=glname, lr=lr, reg="l1", model_save_dir=models_dir)
-    results_gps_l1 = run_experiment(gps_l1, datamodule, num_epochs=epochs, verbose=verbose, name=tlname, lr=lr, reg="l1", model_save_dir=models_dir)
+    results_mlp = run_experiment(
+        mlp, datamodule, num_epochs=epochs, verbose=verbose, name="MLP", lr=lr, model_save_dir=models_dir
+    )
+    results_gat = run_experiment(
+        gat, datamodule, num_epochs=epochs, verbose=verbose, name=gname, lr=lr, model_save_dir=models_dir
+    )
+    results_gps = run_experiment(
+        gps, datamodule, num_epochs=epochs, verbose=verbose, name=tname, lr=lr, model_save_dir=models_dir
+    )
+    results_mlp_l1 = run_experiment(
+        mlp_l1,
+        datamodule,
+        num_epochs=epochs,
+        verbose=verbose,
+        name="MLP-l1",
+        lr=lr,
+        reg="l1",
+        model_save_dir=models_dir,
+    )
+    results_gat_l1 = run_experiment(
+        gat_l1, datamodule, num_epochs=epochs, verbose=verbose, name=glname, lr=lr, reg="l1", model_save_dir=models_dir
+    )
+    results_gps_l1 = run_experiment(
+        gps_l1, datamodule, num_epochs=epochs, verbose=verbose, name=tlname, lr=lr, reg="l1", model_save_dir=models_dir
+    )
 
     save_results(
         cfg.paths.reports,
-        "geneva",
+        cfg.data.name,
         results_mlp,
         results_gat,
         results_gps,

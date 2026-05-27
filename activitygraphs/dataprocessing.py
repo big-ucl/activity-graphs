@@ -2,7 +2,7 @@
 
 import pickle
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast
 
 import city2graph as c2g
 import geopandas as gpd
@@ -13,8 +13,16 @@ import torch_geometric as pyg
 import torch_geometric.transforms as T
 from joblib import Parallel, delayed
 
+
 from activitygraphs.base import CRS
-from activitygraphs.config import DataConfig, GenevaStatsInputs, StatsInputs, TorontoStatsInputs
+from activitygraphs.config import (
+    DataConfig,
+    GenevaStatsInputs,
+    StatsInputs,
+    TorontoStatsInputs,
+    TorontoDataConfig,
+    GenevaDataConfig,
+)
 from activitygraphs.data.geneva import GenevaData
 from activitygraphs.data.overture import Overture
 from activitygraphs.data.statistics import (
@@ -424,3 +432,28 @@ def build_user_pyg_graph(
     ])
 
     return transforms(indiv_graph)
+
+
+def load_data(cfg: DataConfig, project_root: Path | None = None):
+    if cfg.name == "THATS":
+        cfg = cast(TorontoDataConfig, cfg)
+        return _load_toronto_data(cfg, project_root)
+    elif cfg.name == "GenevaTPG":
+        cfg = cast(TorontoDataConfig, cfg)
+        return _load_geneva_data(cfg, project_root)
+
+    raise ValueError(f"Unknown Dataset {cfg.name}")
+
+
+def _load_toronto_data(cfg: TorontoDataConfig, project_root: Path | None = None):
+    data = TorontoData.load(cfg, project_root).with_filter("subsector")
+    network_nodes, network_edges = load_toronto_network_graph(data, cfg, project_root)
+
+    return data, network_nodes, network_edges
+
+
+def _load_geneva_data(cfg: GenevaDataConfig, project_root: Path | None = None):
+    data = GenevaData.load(cfg, project_root)
+    network_nodes, network_edges = load_gva_network_graph(data, cfg, project_root)
+
+    return data, network_nodes, network_edges

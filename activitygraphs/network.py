@@ -28,12 +28,12 @@ TDataFrame = TypeVar("TDataFrame", pl.DataFrame, gpd.GeoDataFrame)
 
 
 class NetworkData(ABC):
-    """Wrapper around survey DataFrames that provides a cached, filterable network view. Each datset (Geneva, Toronto, etc...) 
+    """Wrapper around survey DataFrames that provides a cached, filterable network view. Each datset (Geneva, Toronto, etc...)
     inherits from this class
 
     Locations are filtered by ``filters``. It will only show locations that match the `loc_type` provided in the filter.
     Only journeys with both endpoints in filtered locations and users with home locations inside filtered locations will not be shown.
-    
+
     Use ``with_filter(loc_types)`` to create a restricted copy without mutating the original.
     Concrete subclasses must implement ``_copy``.
     """
