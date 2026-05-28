@@ -11,7 +11,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
 from activitygraphs.ml.datamodule import ActivityDataModule
-from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
 from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 
 
@@ -27,20 +27,6 @@ def compute_training_weights(loader: pyg.loader.DataLoader) -> torch.Tensor:
     weights = num_neg / num_pos
     return torch.sqrt(weights)
 
-
-def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool):
-    """Return node features from ``batch.x``, optionally augmented with home features and distances."""
-    if not full_info:
-        return batch.x
-
-    distances = batch.distances
-
-    if batch.batch is not None:
-        home_feature = batch.home_feature[batch.batch].unsqueeze(1)
-    else:
-        home_feature = torch.full((batch.x.shape[0], 1), batch.home_feature.item())
-
-    return torch.cat([batch.x, home_feature, distances], dim=1)
 
 
 @torch.no_grad()
@@ -146,6 +132,7 @@ def run_experiment(
     model_save_dir: Path | None = None,
     fast_dev_run: bool = False,
     overfit_batches: int = 0,
+    weight_decay: float = 1e-4,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
@@ -178,6 +165,7 @@ def run_experiment(
         pos_weight=datamodule.pos_weight,
         reg=reg,
         full_info=full_info,
+        weight_decay=weight_decay,
     )
 
     callbacks: list[L.Callback] = []

@@ -5,9 +5,22 @@ import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
 
-from activitygraphs.ml.experiment import extract_features
 from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 
+
+def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool):
+    """Return node features from ``batch.x``, optionally augmented with home features and distances."""
+    if not full_info:
+        return batch.x
+
+    distances = batch.distances
+
+    if batch.batch is not None:
+        home_feature = batch.home_feature[batch.batch].unsqueeze(1)
+    else:
+        home_feature = torch.full((batch.x.shape[0], 1), batch.home_feature.item())
+
+    return torch.cat([batch.x, home_feature, distances], dim=1)
 
 
 class ActivityGraphModule(L.LightningModule):
@@ -35,6 +48,7 @@ class ActivityGraphModule(L.LightningModule):
         lambda_reg: float = 0.01,
         full_info: bool = False,
         k: int = 5,
+        weight_decay: float = 1e-4,
     ):
         super().__init__()
         self.model = model
@@ -44,6 +58,7 @@ class ActivityGraphModule(L.LightningModule):
         self.lambda_reg = lambda_reg
         self.full_info = full_info
         self.k = k
+        self.weight_decay = weight_decay
         self._val_outputs: list[dict] = []
 
     def forward(
@@ -107,7 +122,7 @@ class ActivityGraphModule(L.LightningModule):
         self._val_outputs.clear()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
         return {
             "optimizer": optimizer,

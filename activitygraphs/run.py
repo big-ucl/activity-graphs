@@ -105,22 +105,28 @@ def comparison_experiment(cfg: Config):
     train_dataset = datamodule.train_dataset
 
     hidden_channels = 128
-    dropout = 0.2
     gat_layers = 8
     gps_layers = 2
     mlp_layers = 3
+
+    overfitting = cfg.train.overfit_batches > 0
+
+    if overfitting:
+        dropout = 0.0
+        epochs = 500
+        lr = 1e-2
+        weight_decay = 0.0
+    else:
+        dropout = 0.2
+        epochs = 50
+        lr = 1e-4
+        weight_decay = 1e-4
 
     mlp = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
     gat = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
     gps = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
 
-    mlp_l1 = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
-    gat_l1 = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
-    gps_l1 = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
-
-    epochs = 50
     verbose = 1
-    lr = 1e-4
 
     num_nodes = train_dataset[0].num_nodes
     baseline_results = measure_baselines(num_nodes, datamodule.train_dataloader(), datamodule.val_dataloader())
@@ -133,6 +139,7 @@ def comparison_experiment(cfg: Config):
         num_epochs=epochs,
         verbose=verbose,
         lr=lr,
+        weight_decay=weight_decay,
         model_save_dir=models_dir,
         fast_dev_run=cfg.train.fast_dev_run,
         overfit_batches=cfg.train.overfit_batches,
@@ -141,6 +148,17 @@ def comparison_experiment(cfg: Config):
     results_mlp = my_run_experiment(model=mlp, name="MLP")
     results_gat = my_run_experiment(model=gat, name=f"GATSkip-{gat_layers}-res")
     results_gps = my_run_experiment(model=gps, name=f"GTransformer-{gps_layers}-res")
+
+    if overfitting:
+        if cfg.train.fast_dev_run:
+            return
+        save_results(cfg.paths.reports, cfg.data.name, results_mlp, results_gat, results_gps, *baseline_results)
+        return
+
+    mlp_l1 = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
+    gat_l1 = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
+    gps_l1 = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
+
     results_mlp_l1 = my_run_experiment(model=mlp_l1, name="MLP-l1", reg="l1")
     results_gat_l1 = my_run_experiment(model=gat_l1, name=f"GATSkip-{gat_layers}-res-l1", reg="l1")
     results_gps_l1 = my_run_experiment(model=gps_l1, name=f"GTransformer-{gps_layers}-res-l1", reg="l1")

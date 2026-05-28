@@ -193,6 +193,7 @@ class OutputPaths:
     models: Path
 
 
+@dataclass
 class TrainConfig:
     """Training configuration for development and debugging."""
 
