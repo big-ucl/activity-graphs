@@ -169,9 +169,11 @@ class ActivityGraphModule(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
 
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"},
-        }
+        # Only add a scheduler if not trying to overfit (i.e. not in diagnostic mode). Validation error is not a useful
+        # signal when purposefully overfitting
+        if self.trainer.overfit_batches == 0:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"}}
+
+        return optimizer
