@@ -5,6 +5,10 @@ import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
 
+from activitygraphs.ml.experiment import extract_features
+from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
+
+
 
 class ActivityGraphModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
@@ -52,8 +56,6 @@ class ActivityGraphModule(L.LightningModule):
         return self.model(x, edge_index, edge_attr, batch)
 
     def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
-        from activitygraphs.ml.experiment import extract_features
-
         x = extract_features(batch, self.full_info)
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
         loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
@@ -66,9 +68,6 @@ class ActivityGraphModule(L.LightningModule):
         return loss
 
     def validation_step(self, batch: pyg.data.Batch, batch_idx: int) -> None:
-        from activitygraphs.ml.experiment import extract_features
-        from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
-
         x = extract_features(batch, self.full_info)
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
 
@@ -114,13 +113,3 @@ class ActivityGraphModule(L.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"},
         }
-
-
-class _EpochMetricsCallback(L.Callback):
-    """Collects all logged metrics at the end of each validation epoch."""
-
-    def __init__(self):
-        self.epoch_metrics: list[dict] = []
-
-    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        self.epoch_metrics.append({k: v.item() for k, v in trainer.callback_metrics.items()})

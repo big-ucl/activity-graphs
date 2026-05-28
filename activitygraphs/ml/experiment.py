@@ -2,13 +2,17 @@
 
 from pathlib import Path
 
+import lightning as L
+import polars as pl
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
-from torch_geometric.logging import log
+from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.loggers import CSVLogger
 
-from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 from activitygraphs.ml.datamodule import ActivityDataModule
+from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 
 
 def compute_training_weights(loader: pyg.loader.DataLoader) -> torch.Tensor:
@@ -109,26 +113,16 @@ def evaluate_baseline(
     full_info: bool = False,
     pos_weight: torch.Tensor = None,
     k: int = 5,
-) -> dict:
-    """Evaluate a baseline model and return a results dict matching the ``run_experiment`` format."""
+) -> pl.DataFrame:
+    """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format."""
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     baseline = baseline.to(device)
     loss = _evaluate_bce(device, baseline, loader, full_info)
     loss_weight = _evaluate_bce(device, baseline, loader, full_info, pos_weight=pos_weight)
     metrics = _evaluate_at_k(device, baseline, loader, full_info, k=k)
 
-    log(
-        Model=name,
-        val_bce=loss,
-        val_bce_weighted=loss_weight,
-        precision_at_5=metrics[f"precision@{k}"],
-        recall_at_5=metrics[f"recall@{k}"],
-        mrr=metrics["mrr"],
-        ndcg_at_5=metrics[f"ndcg@{k}"],
-    )
-
-    return {
-        "name": name,
+    return pl.DataFrame({
+        "name": [name],
         "epoch": [0],
         "train_loss": [0.0],
         "val_bce": [loss],
@@ -137,7 +131,7 @@ def evaluate_baseline(
         f"val_recall@{k}": [metrics[f"recall@{k}"]],
         "val_mrr": [metrics["mrr"]],
         f"val_ndcg@{k}": [metrics[f"ndcg@{k}"]],
-    }
+    })
 
 
 def run_experiment(
@@ -150,8 +144,8 @@ def run_experiment(
     reg: str | None = None,
     full_info: bool = False,
     model_save_dir: Path | None = None,
-) -> dict:
-    """Train a model and return per-epoch metrics as a dict.
+) -> pl.DataFrame:
+    """Train a model and return per-epoch metrics as a Polars DataFrame.
 
     Uses AdamW with weight decay 1e-4 and ReduceLROnPlateau scheduling.
 
@@ -167,15 +161,9 @@ def run_experiment(
         model_save_dir: Directory for checkpoint and CSV log files; None disables both.
 
     Returns:
-        Dict with keys ``name``, ``epoch``, ``train_loss``, ``val_bce``,
+        DataFrame with columns ``name``, ``epoch``, ``train_loss``, ``val_bce``,
         ``val_bce_weighted``, ``val_precision@5``, ``val_recall@5``, ``val_mrr``, ``val_ndcg@5``.
     """
-    import lightning as L
-    from lightning.pytorch.callbacks import ModelCheckpoint
-    from lightning.pytorch.loggers import CSVLogger
-
-    from activitygraphs.ml.lightning_module import ActivityGraphModule, _EpochMetricsCallback
-
     name = name or model.__class__.__name__
 
     datamodule.setup()
@@ -188,8 +176,7 @@ def run_experiment(
         full_info=full_info,
     )
 
-    metrics_cb = _EpochMetricsCallback()
-    callbacks: list[L.Callback] = [metrics_cb]
+    callbacks: list[L.Callback] = []
 
     if model_save_dir is not None:
         callbacks.append(
@@ -213,16 +200,13 @@ def run_experiment(
 
     trainer.fit(lit_model, datamodule=datamodule)
 
-    k = 5
-    em = metrics_cb.epoch_metrics
-    return {
-        "name": name,
-        "epoch": list(range(1, num_epochs + 1)),
-        "train_loss": [m.get("train_loss", float("nan")) for m in em],
-        "val_bce": [m.get("val_bce", float("nan")) for m in em],
-        "val_bce_weighted": [m.get("val_bce_weighted", float("nan")) for m in em],
-        f"val_precision@{k}": [m.get(f"val_precision@{k}", float("nan")) for m in em],
-        f"val_recall@{k}": [m.get(f"val_recall@{k}", float("nan")) for m in em],
-        "val_mrr": [m.get("val_mrr", float("nan")) for m in em],
-        f"val_ndcg@{k}": [m.get(f"val_ndcg@{k}", float("nan")) for m in em],
-    }
+    raw = pl.read_csv(logger.experiment.metrics_file_path).sort("step")
+    metric_cols = [c for c in raw.columns if c not in ("epoch", "step")]
+    return (
+        raw
+        .group_by("epoch")
+        .agg([pl.col(c).drop_nulls().last().alias(c) for c in metric_cols])
+        .sort("epoch")
+        .with_columns(pl.lit(name).alias("name"))
+        .select(["name", "epoch"] + metric_cols)
+    )

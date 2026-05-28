@@ -60,11 +60,10 @@ def build_mlp(dataset: pyg.data.Dataset, mlp_layers: int, hidden_channels: int, 
     )
 
 
-def save_results(path: str | Path, name: str, *results: dict):
-    """Concatenate result dicts and write to ``<path>/data/<name>-results.parquet``."""
+def save_results(path: str | Path, name: str, *results: pl.DataFrame):
+    """Concatenate result DataFrames and write to ``<path>/data/<name>-results.parquet``."""
     path = Path(path) / "data"
-    results_df = pl.concat(pl.DataFrame(result) for result in results)
-    results_df.write_parquet(path / f"{name}-results.parquet")
+    pl.concat(results).write_parquet(path / f"{name}-results.parquet")
 
 
 def measure_baselines(num_nodes, train_loader, test_loader):
