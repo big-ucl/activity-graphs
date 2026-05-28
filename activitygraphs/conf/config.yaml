@@ -6,3 +6,7 @@ paths:
   reports: reports
   figures: ${..paths.reports}/figures
   models: models
+
+train:
+  fast_dev_run: false
+  overfit_batches: 0

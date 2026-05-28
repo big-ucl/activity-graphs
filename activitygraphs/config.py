@@ -193,12 +193,20 @@ class OutputPaths:
     models: Path
 
 
+class TrainConfig:
+    """Training configuration for development and debugging."""
+
+    fast_dev_run: bool
+    overfit_batches: int
+
+
 @dataclass
 class Config:
     """Top-level Hydra config: dataset config plus output paths."""
 
     data: DataConfig
     paths: OutputPaths
+    train: TrainConfig
 
 
 # cs = ConfigStore.instance()

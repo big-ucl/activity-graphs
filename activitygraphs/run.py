@@ -1,5 +1,6 @@
 """Top-level experiment runners: model builders, baseline evaluation, and result persistence."""
 
+import functools
 from pathlib import Path
 
 import polars as pl
@@ -121,41 +122,31 @@ def comparison_experiment(cfg: Config):
     verbose = 1
     lr = 1e-4
 
-    gname = f"GATSkip-{gat_layers}-res"
-    tname = f"GTransformer-{gps_layers}-res"
-    glname = gname + "-l1"
-    tlname = tname + "-l1"
-
     num_nodes = train_dataset[0].num_nodes
     baseline_results = measure_baselines(num_nodes, datamodule.train_dataloader(), datamodule.val_dataloader())
 
     models_dir = cfg.paths.models
 
-    results_mlp = run_experiment(
-        mlp, datamodule, num_epochs=epochs, verbose=verbose, name="MLP", lr=lr, model_save_dir=models_dir
-    )
-    results_gat = run_experiment(
-        gat, datamodule, num_epochs=epochs, verbose=verbose, name=gname, lr=lr, model_save_dir=models_dir
-    )
-    results_gps = run_experiment(
-        gps, datamodule, num_epochs=epochs, verbose=verbose, name=tname, lr=lr, model_save_dir=models_dir
-    )
-    results_mlp_l1 = run_experiment(
-        mlp_l1,
-        datamodule,
+    my_run_experiment = functools.partial(
+        run_experiment,
+        datamodule=datamodule,
         num_epochs=epochs,
         verbose=verbose,
-        name="MLP-l1",
         lr=lr,
-        reg="l1",
         model_save_dir=models_dir,
+        fast_dev_run=cfg.train.fast_dev_run,
+        overfit_batches=cfg.train.overfit_batches,
     )
-    results_gat_l1 = run_experiment(
-        gat_l1, datamodule, num_epochs=epochs, verbose=verbose, name=glname, lr=lr, reg="l1", model_save_dir=models_dir
-    )
-    results_gps_l1 = run_experiment(
-        gps_l1, datamodule, num_epochs=epochs, verbose=verbose, name=tlname, lr=lr, reg="l1", model_save_dir=models_dir
-    )
+
+    results_mlp = my_run_experiment(model=mlp, name="MLP")
+    results_gat = my_run_experiment(model=gat, name=f"GATSkip-{gat_layers}-res")
+    results_gps = my_run_experiment(model=gps, name=f"GTransformer-{gps_layers}-res")
+    results_mlp_l1 = my_run_experiment(model=mlp_l1, name="MLP-l1", reg="l1")
+    results_gat_l1 = my_run_experiment(model=gat_l1, name=f"GATSkip-{gat_layers}-res-l1", reg="l1")
+    results_gps_l1 = my_run_experiment(model=gps_l1, name=f"GTransformer-{gps_layers}-res-l1", reg="l1")
+
+    if cfg.train.fast_dev_run:
+        return
 
     save_results(
         cfg.paths.reports,

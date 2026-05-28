@@ -144,6 +144,8 @@ def run_experiment(
     reg: str | None = None,
     full_info: bool = False,
     model_save_dir: Path | None = None,
+    fast_dev_run: bool = False,
+    overfit_batches: int = 0,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
@@ -159,6 +161,8 @@ def run_experiment(
         reg: Optional regularisation; ``"l1"`` adds L1 weight penalty.
         full_info: Passed to ``extract_features`` to optionally include home/distance features.
         model_save_dir: Directory for checkpoint and CSV log files; None disables both.
+        fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
+        overfit_batches: Number of batches to overfit on; 0 disables (normal training).
 
     Returns:
         DataFrame with columns ``name``, ``epoch``, ``train_loss``, ``val_bce``,
@@ -196,9 +200,14 @@ def run_experiment(
         gradient_clip_val=1.0,
         enable_progress_bar=bool(verbose),
         enable_model_summary=False,
+        fast_dev_run=fast_dev_run,
+        overfit_batches=overfit_batches,
     )
 
     trainer.fit(lit_model, datamodule=datamodule)
+
+    if fast_dev_run:
+        return pl.DataFrame()
 
     raw = pl.read_csv(logger.experiment.metrics_file_path).sort("step")
     metric_cols = [c for c in raw.columns if c not in ("epoch", "step")]
