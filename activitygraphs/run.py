@@ -4,7 +4,6 @@ import functools
 from pathlib import Path
 
 import polars as pl
-import torch_geometric as pyg
 
 from activitygraphs.config import Config
 from activitygraphs.ml.baselines import (
@@ -14,11 +13,15 @@ from activitygraphs.ml.baselines import (
     UniformBaseline,
 )
 from activitygraphs.ml.datamodule import ActivityDataModule
+from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.experiment import compute_training_weights, evaluate_baseline, run_experiment
+from activitygraphs.ml.lightning_module import extracted_features_dim
 from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
 
 
-def build_gat(dataset: pyg.data.Dataset, num_gcn_layers: int, hidden_channels: int, dropout: float) -> GATSkip:
+def build_gat(
+    dataset: ActivityDataset, num_gcn_layers: int, hidden_channels: int, dropout: float, use_demographics: bool = True
+) -> GATSkip:
     """Instantiate a ``GATSkip`` model sized for ``dataset`` (1 pre-layer, 3 post-layers)."""
     edge_dim = dataset[0].edge_attr.size(-1)
 
@@ -26,7 +29,7 @@ def build_gat(dataset: pyg.data.Dataset, num_gcn_layers: int, hidden_channels: i
         num_pre_layers=1,
         num_gcn_layers=num_gcn_layers,
         num_post_layers=3,
-        in_channels=dataset.num_features,
+        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
         edge_dim=edge_dim,
@@ -35,12 +38,14 @@ def build_gat(dataset: pyg.data.Dataset, num_gcn_layers: int, hidden_channels: i
     )
 
 
-def build_gps(dataset: pyg.data.Dataset, num_gps_layers: int, hidden_channels: int, dropout: float):
+def build_gps(
+    dataset: ActivityDataset, num_gps_layers: int, hidden_channels: int, dropout: float, use_demographics: bool = True
+):
     """Instantiate a ``GraphTransformer`` (GPS) model sized for ``dataset``."""
     edge_dim = dataset[0].edge_attr.size(-1)
 
     return GraphTransformer(
-        in_channels=dataset.num_features,
+        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
         edge_dim=edge_dim,
@@ -50,11 +55,13 @@ def build_gps(dataset: pyg.data.Dataset, num_gps_layers: int, hidden_channels: i
     )
 
 
-def build_mlp(dataset: pyg.data.Dataset, mlp_layers: int, hidden_channels: int, dropout: float) -> NodeMLP:
+def build_mlp(
+    dataset: ActivityDataset, mlp_layers: int, hidden_channels: int, dropout: float, use_demographics: bool = True
+) -> NodeMLP:
     """Instantiate a ``NodeMLP`` model sized for ``dataset``."""
     return NodeMLP(
         mlp_layers,
-        in_channels=dataset.num_features,
+        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
         dropout=dropout,

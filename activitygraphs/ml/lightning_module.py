@@ -5,13 +5,27 @@ import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
 
+from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 
 
-def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool):
-    """Return node features from ``batch.x``, optionally augmented with home features and distances."""
+def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use_demographics: bool = True):
+    """Return node features from ``batch.x``. If `use_demographics` is true, then concatenates `batch.x` with
+    `batch.graph_x`. If `full_info` is True, then it adds distances from home and the home features, but this is ONLY
+     for the synthetic test case and can be disregarded."""
+    x = batch.x
+
+    if use_demographics and batch.graph_x is not None:
+        if batch.batch is not None:
+            demo = batch.graph_x[batch.batch]
+        else:
+            demo = batch.graph_x.expand(x.shape[0], -1)
+        x = torch.cat([x, demo], dim=-1)
+
     if not full_info:
-        return batch.x
+        return x
+
+    raise ValueError("I only use this for the synthetic example in notebooks. Guard against accidental usage.")
 
     distances = batch.distances
 
@@ -21,6 +35,14 @@ def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool):
         home_feature = torch.full((batch.x.shape[0], 1), batch.home_feature.item())
 
     return torch.cat([batch.x, home_feature, distances], dim=1)
+
+
+def extracted_features_dim(dataset: ActivityDataset, use_demographics: bool = True) -> int:
+    """Output width of extract_features for this dataset, given the same flags."""
+    dim = dataset.num_features
+    if use_demographics:
+        dim += dataset.demographics.shape[1]
+    return dim
 
 
 class ActivityGraphModule(L.LightningModule):
@@ -71,6 +93,30 @@ class ActivityGraphModule(L.LightningModule):
         return self.model(x, edge_index, edge_attr, batch)
 
     def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
+        if self.current_epoch == 0 and batch_idx == 0:
+            print(f"[overfit-debug] num_nodes={batch.num_nodes} num_graphs={batch.num_graphs}")
+            print(f"[overfit-debug] y.sum()={batch.y.sum().item()} y.numel()={batch.y.numel()}")
+            print(f"[overfit-debug] x.isnan().any()={torch.isnan(batch.x).any().item()}")
+            print(
+                f"[overfit-debug] x.min/max/mean={batch.x.min().item():.4f}/{batch.x.max().item():.4f}/{batch.x.mean().item():.4f}"
+            )
+            print(f"[overfit-debug] pos_weight={self.pos_weight.item()}")
+
+        if self.current_epoch == self.trainer.max_epochs - 1 and batch_idx == 0:
+            with torch.no_grad():
+                out_debug = self(
+                    extract_features(batch, self.full_info),
+                    batch.edge_index,
+                    batch.edge_attr,
+                    batch.batch,
+                )
+                print(
+                    f"[overfit-debug-final] out std={out_debug.std().item():.4f} "
+                    f"min={out_debug.min().item():.4f} "
+                    f"max={out_debug.max().item():.4f} "
+                    f"mean={out_debug.mean().item():.4f}"
+                )
+
         x = extract_features(batch, self.full_info)
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
         loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
@@ -124,6 +170,7 @@ class ActivityGraphModule(L.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"},
