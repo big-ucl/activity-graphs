@@ -11,7 +11,7 @@ from activitygraphs.ml.dataset import ActivityDataset, FittedScalers, load_datas
 
 
 def _compute_training_weights(train_dataset: ActivityDataset) -> torch.Tensor:
-    """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the full loader."""
+    """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the training dataset."""
     idx = train_dataset.indices()
     y = train_dataset.spatial_labels[idx]
     num_pos = y.sum()

@@ -2,7 +2,7 @@ import lightning as L
 import torch
 import torch_geometric as pyg
 
-from activitygraphs.ml.lightning_module import extract_features
+from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
 
 
 class OverfitDebugCallback(L.Callback):
@@ -13,6 +13,8 @@ class OverfitDebugCallback(L.Callback):
     ) -> None:
         if batch_idx != 0:
             return
+
+        assert isinstance(pl_module, ActivityGraphModule)
 
         if trainer.current_epoch == 0:
             b_min, b_max, b_mean = batch.x.min().item(), batch.x.max().item(), batch.x.mean().item()

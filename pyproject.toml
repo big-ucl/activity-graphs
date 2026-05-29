@@ -126,3 +126,8 @@ line-length = 120
 [tool.ruff.format]
 # Enable preview style formatting.
 preview = true
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that need processed data on disk; skipped automatically when absent",
+]

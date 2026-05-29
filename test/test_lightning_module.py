@@ -1,18 +1,26 @@
 """Unit tests for ActivityGraphModule."""
 
-import pytest
+import types
+
 import torch
 import torch_geometric as pyg
 
-from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
+from activitygraphs.ml.metrics import ndcg_at_k, precision_at_k, recall_at_k
 from activitygraphs.ml.models import NodeMLP
 
 NUM_NODE_FEATURES = 6
+NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
+IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
 
 
-def make_batch(num_graphs: int = 2, num_nodes: int = 5, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
-    """Return a synthetic PyG Batch with binary node labels."""
+def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
+    """Return a synthetic PyG Batch with binary node labels, demographics, and unique user ids.
+
+    Each graph carries ``graph_x`` so ``extract_features`` exercises the demographics path;
+    feature width is ``NUM_NODE_FEATURES + NUM_DEMO_FEATURES`` (== IN_CHANNELS).
+    """
     rng = torch.Generator().manual_seed(seed)
     graphs = []
     for g in range(num_graphs):
@@ -23,28 +31,51 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 5, seed: int = 0, start_use
         dst = torch.arange(1, num_nodes)
         edge_index = torch.stack([torch.cat([src, dst]), torch.cat([dst, src])], dim=0)
         edge_attr = torch.rand(edge_index.size(1), NUM_EDGE_FEATURES, generator=rng)
-        user_id = torch.tensor([start_user_id + g], dtype=torch.long)
-        graphs.append(pyg.data.Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, user_id=user_id))
+        data = pyg.data.Data(
+            x=x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            y=y,
+            user_id=torch.tensor([start_user_id + g], dtype=torch.long),
+        )
+        data.graph_x = torch.rand(1, NUM_DEMO_FEATURES, generator=rng)
+        graphs.append(data)
     return pyg.data.Batch.from_data_list(graphs)
 
 
-def make_module(reg: str | None = None, lambda_reg: float = 0.01) -> ActivityGraphModule:
-    model = NodeMLP(
-        num_layers=2,
-        in_channels=NUM_NODE_FEATURES,
-        hidden_channels=8,
-        out_channels=1,
+def make_module(reg: str | None = None, lambda_reg: float = 0.01, pos_weight: float = 2.0) -> ActivityGraphModule:
+    model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
+    return ActivityGraphModule(
+        model=model, lr=1e-3, pos_weight=torch.tensor(pos_weight), reg=reg, lambda_reg=lambda_reg
     )
-    pos_weight = torch.tensor(2.0)
-    return ActivityGraphModule(model=model, lr=1e-3, pos_weight=pos_weight, reg=reg, lambda_reg=lambda_reg)
+
+
+def force_positive_per_graph(batch: pyg.data.Batch) -> None:
+    """Set the first node of each graph positive so ranking metrics are defined."""
+    for i in range(batch.num_graphs):
+        idx = (batch.batch == i).nonzero(as_tuple=True)[0][0]
+        batch.y[idx] = 1.0
+
+
+def capture_logs(module: ActivityGraphModule, monkeypatch) -> dict:
+    """Patch ``self.log`` and ``self.log_dict`` (no Trainer attached) and collect everything logged."""
+    logged: dict = {}
+    monkeypatch.setattr(module, "log", lambda key, val, **kw: logged.__setitem__(key, val))
+    monkeypatch.setattr(module, "log_dict", lambda mapping, **kw: logged.update(mapping))
+    return logged
+
+
+def attach_fake_trainer(module: ActivityGraphModule, overfit_batches: int = 0) -> ActivityGraphModule:
+    """Give the module a minimal stand-in trainer so ``configure_optimizers`` can read ``overfit_batches``."""
+    module._trainer = types.SimpleNamespace(overfit_batches=overfit_batches)
+    return module
 
 
 class TestTrainingStep:
     def test_returns_finite_scalar(self, monkeypatch):
         module = make_module()
         monkeypatch.setattr(module, "log", lambda *a, **kw: None)
-        batch = make_batch()
-        loss = module.training_step(batch, 0)
+        loss = module.training_step(make_batch(), 0)
         assert loss.ndim == 0
         assert loss.isfinite()
 
@@ -52,13 +83,13 @@ class TestTrainingStep:
         """L1 regularisation with large lambda_reg must yield strictly higher loss."""
         batch = make_batch(seed=1)
 
-        module_base = make_module(reg=None)
-        monkeypatch.setattr(module_base, "log", lambda *a, **kw: None)
-        loss_base = module_base.training_step(batch, 0).item()
+        base = make_module(reg=None)
+        monkeypatch.setattr(base, "log", lambda *a, **kw: None)
+        loss_base = base.training_step(batch, 0).item()
 
         module_l1 = make_module(reg="l1", lambda_reg=1.0)
         # copy identical weights so the only difference is the L1 term
-        module_l1.model.load_state_dict(module_base.model.state_dict())
+        module_l1.model.load_state_dict(base.model.state_dict())
         monkeypatch.setattr(module_l1, "log", lambda *a, **kw: None)
         loss_l1 = module_l1.training_step(batch, 0).item()
 
@@ -67,22 +98,14 @@ class TestTrainingStep:
     def test_pos_weight_shifts_loss(self, monkeypatch):
         """Larger pos_weight must yield strictly higher loss on positive-heavy batches."""
         batch = make_batch(seed=2)
-        # ensure at least one positive label
-        batch.y[0] = 1.0
+        batch.y[0] = 1.0  # ensure at least one positive label
 
-        module_low = ActivityGraphModule(
-            model=NodeMLP(2, NUM_NODE_FEATURES, 8, 1),
-            lr=1e-3,
-            pos_weight=torch.tensor(1.0),
-        )
+        module_low = make_module(pos_weight=1.0)
         monkeypatch.setattr(module_low, "log", lambda *a, **kw: None)
         loss_low = module_low.training_step(batch, 0).item()
 
-        module_high = ActivityGraphModule(
-            model=module_low.model,
-            lr=1e-3,
-            pos_weight=torch.tensor(10.0),
-        )
+        # reuse identical weights, only the pos_weight differs
+        module_high = ActivityGraphModule(model=module_low.model, lr=1e-3, pos_weight=torch.tensor(10.0))
         monkeypatch.setattr(module_high, "log", lambda *a, **kw: None)
         loss_high = module_high.training_step(batch, 0).item()
 
@@ -90,18 +113,13 @@ class TestTrainingStep:
 
 
 class TestValidationStep:
-    def test_metrics_keys_logged(self, monkeypatch):
-        """After validation_step + on_validation_epoch_end, all six expected keys must be logged."""
-        logged = {}
+    def test_all_six_val_keys_logged(self, monkeypatch):
+        """validation_step + on_validation_epoch_end must populate the two BCE and four ranking keys."""
         module = make_module()
-
-        # ensure each graph has at least one positive label so ranking metrics are computed
         batch = make_batch(num_graphs=3, num_nodes=8)
-        for i in range(batch.num_graphs):
-            mask = batch.batch == i
-            batch.y[mask][0] = 1.0
+        force_positive_per_graph(batch)
 
-        monkeypatch.setattr(module, "log", lambda key, val, **kw: logged.update({key: val}))
+        logged = capture_logs(module, monkeypatch)
 
         module.eval()
         with torch.no_grad():
@@ -111,31 +129,112 @@ class TestValidationStep:
         k = module.k
         expected = {"val_bce", "val_bce_weighted", f"val_precision@{k}", f"val_recall@{k}", "val_mrr", f"val_ndcg@{k}"}
         assert expected.issubset(logged.keys())
+        assert all(torch.as_tensor(logged[key]).isfinite() for key in expected)
 
-    def test_val_outputs_cleared_after_epoch(self, monkeypatch):
+    def test_ranking_metrics_match_reference(self, monkeypatch):
+        """torchmetrics precision/recall/ndcg must match the per-graph metrics.py functions.
+
+        One graph == one user_id, so the Retrieval* grouping is per graph and the unweighted mean
+        over non-empty groups equals the old per-graph average. MRR is excluded on purpose:
+        RetrievalMRR uses first-relevant-rank, not mean-over-positives, so its value differs.
+        """
         module = make_module()
-        batch = make_batch()
-        monkeypatch.setattr(module, "log", lambda *a, **kw: None)
+        k = module.k
+        batch = make_batch(num_graphs=4, num_nodes=8, seed=7)
+        force_positive_per_graph(batch)
+        capture_logs(module, monkeypatch)
+
+        module.eval()
+        with torch.no_grad():
+            out = module(extract_features(batch, module.full_info), batch.edge_index, batch.edge_attr, batch.batch)
+
+        precisions, recalls, ndcgs = [], [], []
+        for i in range(batch.num_graphs):
+            mask = batch.batch == i
+            scores = out[mask].squeeze()
+            labels = batch.y[mask].squeeze()
+            if labels.sum().int().item() == 0:
+                continue
+            precisions.append(float(precision_at_k(scores, labels, k)))
+            recalls.append(float(recall_at_k(scores, labels, k)))
+            ndcgs.append(float(ndcg_at_k(scores, labels, k)))
+
+        ref = {
+            f"val_precision@{k}": sum(precisions) / len(precisions),
+            f"val_recall@{k}": sum(recalls) / len(recalls),
+            f"val_ndcg@{k}": sum(ndcgs) / len(ndcgs),
+        }
+
+        with torch.no_grad():
+            module.validation_step(batch, 0)
+        actual = module.val_metrics.compute()
+
+        for key, expected in ref.items():
+            torch.testing.assert_close(actual[key].item(), expected, rtol=1e-5, atol=1e-6)
+
+    def test_metrics_reset_between_epochs(self, monkeypatch):
+        """on_validation_epoch_end must reset metric state, so a repeated epoch gives identical numbers."""
+        module = make_module()
+        batch = make_batch(num_graphs=3, num_nodes=8, seed=3)
+        force_positive_per_graph(batch)
+        capture_logs(module, monkeypatch)
+
         module.eval()
         with torch.no_grad():
             module.validation_step(batch, 0)
-        module.on_validation_epoch_end()
-        assert module._val_outputs == []
+        first = {key: val.item() for key, val in module.val_metrics.compute().items()}
+        module.on_validation_epoch_end()  # logs + resets
+
+        with torch.no_grad():
+            module.validation_step(batch, 0)
+        second = {key: val.item() for key, val in module.val_metrics.compute().items()}
+
+        # Without a reset, re-feeding the same user_ids appends docs to existing groups and shifts
+        # the result. Equality confirms state was cleared.
+        assert first == second
+
+
+class TestTestStep:
+    def test_all_six_test_keys_logged(self, monkeypatch):
+        """test_step + on_test_epoch_end must populate the two BCE and four ranking test keys."""
+        module = make_module()
+        batch = make_batch(num_graphs=3, num_nodes=8)
+        force_positive_per_graph(batch)
+
+        logged = capture_logs(module, monkeypatch)
+
+        module.eval()
+        with torch.no_grad():
+            module.test_step(batch, 0)
+        module.on_test_epoch_end()
+
+        k = module.k
+        expected = {
+            "test_bce",
+            "test_bce_weighted",
+            f"test_precision@{k}",
+            f"test_recall@{k}",
+            "test_mrr",
+            f"test_ndcg@{k}",
+        }
+        assert expected.issubset(logged.keys())
 
 
 class TestConfigureOptimizers:
     def test_returns_optimizer_and_scheduler(self):
-        module = make_module()
-        result = module.configure_optimizers()
+        result = attach_fake_trainer(make_module()).configure_optimizers()
         assert "optimizer" in result
         assert "lr_scheduler" in result
 
     def test_scheduler_monitors_val_bce(self):
-        module = make_module()
-        result = module.configure_optimizers()
+        result = attach_fake_trainer(make_module()).configure_optimizers()
         assert result["lr_scheduler"]["monitor"] == "val_bce"
 
     def test_optimizer_is_adamw(self):
-        module = make_module()
-        result = module.configure_optimizers()
+        result = attach_fake_trainer(make_module()).configure_optimizers()
         assert isinstance(result["optimizer"], torch.optim.AdamW)
+
+    def test_no_scheduler_when_overfitting(self):
+        """In overfit mode the scheduler is skipped and a bare optimizer is returned."""
+        result = attach_fake_trainer(make_module(), overfit_batches=5).configure_optimizers()
+        assert isinstance(result, torch.optim.AdamW)

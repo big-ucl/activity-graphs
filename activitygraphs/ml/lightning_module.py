@@ -1,7 +1,5 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
-from typing import Any
-
 import lightning as L
 import torch
 import torch.nn.functional as F
@@ -64,6 +62,8 @@ class ActivityGraphModule(L.LightningModule):
         k: Rank cutoff for precision, recall, and NDCG metrics.
     """
 
+    pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
+
     def __init__(
         self,
         model: torch.nn.Module,
@@ -84,7 +84,7 @@ class ActivityGraphModule(L.LightningModule):
         self.full_info = full_info
         self.k = k
         self.weight_decay = weight_decay
-
+        
         metrics = MetricCollection({
             f"precision@{k}": RetrievalPrecision(top_k=k, empty_target_action="skip"),
             f"recall@{k}": RetrievalRecall(top_k=k, empty_target_action="skip"),
@@ -105,30 +105,6 @@ class ActivityGraphModule(L.LightningModule):
         return self.model(x, edge_index, edge_attr, batch)
 
     def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
-        if self.current_epoch == 0 and batch_idx == 0:
-            print(f"[overfit-debug] num_nodes={batch.num_nodes} num_graphs={batch.num_graphs}")
-            print(f"[overfit-debug] y.sum()={batch.y.sum().item()} y.numel()={batch.y.numel()}")
-            print(f"[overfit-debug] x.isnan().any()={torch.isnan(batch.x).any().item()}")
-            print(
-                f"[overfit-debug] x.min/max/mean={batch.x.min().item():.4f}/{batch.x.max().item():.4f}/{batch.x.mean().item():.4f}"
-            )
-            print(f"[overfit-debug] pos_weight={self.pos_weight.item()}")
-
-        if self.current_epoch == self.trainer.max_epochs - 1 and batch_idx == 0:
-            with torch.no_grad():
-                out_debug = self(
-                    extract_features(batch, self.full_info),
-                    batch.edge_index,
-                    batch.edge_attr,
-                    batch.batch,
-                )
-                print(
-                    f"[overfit-debug-final] out std={out_debug.std().item():.4f} "
-                    f"min={out_debug.min().item():.4f} "
-                    f"max={out_debug.max().item():.4f} "
-                    f"mean={out_debug.mean().item():.4f}"
-                )
-
         x = extract_features(batch, self.full_info)
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
         loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
@@ -146,7 +122,11 @@ class ActivityGraphModule(L.LightningModule):
         self.log("val_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("val_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
-        self.val_metrics.update(out.squeeze(-1), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch])
+        # torchmetrics Retrieval* treat preds as probabilities and drop preds <= 0, so feed sigmoid
+        # (monotonic, preserves ranking) rather than raw logits.
+        self.val_metrics.update(
+            out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch]
+        )
 
     def on_validation_epoch_end(self) -> None:
         self.log_dict(self.val_metrics.compute())
@@ -158,7 +138,10 @@ class ActivityGraphModule(L.LightningModule):
         self.log("test_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("test_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
-        self.test_metrics.update(out.squeeze(-1), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch])
+        # See validation_step: feed sigmoid so the Retrieval* preds > 0 filter does not drop nodes.
+        self.test_metrics.update(
+            out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch]
+        )
 
     def _common_val_test_step(self, batch: pyg.data.Batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = extract_features(batch, self.full_info)
