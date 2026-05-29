@@ -249,7 +249,7 @@ def split_indices(
 
     proportional_val_size = val_size / (1 - test_size)
     train_idx, val_idx = train_test_split(
-        list(range(len(dataset))),
+        train_val_idx,
         test_size=proportional_val_size,
         random_state=seed,
     )

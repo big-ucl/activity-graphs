@@ -31,7 +31,8 @@ class ActivityDataModule(L.LightningDataModule):
 
     Args:
         cfg: Hydra config containing dataset paths.
-        test_size: Fraction of individuals reserved for validation.
+        val_size: Fraction of individuals reserved for validation.
+        test_size: Fraction of individuals reserved for testing.
         seed: Random seed for the train/validation split.
         batch_size: Number of graphs per DataLoader batch.
         project_root: Optional override for the project root path.
@@ -77,6 +78,9 @@ class ActivityDataModule(L.LightningDataModule):
     def val_dataloader(self) -> pyg.loader.DataLoader:
         return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size)
 
+    def test_dataloader(self) -> pyg.loader.DataLoader:
+        return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size)
+
     @property
     def train_dataset(self) -> ActivityDataset:
         if self._train_dataset is None:
@@ -88,6 +92,12 @@ class ActivityDataModule(L.LightningDataModule):
         if self._val_dataset is None:
             raise RuntimeError("Call setup() before accessing val_dataset.")
         return self._val_dataset
+
+    @property
+    def test_dataset(self) -> ActivityDataset:
+        if self._test_dataset is None:
+            raise RuntimeError("Call setup() before accessing test_dataset.")
+        return self._test_dataset
 
     @property
     def scalers(self) -> FittedScalers:
