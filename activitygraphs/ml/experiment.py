@@ -15,20 +15,6 @@ from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_feat
 from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 
 
-def compute_training_weights(loader: pyg.loader.DataLoader) -> torch.Tensor:
-    """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the full loader."""
-    num_neg = torch.tensor(0, dtype=torch.float)
-    num_pos = torch.tensor(0, dtype=torch.float)
-
-    for batch in loader:
-        num_neg += (batch.y == 0).sum()
-        num_pos += batch.y.sum()
-
-    weights = num_neg / num_pos
-    return torch.sqrt(weights)
-
-
-
 @torch.no_grad()
 def _evaluate_bce(
     device: torch.device,
@@ -196,6 +182,9 @@ def run_experiment(
 
     if fast_dev_run:
         return pl.DataFrame()
+
+    if model_save_dir is not None:
+        trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
     raw = pl.read_csv(logger.experiment.metrics_file_path).sort("step")
     metric_cols = [c for c in raw.columns if c not in ("epoch", "step")]

@@ -1,5 +1,7 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
+from typing import Any
+
 import lightning as L
 import torch
 import torch.nn.functional as F
@@ -139,11 +141,7 @@ class ActivityGraphModule(L.LightningModule):
         return loss
 
     def validation_step(self, batch: pyg.data.Batch, batch_idx: int) -> None:
-        x = extract_features(batch, self.full_info)
-        out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
-
-        bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
-        bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
+        out, bce, bce_weighted = self._common_val_test_step(batch, batch_idx)
 
         self.log("val_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("val_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
@@ -153,6 +151,29 @@ class ActivityGraphModule(L.LightningModule):
     def on_validation_epoch_end(self) -> None:
         self.log_dict(self.val_metrics.compute())
         self.val_metrics.reset()
+
+    def test_step(self, batch: pyg.data.Batch, batch_idx: int) -> None:
+        out, bce, bce_weighted = self._common_val_test_step(batch, batch_idx)
+
+        self.log("test_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
+        self.log("test_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
+
+        self.test_metrics.update(out.squeeze(-1), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch])
+
+    def _common_val_test_step(
+        self, batch: pyg.data.Batch, batch_idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x = extract_features(batch, self.full_info)
+        out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
+
+        bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
+        bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
+
+        return out, bce, bce_weighted
+
+    def on_test_epoch_end(self) -> None:
+        self.log_dict(self.test_metrics.compute())
+        self.test_metrics.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

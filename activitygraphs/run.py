@@ -12,9 +12,9 @@ from activitygraphs.ml.baselines import (
     NodeBaseline,
     UniformBaseline,
 )
-from activitygraphs.ml.datamodule import ActivityDataModule
+from activitygraphs.ml.datamodule import ActivityDataModule, compute_training_weights
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.experiment import compute_training_weights, evaluate_baseline, run_experiment
+from activitygraphs.ml.experiment import evaluate_baseline, run_experiment
 from activitygraphs.ml.lightning_module import extracted_features_dim
 from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
 
@@ -103,10 +103,11 @@ def comparison_experiment(cfg: Config):
     Results are written to ``cfg.paths.reports/data/geneva-results.parquet``.
     """
     batch_size = 64
-    test_size = 0.2
+    val_size = 0.2
+    test_size = 0.1
     seed = 42
 
-    datamodule = ActivityDataModule(cfg, test_size=test_size, seed=seed, batch_size=batch_size)
+    datamodule = ActivityDataModule(cfg, val_size=val_size, test_size=test_size, seed=seed, batch_size=batch_size)
     datamodule.setup()
 
     train_dataset = datamodule.train_dataset

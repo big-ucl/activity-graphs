@@ -1,22 +1,21 @@
 """Unit tests for ActivityGraphModule."""
 
+import pytest
 import torch
 import torch_geometric as pyg
-import pytest
 
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.models import NodeMLP
-
 
 NUM_NODE_FEATURES = 6
 NUM_EDGE_FEATURES = 2
 
 
-def make_batch(num_graphs: int = 2, num_nodes: int = 5, seed: int = 0) -> pyg.data.Batch:
+def make_batch(num_graphs: int = 2, num_nodes: int = 5, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
     """Return a synthetic PyG Batch with binary node labels."""
     rng = torch.Generator().manual_seed(seed)
     graphs = []
-    for _ in range(num_graphs):
+    for g in range(num_graphs):
         x = torch.rand(num_nodes, NUM_NODE_FEATURES, generator=rng)
         y = torch.randint(0, 2, (num_nodes, 1), generator=rng).float()
         # simple chain edges
@@ -24,7 +23,8 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 5, seed: int = 0) -> pyg.da
         dst = torch.arange(1, num_nodes)
         edge_index = torch.stack([torch.cat([src, dst]), torch.cat([dst, src])], dim=0)
         edge_attr = torch.rand(edge_index.size(1), NUM_EDGE_FEATURES, generator=rng)
-        graphs.append(pyg.data.Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y))
+        user_id = torch.tensor([start_user_id + g], dtype=torch.long)
+        graphs.append(pyg.data.Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, user_id=user_id))
     return pyg.data.Batch.from_data_list(graphs)
 
 

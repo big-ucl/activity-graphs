@@ -17,8 +17,8 @@ from tqdm import tqdm
 
 from activitygraphs.base import IS_HOME_COL_IDX
 from activitygraphs.config import Config
+from activitygraphs.dataprocessing import convert_to_torch, load_data
 from activitygraphs.utils import get_project_root
-from activitygraphs.dataprocessing import load_data, convert_to_torch
 
 
 class GenevaDataset(pyg.data.InMemoryDataset):
@@ -229,29 +229,37 @@ def load_or_build_dataset(
 
 def split_indices(
     dataset: ActivityDataset,
+    val_size: float,
     test_size: float,
     seed: int,
     cache_path: Path | None = None,
-) -> tuple[list[int], list[int]]:
-    """Return (train_indices, test_indices). Loads from ``cache_path`` if it exists, otherwise splits and caches."""
+) -> tuple[list[int], list[int], list[int]]:
+    """Return (train_indices, val_indices, test_indices). Loads from ``cache_path`` if it exists, otherwise splits and caches."""
     if cache_path is not None and cache_path.exists():
         with cache_path.open() as f:
             indices = json.load(f)
 
-        return indices["train"], indices["test"]
+        return indices["train"], indices["val"], indices["test"]
 
-    train_idx, test_idx = train_test_split(
+    train_val_idx, test_idx = train_test_split(
         list(range(len(dataset))),
         test_size=test_size,
+        random_state=seed,
+    )
+
+    proportional_val_size = val_size / (1 - test_size)
+    train_idx, val_idx = train_test_split(
+        list(range(len(dataset))),
+        test_size=proportional_val_size,
         random_state=seed,
     )
 
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("w") as f:
-            json.dump({"train": train_idx, "test": test_idx, "seed": seed}, f)
+            json.dump({"train": train_idx, "val": val_idx, "test": test_idx, "seed": seed}, f)
 
-    return train_idx, test_idx
+    return train_idx, val_idx, test_idx
 
 
 def fit_scalers(
@@ -345,23 +353,24 @@ def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
 
 def load_dataset(
     cfg: Config,
+    val_size: float,
     test_size: float,
     seed: int,
     project_root: Path | None = None,
     **build_kwargs,
-) -> tuple[ActivityDataset, ActivityDataset, FittedScalers]:
-    """Load, split, scale, and return the dataset as train/test subsets with cached scalers.
+) -> tuple[ActivityDataset, ActivityDataset, ActivityDataset, FittedScalers]:
+    """Load, split, scale, and return the dataset as train/val/test subsets with cached scalers.
 
     Split indices are cached in ``splits.json``; scalers are cached in ``scalers.pkl``
     under ``cfg.data.paths.pyg_datasets``.
 
     Returns:
-        Tuple ``(train_dataset, test_dataset, scalers)``.
+        Tuple ``(train_dataset, val_dataset, test_dataset, scalers)``.
     """
     project_root = get_project_root(project_root)
     pyg_dir = project_root / cfg.data.paths.pyg_datasets
-    splits_cache = pyg_dir / "splits.json"
-    scalers_cache = pyg_dir / f"scalers_{seed}_{test_size}.pkl"
+    splits_cache = pyg_dir / f"splits_{seed}_val{val_size}_test{test_size}.json"
+    scalers_cache = pyg_dir / f"scalers_{seed}_val{val_size}_test{test_size}.pkl"
 
     positional_encodings_transforms = T.Compose([
         T.AddRandomWalkPE(walk_length=20, attr_name=None),
@@ -372,7 +381,7 @@ def load_dataset(
         cfg, project_root=project_root, pre_transform=positional_encodings_transforms, **build_kwargs
     )
 
-    train_idx, test_idx = split_indices(dataset, test_size, seed, cache_path=splits_cache)
+    train_idx, val_idx, test_idx = split_indices(dataset, val_size, test_size, seed, cache_path=splits_cache)
 
     if scalers_cache.exists():
         scalers = FittedScalers.load(scalers_cache)
@@ -382,7 +391,12 @@ def load_dataset(
 
     apply_scalers(dataset, scalers)
 
-    return cast(ActivityDataset, dataset[train_idx]), cast(ActivityDataset, dataset[test_idx]), scalers
+    return (
+        cast(ActivityDataset, dataset[train_idx]),
+        cast(ActivityDataset, dataset[val_idx]),
+        cast(ActivityDataset, dataset[test_idx]),
+        scalers,
+    )
 
 
 def load_gva_dataset(

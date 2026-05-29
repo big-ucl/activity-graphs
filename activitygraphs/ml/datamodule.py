@@ -10,6 +10,19 @@ from activitygraphs.config import Config
 from activitygraphs.ml.dataset import ActivityDataset, FittedScalers, load_dataset
 
 
+def compute_training_weights(loader: pyg.loader.DataLoader) -> torch.Tensor:
+    """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the full loader."""
+    num_neg = torch.tensor(0, dtype=torch.float)
+    num_pos = torch.tensor(0, dtype=torch.float)
+
+    for batch in loader:
+        num_neg += (batch.y == 0).sum()
+        num_pos += batch.y.sum()
+
+    weights = num_neg / num_pos
+    return torch.sqrt(weights)
+
+
 class ActivityDataModule(L.LightningDataModule):
     """LightningDataModule wrapping ``load_dataset`` for activity graph prediction.
 
@@ -27,6 +40,7 @@ class ActivityDataModule(L.LightningDataModule):
     def __init__(
         self,
         cfg: Config,
+        val_size: float,
         test_size: float,
         seed: int,
         batch_size: int,
@@ -34,6 +48,7 @@ class ActivityDataModule(L.LightningDataModule):
     ):
         super().__init__()
         self.cfg = cfg
+        self.val_size = val_size
         self.test_size = test_size
         self.seed = seed
         self.batch_size = batch_size
@@ -41,6 +56,7 @@ class ActivityDataModule(L.LightningDataModule):
 
         self._train_dataset: ActivityDataset | None = None
         self._val_dataset: ActivityDataset | None = None
+        self._test_dataset: ActivityDataset | None = None
         self._scalers: FittedScalers | None = None
         self._pos_weight: torch.Tensor | None = None
 
@@ -48,11 +64,10 @@ class ActivityDataModule(L.LightningDataModule):
         if self._train_dataset is not None:
             return
 
-        from activitygraphs.ml.experiment import compute_training_weights
-
-        self._train_dataset, self._val_dataset, self._scalers = load_dataset(
-            self.cfg, self.test_size, self.seed, self.project_root
+        self._train_dataset, self._val_dataset, self._test_dataset, self._scalers = load_dataset(
+            self.cfg, self.val_size, self.test_size, self.seed, self.project_root
         )
+
         train_loader = pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size)
         self._pos_weight = compute_training_weights(train_loader)
 
