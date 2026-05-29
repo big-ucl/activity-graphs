@@ -4,9 +4,10 @@ import lightning as L
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
+from torchmetrics import MetricCollection
+from torchmetrics.retrieval import RetrievalMRR, RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
 
 
 def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use_demographics: bool = True):
@@ -81,7 +82,16 @@ class ActivityGraphModule(L.LightningModule):
         self.full_info = full_info
         self.k = k
         self.weight_decay = weight_decay
-        self._val_outputs: list[dict] = []
+
+        metrics = MetricCollection({
+            f"precision@{k}": RetrievalPrecision(top_k=k, empty_target_action="skip"),
+            f"recall@{k}": RetrievalRecall(top_k=k, empty_target_action="skip"),
+            "mrr": RetrievalMRR(empty_target_action="skip"),
+            f"ndcg@{k}": RetrievalNormalizedDCG(top_k=k, empty_target_action="skip"),
+        })
+
+        self.val_metrics = metrics.clone(prefix="val_")
+        self.test_metrics = metrics.clone(prefix="test_")
 
     def forward(
         self,
@@ -138,34 +148,11 @@ class ActivityGraphModule(L.LightningModule):
         self.log("val_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("val_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
-        k = self.k
-        for i in range(batch.num_graphs):
-            mask = batch.batch == i
-            scores = out[mask].squeeze()
-            labels = batch.y[mask].squeeze()
-
-            if labels.sum().int().item() == 0:
-                continue
-
-            self._val_outputs.append({
-                f"precision@{k}": precision_at_k(scores, labels, k),
-                f"recall@{k}": recall_at_k(scores, labels, k),
-                "mrr": mean_reciprocal_rank(scores, labels),
-                f"ndcg@{k}": ndcg_at_k(scores, labels, k),
-            })
+        self.val_metrics.update(out.squeeze(-1), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch])
 
     def on_validation_epoch_end(self) -> None:
-        if not self._val_outputs:
-            return
-
-        k = self.k
-        keys = [f"precision@{k}", f"recall@{k}", "mrr", f"ndcg@{k}"]
-
-        for key in keys:
-            mean_val = sum(d[key] for d in self._val_outputs) / len(self._val_outputs)
-            self.log(f"val_{key}", mean_val)
-
-        self._val_outputs.clear()
+        self.log_dict(self.val_metrics.compute())
+        self.val_metrics.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
