@@ -21,7 +21,7 @@ class OverfitDebugCallback(L.Callback):
             print(f"[overfit-debug] y.sum()={batch.y.sum().item()} y.numel()={batch.y.numel()}")
             print(f"[overfit-debug] x.isnan().any()={torch.isnan(batch.x).any().item()}")
             print(f"[overfit-debug] x.min/max/mean={b_min:.4f}/{b_max:.4f}/{b_mean:.4f}")
-            print(f"[overfit-debug] pos_weight={self.pos_weight.item()}")
+            print(f"[overfit-debug] pos_weight={pl_module.pos_weight.item()}")
 
         if trainer.max_epochs is not None and trainer.current_epoch == trainer.max_epochs - 1:
             with torch.no_grad():
