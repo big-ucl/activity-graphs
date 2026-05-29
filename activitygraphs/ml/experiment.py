@@ -8,7 +8,7 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
-from activitygraphs.ml.callbacks import OverfitDebugCallback
+from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 
@@ -19,14 +19,20 @@ def evaluate_baseline(
     name: str,
     k: int = 5,
 ) -> pl.DataFrame:
-    """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format."""
+    """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
+
+    Returns two stage-tagged rows (one ``stage="fit"`` with the ``val_*`` metrics, one
+    ``stage="test"`` with the ``test_*`` metrics) so baseline frames align with the
+    ``run_experiment`` output.
+    """
     baseline_module = ActivityGraphModule(model=baseline, lr=0.0, pos_weight=datamodule.pos_weight, k=k)
     trainer = L.Trainer(logger=False, enable_progress_bar=False)
     (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
     (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
 
-    results_dict = {key: [val] for key, val in {**val_results, **test_results}.items()}
-    return pl.DataFrame({"name": [name], "epoch": [0], "train_loss": [0.0], **results_dict})
+    fit_row = {"name": name, "stage": "fit", "epoch": 0, "train_loss": 0.0, **val_results}
+    test_row = {"name": name, "stage": "test", "epoch": None, **test_results}
+    return pl.DataFrame([fit_row, test_row])
 
 
 def run_experiment(
@@ -64,8 +70,11 @@ def run_experiment(
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
 
     Returns:
-        DataFrame with columns ``name``, ``epoch``, ``train_loss``, ``val_bce``,
-        ``val_bce_weighted``, ``val_precision@5``, ``val_recall@5``, ``val_mrr``, ``val_ndcg@5``.
+        Long-format DataFrame tagged by ``stage``: one ``stage="fit"`` row per epoch carrying
+        ``train_loss`` and the ``val_*`` metrics, plus (when a test run executed) one
+        ``stage="test"`` row carrying the ``test_*`` metrics. Columns: ``name``, ``stage``,
+        ``epoch``, ``train_loss``, ``val_*``, ``test_*``; cells absent for a row's stage are null.
+        Empty when ``fast_dev_run`` is True.
     """
     name = name or model.__class__.__name__
 
@@ -82,7 +91,8 @@ def run_experiment(
 
     # Build the callbacks
 
-    callbacks: list[L.Callback] = []
+    collector = EpochMetricsCollector()
+    callbacks: list[L.Callback] = [collector]
 
     if model_save_dir is not None:
         callbacks.append(
@@ -117,13 +127,8 @@ def run_experiment(
     if model_save_dir is not None:
         trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-    raw = pl.read_csv(logger.experiment.metrics_file_path).sort("step")
-    metric_cols = [c for c in raw.columns if c not in ("epoch", "step")]
-    return (
-        raw
-        .group_by("epoch")
-        .agg([pl.col(c).drop_nulls().last().alias(c) for c in metric_cols])
-        .sort("epoch")
-        .with_columns(pl.lit(name).alias("name"))
-        .select(["name", "epoch"] + metric_cols)
-    )
+    # The collector accumulated fit rows during `fit` and the test row during `test` (same trainer,
+    # same callback instance). `CSVLogger` is kept only for the raw on-disk artifact.
+    results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
+    lead = ["name", "stage", "epoch"]
+    return results.select(lead + [c for c in results.columns if c not in lead])

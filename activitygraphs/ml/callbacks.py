@@ -32,3 +32,32 @@ class OverfitDebugCallback(L.Callback):
                 f"[overfit-debug-final] out std={out.std().item():.4f} "
                 f"min={out.min().item():.4f} max={out.max().item():.4f} mean={out.mean().item():.4f}"
             )
+
+
+class EpochMetricsCollector(L.Callback):
+    """Collects per-epoch fit metrics and a final test row as stage-tagged dicts.
+
+    Records one ``stage="fit"`` row per training epoch (``train_*``/``val_*`` metrics) and one
+    ``stage="test"`` row per test run (``test_*`` metrics), avoiding the CSV write-and-reparse.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict] = []
+
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if trainer.sanity_checking:
+            return
+
+        metrics = {
+            key: value.item()
+            for key, value in trainer.callback_metrics.items()
+            if key.startswith(("train_", "val_"))
+        }
+        if metrics:
+            self.rows.append({"stage": "fit", "epoch": trainer.current_epoch, **metrics})
+
+    def on_test_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        metrics = {
+            key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith("test_")
+        }
+        self.rows.append({"stage": "test", "epoch": None, **metrics})
