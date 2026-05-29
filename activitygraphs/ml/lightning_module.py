@@ -60,6 +60,7 @@ class ActivityGraphModule(L.LightningModule):
         lambda_reg: L1 coefficient (ignored when ``reg`` is None).
         full_info: If True, augment node features with home indicator and distances.
         k: Rank cutoff for precision, recall, and NDCG metrics.
+        schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
     """
 
     pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
@@ -74,6 +75,7 @@ class ActivityGraphModule(L.LightningModule):
         full_info: bool = False,
         k: int = 5,
         weight_decay: float = 1e-4,
+        schedule_lr: bool = False,
     ):
         super().__init__()
         self.model = model
@@ -84,7 +86,8 @@ class ActivityGraphModule(L.LightningModule):
         self.full_info = full_info
         self.k = k
         self.weight_decay = weight_decay
-        
+        self.schedule_lr = schedule_lr
+
         metrics = MetricCollection({
             f"precision@{k}": RetrievalPrecision(top_k=k, empty_target_action="skip"),
             f"recall@{k}": RetrievalRecall(top_k=k, empty_target_action="skip"),
@@ -161,8 +164,8 @@ class ActivityGraphModule(L.LightningModule):
 
         # Only add a scheduler if not trying to overfit (i.e. not in diagnostic mode). Validation error is not a useful
         # signal when purposefully overfitting
-        if self.trainer.overfit_batches == 0:
+        if self.trainer.overfit_batches == 0 and self.schedule_lr:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"}}
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce_weighted"}}
 
         return optimizer

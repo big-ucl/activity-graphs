@@ -1,6 +1,6 @@
 """Schema validation, geometry helpers, and I/O utilities."""
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Hashable, TypeVar

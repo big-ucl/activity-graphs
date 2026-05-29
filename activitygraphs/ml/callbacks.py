@@ -51,15 +51,11 @@ class EpochMetricsCollector(L.Callback):
             return
 
         metrics = {
-            key: value.item()
-            for key, value in trainer.callback_metrics.items()
-            if key.startswith(("train_", "val_"))
+            key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith(("train_", "val_"))
         }
         if metrics:
             self.rows.append({"stage": "fit", "epoch": trainer.current_epoch, **metrics})
 
     def on_test_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        metrics = {
-            key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith("test_")
-        }
+        metrics = {key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith("test_")}
         self.rows.append({"stage": "test", "epoch": None, **metrics})

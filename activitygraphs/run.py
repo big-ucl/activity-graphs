@@ -71,7 +71,12 @@ def build_mlp(
 def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     """Concatenate result DataFrames and write to ``<path>/data/<name>-results.parquet``."""
     path = Path(path) / "data"
-    pl.concat(results, how="diagonal").write_parquet(path / f"{name}-results.parquet")
+
+    ends = (f.stem.split("-")[-1] for f in path.iterdir() if f.suffix == ".parquet" and f.name.startswith(name))
+    nums = (int(end) if end.isdecimal() else 0 for end in ends)
+    max_num = max([0, *nums])
+
+    pl.concat(results, how="diagonal").write_parquet(path / f"{name}-results-{max_num + 1}.parquet")
 
 
 def measure_baselines(num_nodes, datamodule: ActivityDataModule):
@@ -130,7 +135,7 @@ def comparison_experiment(cfg: Config):
     else:
         dropout = 0.2
         epochs = cfg.train.epochs
-        lr = 1e-4
+        lr = 1e-3
         weight_decay = 1e-4
 
     mlp = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
@@ -154,6 +159,7 @@ def comparison_experiment(cfg: Config):
         model_save_dir=models_dir,
         fast_dev_run=cfg.train.fast_dev_run,
         overfit_batches=cfg.train.overfit_batches,
+        schedule_lr=cfg.train.schedule_lr,
         debug=debug,
     )
 
@@ -167,13 +173,13 @@ def comparison_experiment(cfg: Config):
         save_results(cfg.paths.reports, cfg.data.name, results_mlp, results_gat, results_gps, *baseline_results)
         return
 
-    mlp_l1 = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
-    gat_l1 = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
-    gps_l1 = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
+    # mlp_l1 = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
+    # gat_l1 = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
+    # gps_l1 = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
 
-    results_mlp_l1 = my_run_experiment(model=mlp_l1, name="MLP-l1", reg="l1")
-    results_gat_l1 = my_run_experiment(model=gat_l1, name=f"GATSkip-{gat_layers}-res-l1", reg="l1")
-    results_gps_l1 = my_run_experiment(model=gps_l1, name=f"GTransformer-{gps_layers}-res-l1", reg="l1")
+    # results_mlp_l1 = my_run_experiment(model=mlp_l1, name="MLP-l1", reg="l1")
+    # results_gat_l1 = my_run_experiment(model=gat_l1, name=f"GATSkip-{gat_layers}-res-l1", reg="l1")
+    # results_gps_l1 = my_run_experiment(model=gps_l1, name=f"GTransformer-{gps_layers}-res-l1", reg="l1")
 
     if cfg.train.fast_dev_run:
         return
@@ -184,8 +190,8 @@ def comparison_experiment(cfg: Config):
         results_mlp,
         results_gat,
         results_gps,
-        results_mlp_l1,
-        results_gat_l1,
-        results_gps_l1,
+        # results_mlp_l1,
+        # results_gat_l1,
+        # results_gps_l1,
         *baseline_results,
     )

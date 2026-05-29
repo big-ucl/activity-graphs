@@ -3,10 +3,9 @@
 from pathlib import Path
 
 import geopandas as gpd
-import pandas as pd
 import polars as pl
 
-from activitygraphs.config import GenevaStatsInputs, StatsInputs, TorontoStatsInputs
+from activitygraphs.config import GenevaStatsInputs, TorontoStatsInputs
 from activitygraphs.utils import gdf_to_polars
 
 
@@ -57,7 +56,6 @@ def add_toronto_population_job_statistics(
     """
     project_root: Path = project_root if project_root is not None else Path(".")
 
-    utm_crs = locations.estimate_utm_crs()
     locations_df = gdf_to_polars(locations).lazy()
 
     # Load census data to find population and area in km^2

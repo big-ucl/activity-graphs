@@ -201,6 +201,7 @@ class TrainConfig:
 
     fast_dev_run: bool
     overfit_batches: int
+    schedule_lr: bool
     debug: bool
 
 

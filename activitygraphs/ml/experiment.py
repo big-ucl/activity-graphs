@@ -48,6 +48,7 @@ def run_experiment(
     fast_dev_run: bool = False,
     overfit_batches: int = 0,
     weight_decay: float = 1e-4,
+    schedule_lr: bool = False,
     debug: bool = False,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
@@ -67,6 +68,7 @@ def run_experiment(
         fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
         weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
+        schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
 
     Returns:
@@ -87,6 +89,7 @@ def run_experiment(
         reg=reg,
         full_info=full_info,
         weight_decay=weight_decay,
+        schedule_lr=schedule_lr,
     )
 
     # Build the callbacks
