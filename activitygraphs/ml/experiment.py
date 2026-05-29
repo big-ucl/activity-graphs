@@ -8,6 +8,7 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
+from activitygraphs.ml.callbacks import OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 
@@ -41,6 +42,7 @@ def run_experiment(
     fast_dev_run: bool = False,
     overfit_batches: int = 0,
     weight_decay: float = 1e-4,
+    debug: bool = False,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
@@ -59,6 +61,7 @@ def run_experiment(
         fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
         weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
+        debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
 
     Returns:
         DataFrame with columns ``name``, ``epoch``, ``train_loss``, ``val_bce``,
@@ -77,6 +80,8 @@ def run_experiment(
         weight_decay=weight_decay,
     )
 
+    # Build the callbacks
+
     callbacks: list[L.Callback] = []
 
     if model_save_dir is not None:
@@ -85,6 +90,9 @@ def run_experiment(
                 dirpath=str(model_save_dir), filename=name, save_last=False, save_top_k=1, monitor="val_bce"
             )
         )
+
+    if debug:
+        callbacks.append(OverfitDebugCallback())
 
     log_dir = str(model_save_dir) if model_save_dir is not None else "."
     logger = CSVLogger(save_dir=log_dir, name=name)

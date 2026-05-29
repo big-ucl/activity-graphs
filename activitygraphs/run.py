@@ -120,6 +120,7 @@ def comparison_experiment(cfg: Config):
     mlp_layers = 3
 
     overfitting = cfg.train.overfit_batches > 0
+    debug = overfitting or cfg.train.debug
 
     if overfitting:
         dropout = 0.0
@@ -128,7 +129,7 @@ def comparison_experiment(cfg: Config):
         weight_decay = 0.0
     else:
         dropout = 0.2
-        epochs = 1
+        epochs = cfg.train.epochs
         lr = 1e-4
         weight_decay = 1e-4
 
@@ -153,6 +154,7 @@ def comparison_experiment(cfg: Config):
         model_save_dir=models_dir,
         fast_dev_run=cfg.train.fast_dev_run,
         overfit_batches=cfg.train.overfit_batches,
+        debug=debug,
     )
 
     results_mlp = my_run_experiment(model=mlp, name="MLP")

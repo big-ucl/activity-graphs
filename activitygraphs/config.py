@@ -197,8 +197,11 @@ class OutputPaths:
 class TrainConfig:
     """Training configuration for development and debugging."""
 
+    epochs: int
+
     fast_dev_run: bool
     overfit_batches: int
+    debug: bool
 
 
 @dataclass

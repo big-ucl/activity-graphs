@@ -8,5 +8,8 @@ paths:
   models: models
 
 train:
+  epochs: 50
+
   fast_dev_run: false
   overfit_batches: 0
+  debug: false
