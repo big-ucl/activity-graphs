@@ -10,9 +10,10 @@ from activitygraphs.config import Config
 from activitygraphs.ml.dataset import ActivityDataset, FittedScalers, load_dataset
 
 
-def compute_training_weights(train_dataset: ActivityDataset) -> torch.Tensor:
+def _compute_training_weights(train_dataset: ActivityDataset) -> torch.Tensor:
     """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the full loader."""
-    y = train_dataset.spatial_labels
+    idx = train_dataset.indices()
+    y = train_dataset.spatial_labels[idx]
     num_pos = y.sum()
     return torch.sqrt((y.numel() - num_pos) / num_pos)
 
@@ -63,7 +64,7 @@ class ActivityDataModule(L.LightningDataModule):
             self.cfg, self.val_size, self.test_size, self.seed, self.project_root
         )
 
-        self._pos_weight = compute_training_weights(self._train_dataset)
+        self._pos_weight = _compute_training_weights(self._train_dataset)
 
     def train_dataloader(self) -> pyg.loader.DataLoader:
         return pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=True)
