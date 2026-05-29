@@ -12,7 +12,7 @@ from activitygraphs.ml.baselines import (
     NodeBaseline,
     UniformBaseline,
 )
-from activitygraphs.ml.datamodule import ActivityDataModule, compute_training_weights
+from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.experiment import evaluate_baseline, run_experiment
 from activitygraphs.ml.lightning_module import extracted_features_dim
@@ -71,18 +71,20 @@ def build_mlp(
 def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     """Concatenate result DataFrames and write to ``<path>/data/<name>-results.parquet``."""
     path = Path(path) / "data"
-    pl.concat(results).write_parquet(path / f"{name}-results.parquet")
+    pl.concat(results, how="diagonal").write_parquet(path / f"{name}-results.parquet")
 
 
-def measure_baselines(num_nodes, train_loader, test_loader):
+def measure_baselines(num_nodes, datamodule: ActivityDataModule):
     """Fit and evaluate all four frequency baselines; return a list of result dicts."""
+    datamodule.setup()
+    train_loader = datamodule.train_dataloader()
+
     uniform_base = UniformBaseline()
     global_base = GlobalBaseline().fit(train_loader)
     node_base = NodeBaseline(num_nodes).fit(train_loader)
     conditional_base = ConditionalNodeBaseline(num_nodes).fit(train_loader)
 
     results = []
-    pos_weight = compute_training_weights(train_loader)
 
     for name, baseline in [
         ("Uniform", uniform_base),
@@ -90,7 +92,7 @@ def measure_baselines(num_nodes, train_loader, test_loader):
         ("NodeMarginal", node_base),
         ("ConditionalNodeMarginal", conditional_base),
     ]:
-        res = evaluate_baseline(baseline, test_loader, name, pos_weight=pos_weight)
+        res = evaluate_baseline(baseline, datamodule, name)
         results.append(res)
 
     return results
@@ -126,7 +128,7 @@ def comparison_experiment(cfg: Config):
         weight_decay = 0.0
     else:
         dropout = 0.2
-        epochs = 50
+        epochs = 1
         lr = 1e-4
         weight_decay = 1e-4
 
@@ -137,7 +139,7 @@ def comparison_experiment(cfg: Config):
     verbose = 1
 
     num_nodes = train_dataset[0].num_nodes
-    baseline_results = measure_baselines(num_nodes, datamodule.train_dataloader(), datamodule.val_dataloader())
+    baseline_results = measure_baselines(num_nodes, datamodule)
 
     models_dir = cfg.paths.models
 

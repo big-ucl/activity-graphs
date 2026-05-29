@@ -5,105 +5,27 @@ from pathlib import Path
 import lightning as L
 import polars as pl
 import torch
-import torch.nn.functional as F
-import torch_geometric as pyg
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
 from activitygraphs.ml.datamodule import ActivityDataModule
-from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
-from activitygraphs.ml.metrics import mean_reciprocal_rank, ndcg_at_k, precision_at_k, recall_at_k
+from activitygraphs.ml.lightning_module import ActivityGraphModule
 
 
-@torch.no_grad()
-def _evaluate_bce(
-    device: torch.device,
-    model: torch.nn.Module,
-    loader: pyg.loader.DataLoader,
-    full_info: bool,
-    pos_weight: torch.Tensor | None = None,
-) -> float:
-    """Return mean per-node BCE loss over the loader without gradients."""
-    model.eval()
-    epoch_loss = 0.0
-    num_nodes = 0
-
-    for batch in loader:
-        batch = batch.to(device)
-        x = extract_features(batch, full_info)
-        out = model(x, batch.edge_index, batch.edge_attr, batch.batch)
-        loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=pos_weight)
-        epoch_loss += loss.item() * batch.num_nodes
-        num_nodes += batch.num_nodes
-
-    return epoch_loss / num_nodes
-
-
-@torch.no_grad()
-def _evaluate_at_k(
-    device: torch.device,
-    model: torch.nn.Module,
-    loader: pyg.loader.DataLoader,
-    full_info: bool,
-    k: int = 5,
-) -> dict:
-    """Return mean precision@k, recall@k, MRR, and NDCG@k over all graphs in the loader."""
-    model.eval()
-    precisions, recalls, mrrs, ndcgs = [], [], [], []
-
-    for batch in loader:
-        batch = batch.to(device)
-        x = extract_features(batch, full_info)
-        out = model(x, batch.edge_index, batch.edge_attr, batch.batch)
-
-        for i in range(batch.num_graphs):
-            mask = batch.batch == i
-            scores = out[mask].squeeze()
-            labels = batch.y[mask].squeeze()
-
-            if labels.sum().int().item() == 0:
-                continue
-
-            precisions.append(precision_at_k(scores, labels, k))
-            recalls.append(recall_at_k(scores, labels, k))
-            mrrs.append(mean_reciprocal_rank(scores, labels))
-            ndcgs.append(ndcg_at_k(scores, labels, k))
-
-    return {
-        f"precision@{k}": sum(precisions) / len(precisions),
-        f"recall@{k}": sum(recalls) / len(recalls),
-        "mrr": sum(mrrs) / len(mrrs),
-        f"ndcg@{k}": sum(ndcgs) / len(ndcgs),
-    }
-
-
-@torch.no_grad()
 def evaluate_baseline(
     baseline: torch.nn.Module,
-    loader: pyg.loader.DataLoader,
+    datamodule: ActivityDataModule,
     name: str,
-    full_info: bool = False,
-    pos_weight: torch.Tensor = None,
     k: int = 5,
 ) -> pl.DataFrame:
     """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format."""
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    baseline = baseline.to(device)
-    loss = _evaluate_bce(device, baseline, loader, full_info)
-    loss_weight = _evaluate_bce(device, baseline, loader, full_info, pos_weight=pos_weight)
-    metrics = _evaluate_at_k(device, baseline, loader, full_info, k=k)
+    baseline_module = ActivityGraphModule(model=baseline, lr=0.0, pos_weight=datamodule.pos_weight, k=k)
+    trainer = L.Trainer(logger=False, enable_progress_bar=False)
+    (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
+    (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
 
-    return pl.DataFrame({
-        "name": [name],
-        "epoch": [0],
-        "train_loss": [0.0],
-        "val_bce": [loss],
-        "val_bce_weighted": [loss_weight],
-        f"val_precision@{k}": [metrics[f"precision@{k}"]],
-        f"val_recall@{k}": [metrics[f"recall@{k}"]],
-        "val_mrr": [metrics["mrr"]],
-        f"val_ndcg@{k}": [metrics[f"ndcg@{k}"]],
-    })
+    results_dict = {key: [val] for key, val in {**val_results, **test_results}.items()}
+    return pl.DataFrame({"name": [name], "epoch": [0], "train_loss": [0.0], **results_dict})
 
 
 def run_experiment(
@@ -136,6 +58,7 @@ def run_experiment(
         model_save_dir: Directory for checkpoint and CSV log files; None disables both.
         fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
+        weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
 
     Returns:
         DataFrame with columns ``name``, ``epoch``, ``train_loss``, ``val_bce``,
