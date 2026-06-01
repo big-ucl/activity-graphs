@@ -110,8 +110,8 @@ def comparison_experiment(cfg: Config):
     Results are written to ``cfg.paths.reports/data/geneva-results.parquet``.
     """
     batch_size = 64
-    val_size = 0.2
-    test_size = 0.1
+    val_size = 0.1
+    test_size = 0.2
     seed = 42
 
     datamodule = ActivityDataModule(cfg, val_size=val_size, test_size=test_size, seed=seed, batch_size=batch_size)

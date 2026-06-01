@@ -43,10 +43,12 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
     return pyg.data.Batch.from_data_list(graphs)
 
 
-def make_module(reg: str | None = None, lambda_reg: float = 0.01, pos_weight: float = 2.0) -> ActivityGraphModule:
+def make_module(
+    reg: str | None = None, lambda_reg: float = 0.01, pos_weight: float = 2.0, schedule_lr: bool = False
+) -> ActivityGraphModule:
     model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
     return ActivityGraphModule(
-        model=model, lr=1e-3, pos_weight=torch.tensor(pos_weight), reg=reg, lambda_reg=lambda_reg
+        model=model, lr=1e-3, pos_weight=torch.tensor(pos_weight), reg=reg, lambda_reg=lambda_reg, schedule_lr=schedule_lr
     )
 
 
@@ -222,17 +224,22 @@ class TestTestStep:
 
 class TestConfigureOptimizers:
     def test_returns_optimizer_and_scheduler(self):
-        result = attach_fake_trainer(make_module()).configure_optimizers()
+        result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
         assert "optimizer" in result
         assert "lr_scheduler" in result
 
-    def test_scheduler_monitors_val_bce(self):
-        result = attach_fake_trainer(make_module()).configure_optimizers()
-        assert result["lr_scheduler"]["monitor"] == "val_bce"
+    def test_scheduler_monitors_val_bce_weighted(self):
+        result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
+        assert result["lr_scheduler"]["monitor"] == "val_bce_weighted"
 
     def test_optimizer_is_adamw(self):
-        result = attach_fake_trainer(make_module()).configure_optimizers()
+        result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
         assert isinstance(result["optimizer"], torch.optim.AdamW)
+
+    def test_no_scheduler_when_not_requested(self):
+        """With schedule_lr=False (the default), a bare optimizer is returned."""
+        result = attach_fake_trainer(make_module()).configure_optimizers()
+        assert isinstance(result, torch.optim.AdamW)
 
     def test_no_scheduler_when_overfitting(self):
         """In overfit mode the scheduler is skipped and a bare optimizer is returned."""

@@ -56,6 +56,9 @@ class EpochMetricsCollector(L.Callback):
         if metrics:
             self.rows.append({"stage": "fit", "epoch": trainer.current_epoch, **metrics})
 
-    def on_test_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+    def on_test_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        # Collect on `on_test_end`, not `on_test_epoch_end`: callback hooks run before the
+        # LightningModule's `on_test_epoch_end`, which is where the Retrieval* ranking metrics are
+        # logged. Reading at epoch-end would capture only the per-batch test_bce/test_bce_weighted.
         metrics = {key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith("test_")}
         self.rows.append({"stage": "test", "epoch": None, **metrics})
