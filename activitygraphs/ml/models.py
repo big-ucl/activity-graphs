@@ -120,6 +120,53 @@ class NodeMLP(torch.nn.Module):
         return x
 
 
+class FullyConnectedMLP(torch.nn.Module):
+    """Per-user global MLP: flattens the whole graph's node features and predicts every node at once.
+
+    Tries to serve as an "upper bound" on what is doable with a GNN. The idea is that a GNN approaches
+    this baseline without needing to have a fixed-size node graph. It relies on every user graph having
+    exactly ``num_nodes`` nodes (true for the shared network graph). The constant ``edge_index`` /
+    ``edge_attr`` carry no per-user signal and are ignored.
+    """
+
+    def __init__(
+        self,
+        num_nodes: int,
+        in_features: int,
+        hidden_channels: int,
+        num_layers: int = 3,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+
+        self.num_nodes = num_nodes
+        self.in_features = in_features
+        self.mlp = NodeMLP(
+            num_layers,
+            in_channels=num_nodes * in_features,
+            hidden_channels=hidden_channels,
+            out_channels=num_nodes,
+            dropout=dropout,
+        )
+
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
+    ) -> torch.Tensor:
+        total_nodes, num_features = x.shape
+
+        if total_nodes % self.num_nodes != 0:
+            raise ValueError(f"Expected a multiple of {self.num_nodes} nodes per batch, got {total_nodes}.")
+        if num_features != self.in_features:
+            raise ValueError(f"Expected {self.in_features} input features, got {num_features}.")
+
+        num_graphs = total_nodes // self.num_nodes
+
+        flat = x.reshape(num_graphs, self.num_nodes * num_features)
+        logits = self.mlp(flat, edge_index)  # [num_graphs, num_nodes]
+
+        return logits.reshape(total_nodes, 1)
+
+
 class GCNPlus(torch.nn.Module):
     """GCN followed by a node-wise MLP post-processing head."""
 

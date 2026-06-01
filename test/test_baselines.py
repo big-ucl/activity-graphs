@@ -98,19 +98,18 @@ class TestNodeBaseline:
 class TestConditionalNodeBaseline:
     def test_forward_shape(self, batch_uniform):
         num_nodes = 5
-        # Set the first node of each graph as home (IS_HOME_COL_IDX = 38, but we use a small feature dim here)
-        # Use a synthetic feature matrix where column 0 acts as the home indicator for this test.
-        from activitygraphs.base import IS_HOME_COL_IDX
-
-        num_features = IS_HOME_COL_IDX + 1
+        # Use a synthetic feature matrix where a chosen column acts as the home indicator.
+        is_home_idx = 2
+        num_features = 3
         graphs = make_graphs(num_graphs=8, num_nodes=num_nodes, num_features=num_features)
         for g in graphs:
-            g.x[0, IS_HOME_COL_IDX] = 1.0  # mark node 0 as home
+            g.x[:, is_home_idx] = 0.0
+            g.x[0, is_home_idx] = 1.0  # mark node 0 as home
 
         loader = pyg.loader.DataLoader(graphs, batch_size=4)
         batched = pyg.data.Batch.from_data_list(graphs[:4])
 
-        baseline = ConditionalNodeBaseline(num_nodes=num_nodes)
+        baseline = ConditionalNodeBaseline(num_nodes=num_nodes, is_home_idx=is_home_idx)
         baseline.fit(loader)
         out = baseline(batched.x, batched.edge_index, batch=batched.batch)
         assert out.shape == (batched.num_nodes, 1)

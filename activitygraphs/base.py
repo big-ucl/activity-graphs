@@ -111,5 +111,3 @@ TRANSFER_EDGE_LIST_SCHEMA = pl.Schema({
     "travel_time_min": pl.Float64,
 })
 CRS = "EPSG:4326"
-
-IS_HOME_COL_IDX = 38  # TODO get rid of this hardcoded index in future work

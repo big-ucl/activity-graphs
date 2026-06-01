@@ -6,6 +6,7 @@ from typing import Callable, cast
 
 import city2graph as c2g
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import polars as pl
 import torch
@@ -45,6 +46,12 @@ COLS_EXCLUDED_FROM_FEATURES = [
     "geometry",
     "original_geometry",
 ]
+
+# Single source of truth for the per-user spatial feature columns, in the order they are
+# appended after the network node features in the concatenated node feature matrix `x`.
+# `is_home` must stay first so that the derived home-column index (see ActivityDataset)
+# remains valid for `extract_is_home` / the conditional baseline.
+SPATIAL_FEATURE_NAMES = ["is_home"]
 
 # =========================================
 # A. Network graph
@@ -258,7 +265,7 @@ def create_spatial_demographics(data: NetworkData) -> tuple[torch.Tensor, torch.
         .collect()
     )
 
-    feature_cols = ["is_home"]
+    feature_cols = SPATIAL_FEATURE_NAMES
     spatial_features = torch.tensor(feature_df.select(feature_cols).to_numpy(), dtype=torch.float32).reshape(
         n_users, n_locs, len(feature_cols)
     )
@@ -278,6 +285,28 @@ def create_spatial_demographics(data: NetworkData) -> tuple[torch.Tensor, torch.
     )
 
     return spatial_features, spatial_labels
+
+
+def create_home_distances(data, network_nodes: gpd.GeoDataFrame) -> torch.Tensor:
+    """Build a distance-from-home tensor over all network nodes for every user. Uses Euclidian distance between
+    centroids.
+
+    Returns:
+        Float tensor of shape ``[n_users, n_nodes, 1]``.
+    """
+    nodes = network_nodes.sort_index().to_crs(network_nodes.estimate_utm_crs())
+    coords = nodes.geometry.get_coordinates()
+
+    home_by_user = dict(data.home_locations.iter_rows())
+
+    n_users, n_nodes = len(data.user_ids), len(coords)
+    distances = np.zeros((n_users, n_nodes, 1), dtype=np.float32)
+
+    for user_idx, user_id in enumerate(data.user_ids):
+        home_loc_id = home_by_user[user_id]
+        distances[user_idx, :, 0] = np.linalg.norm(coords - coords.loc[home_loc_id], axis=1)
+
+    return torch.from_numpy(distances)
 
 
 def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, col_name: str):
@@ -307,16 +336,18 @@ def create_individual_demographics(data: NetworkData) -> torch.Tensor:
 
 def convert_to_torch(
     data: NetworkData, network_nodes: gpd.GeoDataFrame, network_edges: gpd.GeoDataFrame
-) -> tuple[pyg.data.Data | pyg.data.HeteroData, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[pyg.data.Data | pyg.data.HeteroData, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert network graph and network data into PyG and tensor form.
 
     Returns:
-        Tuple ``(network_graph, spatial_features, spatial_labels, demographics)``:
+        Tuple ``(network_graph, spatial_features, spatial_labels, demographics, distances)``:
         the shared PyG graph, per-user spatial features ``[n_users, n_nodes, n_feat]``,
-        per-user labels ``[n_users, n_nodes, 1]``, and individual demographics ``[n_users, n_demo]``.
+        per-user labels ``[n_users, n_nodes, 1]``, individual demographics ``[n_users, n_demo]``,
+        and per-user distance-from-home ``[n_users, n_nodes, 1]``.
     """
     spatial_features, spatial_labels = create_spatial_demographics(data)
     demographics = create_individual_demographics(data)
+    distances = create_home_distances(data, network_nodes)
 
     node_feature_cols = [col for col in network_nodes.columns if col not in COLS_EXCLUDED_FROM_FEATURES]
 
@@ -329,7 +360,7 @@ def convert_to_torch(
         device="cpu",
     )
 
-    return network_graph, spatial_features, spatial_labels, demographics
+    return network_graph, spatial_features, spatial_labels, demographics, distances
 
 
 def load_pyg_graphs(

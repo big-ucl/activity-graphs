@@ -6,8 +6,31 @@ import torch
 import torch_geometric as pyg
 
 from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
-from activitygraphs.ml.metrics import ndcg_at_k, precision_at_k, recall_at_k
 from activitygraphs.ml.models import NodeMLP
+
+
+# Local reference implementations used only to cross-check the torchmetrics Retrieval* output.
+# The project itself computes ranking metrics via torchmetrics, not these.
+def precision_at_k(scores, labels, k):
+    top_k = scores.topk(k).indices
+    return labels[top_k].sum().item() / k
+
+
+def recall_at_k(scores, labels, k):
+    top_k = scores.topk(k).indices
+    num_pos = labels.sum().int().item()
+    return labels[top_k].sum().item() / num_pos if num_pos else 0.0
+
+
+def ndcg_at_k(scores, labels, k):
+    order = scores.argsort(descending=True)[:k]
+    discounts = 1.0 / torch.log2(torch.arange(2, k + 2, dtype=torch.float))
+    dcg = (labels[order].float() * discounts).sum().item()
+    ideal = torch.zeros(k)
+    ideal[: min(int(labels.sum().item()), k)] = 1.0
+    idcg = (ideal * discounts).sum().item()
+    return dcg / idcg if idcg else 0.0
+
 
 NUM_NODE_FEATURES = 6
 NUM_DEMO_FEATURES = 3

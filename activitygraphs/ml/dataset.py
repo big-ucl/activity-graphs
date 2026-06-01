@@ -4,9 +4,11 @@ import json
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as T
@@ -15,10 +17,14 @@ from sklearn.preprocessing import StandardScaler
 from torch_geometric.data.data import BaseData
 from tqdm import tqdm
 
-from activitygraphs.base import IS_HOME_COL_IDX
 from activitygraphs.config import Config
-from activitygraphs.dataprocessing import convert_to_torch, load_data
+from activitygraphs.dataprocessing import SPATIAL_FEATURE_NAMES, convert_to_torch, load_data
+from activitygraphs.ml.metrics import compute_home_hop_distance
 from activitygraphs.utils import get_project_root
+
+# Full-`x` column index of `is_home` in the legacy GenevaDataset pickles only.
+# The main ActivityDataset path derives this from the data (see ActivityDataset.is_home_col_idx).
+_LEGACY_IS_HOME_COL_IDX = 37
 
 
 class GenevaDataset(pyg.data.InMemoryDataset):
@@ -62,6 +68,7 @@ class ActivityDataset(pyg.data.Dataset):
         "spatial_features.pt",
         "spatial_labels.pt",
         "demographics.pt",
+        "distances.pt",
     ]
 
     def __init__(
@@ -71,6 +78,7 @@ class ActivityDataset(pyg.data.Dataset):
         spatial_features: torch.Tensor | None = None,
         spatial_labels: torch.Tensor | None = None,
         demographics: torch.Tensor | None = None,
+        distances: torch.Tensor | None = None,
         transform: Callable | None = None,
         pre_transform: Callable | None = None,
         pre_filter: Callable | None = None,
@@ -79,15 +87,23 @@ class ActivityDataset(pyg.data.Dataset):
         self._spatial_features_in = spatial_features
         self._spatial_labels_in = spatial_labels
         self._demographics_in = demographics
+        self._distances_in = distances
 
         super().__init__(root, transform, pre_transform, pre_filter)
-        del self._network_graph_in, self._spatial_features_in, self._spatial_labels_in, self._demographics_in
+        del (
+            self._network_graph_in,
+            self._spatial_features_in,
+            self._spatial_labels_in,
+            self._demographics_in,
+            self._distances_in,
+        )
 
         processed_dir = Path(self.processed_dir)
         self.network_graph: pyg.data.Data = torch.load(processed_dir / "network_graph.pt", weights_only=False)
         self.spatial_features: torch.Tensor = torch.load(processed_dir / "spatial_features.pt", weights_only=True)
         self.spatial_labels: torch.Tensor = torch.load(processed_dir / "spatial_labels.pt", weights_only=True)
         self.demographics: torch.Tensor = torch.load(processed_dir / "demographics.pt", weights_only=True)
+        self.distances: torch.Tensor = torch.load(processed_dir / "distances.pt", weights_only=True)
 
         num_nodes = self.network_graph.num_nodes
         if num_nodes is None:
@@ -96,6 +112,27 @@ class ActivityDataset(pyg.data.Dataset):
         self.num_individuals: int = self.demographics.size(0)
         self.num_nodes: int = num_nodes
         self._is_scaled: bool = False
+
+    @property
+    def num_network_features(self) -> int:
+        """Number of network node-feature columns (those preceding the spatial block in ``x``)."""
+        x = self.network_graph.x
+        return 0 if x is None else x.shape[1]
+
+    @property
+    def is_home_spatial_idx(self) -> int:
+        """Column index of ``is_home`` within the per-user spatial feature block."""
+        return SPATIAL_FEATURE_NAMES.index("is_home")
+
+    @property
+    def is_home_col_idx(self) -> int:
+        """Column index of ``is_home`` within the concatenated node feature matrix ``x``."""
+        return self.num_network_features + self.is_home_spatial_idx
+
+    @cached_property
+    def home_hop_distance(self) -> np.ndarray:
+        """All-pairs hop distance matrix (over spatial adjacency graph) ``[num_nodes, num_nodes]`` for the network graph."""
+        return compute_home_hop_distance(self.network_graph.edge_index, self.num_nodes)
 
     @property
     def raw_file_names(self) -> list[str]:
@@ -113,24 +150,30 @@ class ActivityDataset(pyg.data.Dataset):
         sf = self._spatial_features_in
         sl = self._spatial_labels_in
         demo = self._demographics_in
+        dist = self._distances_in
 
-        if graph is None or sf is None or sl is None or demo is None:
-            raise ValueError("First-time construction requires the four component Tensors/Data to be passed to init.")
+        if graph is None or sf is None or sl is None or demo is None or dist is None:
+            raise ValueError("First-time construction requires the five component Tensors/Data to be passed to init.")
 
         num_sf_users, num_sf_nodes, _ = sf.shape
         num_sl_users, num_sl_nodes, num_sl_labels = sl.shape
         num_dm_users, _ = demo.shape
+        num_di_users, num_di_nodes, num_di_feat = dist.shape
 
-        if not (graph.num_nodes == num_sf_nodes == num_sl_nodes):
+        if not (graph.num_nodes == num_sf_nodes == num_sl_nodes == num_di_nodes):
             raise ValueError(
-                f"Node count mismatch: network has {graph.num_nodes}, spatial_features has {num_sf_nodes}, spatial_labels has {num_sl_nodes}."
+                f"Node count mismatch: network has {graph.num_nodes}, spatial_features has {num_sf_nodes}, "
+                f"spatial_labels has {num_sl_nodes}, distances has {num_di_nodes}."
             )
-        if not (num_sf_users == num_sl_users == num_dm_users):
+        if not (num_sf_users == num_sl_users == num_dm_users == num_di_users):
             raise ValueError(
-                f"Individual count mismatch: spatial_features has {num_sf_users}, spatial_labels has {num_sl_users}, demographics has {num_dm_users}."
+                f"Individual count mismatch: spatial_features has {num_sf_users}, spatial_labels has {num_sl_users}, "
+                f"demographics has {num_dm_users}, distances has {num_di_users}."
             )
         if num_sl_labels != 1:
             raise ValueError(f"spatial_labels last dim must be 1, got {num_sl_labels}.")
+        if num_di_feat != 1:
+            raise ValueError(f"distances last dim must be 1, got {num_di_feat}.")
 
         # Make sure the network graph has node features, otherwise, fall back to a zero-width tensor.
         if graph.x is None:
@@ -145,6 +188,7 @@ class ActivityDataset(pyg.data.Dataset):
         torch.save(sf, processed_dir / "spatial_features.pt")
         torch.save(sl, processed_dir / "spatial_labels.pt")
         torch.save(demo, processed_dir / "demographics.pt")
+        torch.save(dist, processed_dir / "distances.pt")
 
     def len(self) -> int:
         return self.num_individuals
@@ -176,6 +220,9 @@ class ActivityDataset(pyg.data.Dataset):
         data.graph_x = graph_x.unsqueeze(0)
         data.user_id = torch.tensor([i], dtype=torch.long)
 
+        # Per-user distance-from-home
+        data.distances = self.distances[i].to(full_x.dtype)
+
         # Carry over any extra attributes from the network graph (pos, etc.)
         for key, value in self.network_graph:
             if key in ("x", "edge_index", "edge_attr", "y"):
@@ -194,6 +241,7 @@ class FittedScalers:
     network_edges: StandardScaler | None
     spatial: StandardScaler | None
     demographics: StandardScaler | None
+    distances: StandardScaler | None = None
     exclude_spatial_cols: list[int] | None = None
 
     def save(self, path: Path) -> None:
@@ -217,12 +265,14 @@ def load_or_build_dataset(
 
     if not all((dataset_path / file).exists() for file in ActivityDataset.PROCESSED_FILE_NAMES):
         data, network_nodes, network_edges = load_data(cfg.data, project_root)
-        network_graph, spatial_features, spatial_labels, demographics = convert_to_torch(
+        network_graph, spatial_features, spatial_labels, demographics, distances = convert_to_torch(
             data, network_nodes, network_edges
         )
         dataset_path = project_root / cfg.data.paths.pyg_datasets
 
-        return ActivityDataset(str(dataset_path), network_graph, spatial_features, spatial_labels, demographics)
+        return ActivityDataset(
+            str(dataset_path), network_graph, spatial_features, spatial_labels, demographics, distances
+        )
 
     return ActivityDataset(root=str(dataset_path), **build_kwargs)
 
@@ -273,7 +323,7 @@ def fit_scalers(
     Args:
         dataset: The full ``ActivityDataset`` (not yet scaled).
         train_idx: Indices of training individuals.
-        exclude_spatial_cols: Column indices excluded from spatial scaler fitting (e.g. ``[IS_HOME_COL_IDX]``).
+        exclude_spatial_cols: Column indices excluded from spatial scaler fitting (e.g. ``[is_home_spatial_idx]``).
         exclude_demographic_cols: Column indices excluded from demographics scaler fitting.
 
     Returns:
@@ -294,14 +344,14 @@ def fit_scalers(
         edge_scaler = StandardScaler()
         edge_scaler.fit(edge_attr.numpy())
 
-    # Spatial features: individual-specific, fit only on train
+    # Spatial features: individual-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
     spatial_train = dataset.spatial_features[train_idx]
-    if exclude_spatial_cols:
-        keep = [c for c in range(spatial_train.shape[-1]) if c not in exclude_spatial_cols]
-        spatial_train = spatial_train[..., keep]
-    spatial_flat = spatial_train.reshape(-1, spatial_train.shape[-1]).float().numpy()
-    spatial_scaler = StandardScaler()
-    spatial_scaler.fit(spatial_flat)
+    keep = [c for c in range(spatial_train.shape[-1]) if c not in (exclude_spatial_cols or [])]
+    spatial_scaler = None
+    if keep:
+        spatial_flat = spatial_train[..., keep].reshape(-1, len(keep)).float().numpy()
+        spatial_scaler = StandardScaler()
+        spatial_scaler.fit(spatial_flat)
 
     # Demographics: individual-specific, fit only on train
     demo_train = dataset.demographics[train_idx]
@@ -311,11 +361,17 @@ def fit_scalers(
     demo_scaler = StandardScaler()
     demo_scaler.fit(demo_train.float().numpy())
 
+    # Distance-from-home: individual-specific, fit only on train
+    distances_train = dataset.distances[train_idx]
+    distances_scaler = StandardScaler()
+    distances_scaler.fit(distances_train.reshape(-1, distances_train.shape[-1]).float().numpy())
+
     return FittedScalers(
         network_features=network_scaler,
         network_edges=edge_scaler,
         spatial=spatial_scaler,
         demographics=demo_scaler,
+        distances=distances_scaler,
         exclude_spatial_cols=exclude_spatial_cols,
     )
 
@@ -347,6 +403,12 @@ def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
     if scalers.demographics is not None:
         demo = dataset.demographics.float().numpy()
         dataset.demographics = torch.from_numpy(scalers.demographics.transform(demo)).float()
+
+    if scalers.distances is not None:
+        dist = dataset.distances.float()
+        shape = dist.shape
+        flat = dist.reshape(-1, shape[-1]).numpy()
+        dataset.distances = torch.from_numpy(scalers.distances.transform(flat)).float().reshape(shape)
 
     dataset._is_scaled = True
 
@@ -386,7 +448,7 @@ def load_dataset(
     if scalers_cache.exists():
         scalers = FittedScalers.load(scalers_cache)
     else:
-        scalers = fit_scalers(dataset, train_idx, exclude_spatial_cols=[IS_HOME_COL_IDX])
+        scalers = fit_scalers(dataset, train_idx, exclude_spatial_cols=[dataset.is_home_spatial_idx])
         scalers.save(scalers_cache)
 
     apply_scalers(dataset, scalers)
@@ -434,7 +496,7 @@ def load_gva_dataset(
     print(f"Train size: {len(train_dataset)}. Splitting dataset: ")
 
     num_features = train_dataset[0].x.shape[1]
-    non_home_cols = [i for i in range(num_features) if i != IS_HOME_COL_IDX]
+    non_home_cols = [i for i in range(num_features) if i != _LEGACY_IS_HOME_COL_IDX]
 
     train_x = torch.cat([g.x[:, non_home_cols] for g in train_dataset]).numpy()
     train_edge_attr = torch.cat([g.edge_attr for g in train_dataset]).numpy()

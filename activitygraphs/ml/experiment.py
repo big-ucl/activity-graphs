@@ -25,7 +25,14 @@ def evaluate_baseline(
     ``stage="test"`` with the ``test_*`` metrics) so baseline frames align with the
     ``run_experiment`` output.
     """
-    baseline_module = ActivityGraphModule(model=baseline, lr=0.0, pos_weight=datamodule.pos_weight, k=k)
+    baseline_module = ActivityGraphModule(
+        model=baseline,
+        lr=0.0,
+        pos_weight=datamodule.pos_weight,
+        k=k,
+        home_hop_distance=datamodule.train_dataset.home_hop_distance,
+        is_home_idx=datamodule.train_dataset.is_home_col_idx,
+    )
     trainer = L.Trainer(logger=False, enable_progress_bar=False)
     (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
     (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
@@ -90,6 +97,8 @@ def run_experiment(
         full_info=full_info,
         weight_decay=weight_decay,
         schedule_lr=schedule_lr,
+        home_hop_distance=datamodule.train_dataset.home_hop_distance,
+        is_home_idx=datamodule.train_dataset.is_home_col_idx,
     )
 
     # Build the callbacks
@@ -130,8 +139,10 @@ def run_experiment(
     if model_save_dir is not None:
         trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-    # The collector accumulated fit rows during `fit` and the test row during `test` (same trainer,
-    # same callback instance). `CSVLogger` is kept only for the raw on-disk artifact.
     results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
-    lead = ["name", "stage", "epoch"]
-    return results.select(lead + [c for c in results.columns if c not in lead])
+
+    first_cols = ["name", "stage", "epoch"]
+    other_cols = [c for c in results.columns if c not in first_cols]
+    results = results.select(first_cols + other_cols)
+
+    return results

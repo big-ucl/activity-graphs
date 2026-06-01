@@ -1,50 +1,55 @@
-"""Ranking metrics: precision@k, recall@k, MRR, NDCG@k."""
+"""Diagnostic metrics: contiguity-hop distance and distance-from-home hop-band ranking metrics.
 
+Aggregate ranking metrics are dominated by near-home positives. To detect whether a model
+loses predictive power beyond its message-passing receptive field, ``ActivityGraphModule``
+groups each node by its contiguity-hop distance from the user's home node into hop bands and
+reports recall@k / ndcg@k within each band, using the per-hop-band torchmetrics collections
+built here. Per-step ranking metrics use ``torchmetrics`` directly in the Lightning module;
+there is intentionally no hand-rolled metric implementation.
+"""
+
+import numpy as np
 import torch
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import shortest_path
+from torchmetrics import MetricCollection
+from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalRecall
+
+# Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
+DEFAULT_HOP_BANDS: list[tuple[str, float, float]] = [
+    ("0-2", 0, 2),
+    ("3-5", 3, 5),
+    ("6-8", 6, 8),
+    ("9-12", 9, 12),
+    ("13+", 13, float("inf")),
+]
 
 
-def precision_at_k(scores: torch.Tensor, labels: torch.Tensor, k: int) -> float:
-    """Return the fraction of the top-k scoring nodes that are true positives."""
-    top_k_indices = scores.topk(k).indices
-    return labels[top_k_indices].sum().item() / k
+def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.ndarray:
+    """Return the all-pairs contiguity-hop distance matrix ``[num_nodes, num_nodes]``.
+
+    Treats the graph as undirected and unweighted; unreachable pairs are ``inf``.
+    """
+    src = edge_index[0].cpu().numpy()
+    dst = edge_index[1].cpu().numpy()
+    adjacency = coo_matrix((np.ones(len(src)), (src, dst)), shape=(num_nodes, num_nodes))
+
+    return shortest_path(adjacency, method="D", unweighted=True, directed=False)
 
 
-def recall_at_k(scores: torch.Tensor, labels: torch.Tensor, k: int) -> float:
-    """Return the fraction of all positives that fall within the top-k scoring nodes."""
-    top_k_indices = scores.topk(k).indices
-    num_pos = labels.sum().int().item()
-    if num_pos == 0:
-        return 0.0
-    return labels[top_k_indices].sum().item() / num_pos
+def build_hop_band_metrics(hop_bands: list[tuple[str, float, float]], k: int) -> torch.nn.ModuleDict:
+    """Build one ``recall@k`` / ``ndcg@k`` torchmetrics collection per hop band.
 
-
-def mean_reciprocal_rank(scores: torch.Tensor, labels: torch.Tensor) -> float:
-    """Return the mean reciprocal rank of positive labels given ``scores``."""
-    ranked_indices = scores.argsort(descending=True)
-    ranked_labels = labels[ranked_indices]
-    positive_ranks = (ranked_labels == 1).nonzero().squeeze(1) + 1  # 1-indexed
-    if len(positive_ranks) == 0:
-        return 0.0
-    return (1.0 / positive_ranks.float()).mean().item()
-
-
-def ndcg_at_k(scores: torch.Tensor, labels: torch.Tensor, k: int) -> float:
-    """Return normalised discounted cumulative gain at rank k."""
-    ranked_indices = scores.argsort(descending=True)[:k]
-    ranked_labels = labels[ranked_indices].float()
-
-    # DCG
-    device = scores.device
-    positions = torch.arange(1, k + 1, dtype=torch.float, device=device)
-    discounts = 1.0 / torch.log2(positions + 1)
-    dcg = (ranked_labels * discounts).sum().item()
-
-    # Ideal DCG — best possible ranking
-    num_pos = int(labels.sum().item())
-    ideal_labels = torch.zeros(k, device=device)
-    ideal_labels[: min(num_pos, k)] = 1.0
-    idcg = (ideal_labels * discounts).sum().item()
-
-    if idcg == 0:
-        return 0.0
-    return dcg / idcg
+    Each collection is keyed by its hop-band label and prefixed ``test_hop_<label>_`` so the
+    logged keys (e.g. ``test_hop_3-5_recall@5``) are captured by the test results row.
+    """
+    return torch.nn.ModuleDict({
+        label: MetricCollection(
+            {
+                f"recall@{k}": RetrievalRecall(top_k=k, empty_target_action="skip"),
+                f"ndcg@{k}": RetrievalNormalizedDCG(top_k=k, empty_target_action="skip"),
+            },
+            prefix=f"test_hop_{label}_",
+        )
+        for label, _, _ in hop_bands
+    })

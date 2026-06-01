@@ -16,7 +16,7 @@ from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.experiment import evaluate_baseline, run_experiment
 from activitygraphs.ml.lightning_module import extracted_features_dim
-from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
+from activitygraphs.ml.models import FullyConnectedMLP, GATSkip, GraphTransformer, NodeMLP
 
 
 def build_gat(
@@ -56,14 +56,36 @@ def build_gps(
 
 
 def build_mlp(
-    dataset: ActivityDataset, mlp_layers: int, hidden_channels: int, dropout: float, use_demographics: bool = True
+    dataset: ActivityDataset,
+    mlp_layers: int,
+    hidden_channels: int,
+    dropout: float,
+    use_demographics: bool = True,
+    full_info: bool = False,
 ) -> NodeMLP:
-    """Instantiate a ``NodeMLP`` model sized for ``dataset``."""
+    """Instantiate a ``NodeMLP`` model sized for ``dataset``.
+
+    With ``full_info=True`` the input width accounts for the appended distance-from-home
+    feature (the distance-augmented MLP baseline).
+    """
     return NodeMLP(
         mlp_layers,
-        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics),
+        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics, full_info=full_info),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
+        dropout=dropout,
+    )
+
+
+def build_full_mlp(
+    dataset: ActivityDataset, mlp_layers: int, hidden_channels: int, dropout: float, use_demographics: bool = True
+) -> FullyConnectedMLP:
+    """Instantiate a ``FullyConnectedMLP`` baseline (has all info from all nodes) sized for ``dataset``."""
+    return FullyConnectedMLP(
+        num_nodes=dataset.num_nodes,
+        in_features=extracted_features_dim(dataset, use_demographics=use_demographics),
+        hidden_channels=hidden_channels,
+        num_layers=mlp_layers,
         dropout=dropout,
     )
 
@@ -83,11 +105,12 @@ def measure_baselines(num_nodes, datamodule: ActivityDataModule):
     """Fit and evaluate all four frequency baselines; return a list of result dicts."""
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
+    is_home_idx = datamodule.train_dataset.is_home_col_idx
 
     uniform_base = UniformBaseline()
     global_base = GlobalBaseline().fit(train_loader)
     node_base = NodeBaseline(num_nodes).fit(train_loader)
-    conditional_base = ConditionalNodeBaseline(num_nodes).fit(train_loader)
+    conditional_base = ConditionalNodeBaseline(num_nodes, is_home_idx).fit(train_loader)
 
     results = []
 
@@ -107,7 +130,7 @@ def comparison_experiment(cfg: Config):
     """Compare the prediction performance of MLP, GATSkip, GPS (with and without L1) plus baselines.
 
     Fixed hyperparameters: batch_size=64, epochs=50, hidden_channels=128, dropout=0.2.
-    Results are written to ``cfg.paths.reports/data/geneva-results.parquet``.
+    Results are written to ``cfg.paths.reports/data/{dataset}-results-{n}.parquet``.
     """
     batch_size = 64
     val_size = 0.1
@@ -138,10 +161,6 @@ def comparison_experiment(cfg: Config):
         lr = 1e-3
         weight_decay = 1e-4
 
-    mlp = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
-    gat = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
-    gps = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
-
     verbose = 1
 
     num_nodes = train_dataset[0].num_nodes
@@ -149,12 +168,31 @@ def comparison_experiment(cfg: Config):
 
     models_dir = cfg.paths.models
 
+    # Per-model learning rates. GPS (GraphTransformer) is not as good as GATSkip at 1e-3. If `overfit`, all models get
+    # the same lr=0.01
+    lr_by_model = {"MLP": 1e-3, "GATSkip": 1e-3, "GTransformer": 1e-4, "MLP-dist": 1e-3, "FullMLP": 1e-3}
+
+    def lr_for(key: str) -> float:
+        return lr if overfitting else lr_by_model[key]
+
+    # Regularise full model more to avoid overfitting.
+    full_dropout = 0.0 if overfitting else 0.5
+    full_weight_decay = weight_decay if overfitting else 1e-3
+
+    gat_name = f"GATSkip-{gat_layers}-res"
+    gps_name = f"GTransformer-{gps_layers}-res"
+
+    mlp = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
+    gat = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
+    gps = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
+    mlp_dist = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout, full_info=True)
+    full_mlp = build_full_mlp(train_dataset, mlp_layers, hidden_channels, full_dropout)
+
     my_run_experiment = functools.partial(
         run_experiment,
         datamodule=datamodule,
         num_epochs=epochs,
         verbose=verbose,
-        lr=lr,
         weight_decay=weight_decay,
         model_save_dir=models_dir,
         fast_dev_run=cfg.train.fast_dev_run,
@@ -163,35 +201,17 @@ def comparison_experiment(cfg: Config):
         debug=debug,
     )
 
-    results_mlp = my_run_experiment(model=mlp, name="MLP")
-    results_gat = my_run_experiment(model=gat, name=f"GATSkip-{gat_layers}-res")
-    results_gps = my_run_experiment(model=gps, name=f"GTransformer-{gps_layers}-res")
+    results_mlp = my_run_experiment(model=mlp, name="MLP", lr=lr_for("MLP"))
+    results_gat = my_run_experiment(model=gat, name=gat_name, lr=lr_for("GATSkip"))
+    results_gps = my_run_experiment(model=gps, name=gps_name, lr=lr_for("GTransformer"))
+    results_mlp_dist = my_run_experiment(model=mlp_dist, name="MLP-dist", lr=lr_for("MLP-dist"), full_info=True)
+    results_full = my_run_experiment(
+        model=full_mlp, name="FullMLP", lr=lr_for("FullMLP"), weight_decay=full_weight_decay
+    )
 
-    if overfitting:
-        if cfg.train.fast_dev_run:
-            return
-        save_results(cfg.paths.reports, cfg.data.name, results_mlp, results_gat, results_gps, *baseline_results)
-        return
-
-    # mlp_l1 = build_mlp(train_dataset, mlp_layers, hidden_channels, dropout)
-    # gat_l1 = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
-    # gps_l1 = build_gps(train_dataset, gps_layers, hidden_channels, dropout)
-
-    # results_mlp_l1 = my_run_experiment(model=mlp_l1, name="MLP-l1", reg="l1")
-    # results_gat_l1 = my_run_experiment(model=gat_l1, name=f"GATSkip-{gat_layers}-res-l1", reg="l1")
-    # results_gps_l1 = my_run_experiment(model=gps_l1, name=f"GTransformer-{gps_layers}-res-l1", reg="l1")
+    model_results = [results_mlp, results_gat, results_gps, results_mlp_dist, results_full]
 
     if cfg.train.fast_dev_run:
         return
 
-    save_results(
-        cfg.paths.reports,
-        cfg.data.name,
-        results_mlp,
-        results_gat,
-        results_gps,
-        # results_mlp_l1,
-        # results_gat_l1,
-        # results_gps_l1,
-        *baseline_results,
-    )
+    save_results(cfg.paths.reports, cfg.data.name, *model_results, *baseline_results)

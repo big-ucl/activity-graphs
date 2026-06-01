@@ -1,19 +1,27 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
 import lightning as L
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
-from torchmetrics import MetricCollection
+from torchmetrics import MeanMetric, MetricCollection, SumMetric
 from torchmetrics.retrieval import RetrievalMRR, RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
 from activitygraphs.ml.dataset import ActivityDataset
+from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, build_hop_band_metrics
 
 
 def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use_demographics: bool = True):
-    """Return node features from ``batch.x``. If `use_demographics` is true, then concatenates `batch.x` with
-    `batch.graph_x`. If `full_info` is True, then it adds distances from home and the home features, but this is ONLY
-     for the synthetic test case and can be disregarded."""
+    """Return node features for a batch.
+
+    Starts with ``batch.x`` (which already contains the network features and the per-user
+    ``is_home`` indicator). If ``use_demographics`` is True, the per-graph user-specific demographics
+    (``batch.graph_x``) are broadcast over nodes and concatenated. If ``full_info`` is True,
+    the per-node distance-from-home (``batch.distances``) is appended as the last column;
+    this is used only by the distance-augmented MLP baseline so that the explicit
+    distance-to-home signal does not leak into the other models.
+    """
     x = batch.x
 
     if use_demographics and batch.graph_x is not None:
@@ -26,23 +34,16 @@ def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use
     if not full_info:
         return x
 
-    raise ValueError("I only use this for the synthetic example in notebooks. Guard against accidental usage.")
-
-    distances = batch.distances
-
-    if batch.batch is not None:
-        home_feature = batch.home_feature[batch.batch].unsqueeze(1)
-    else:
-        home_feature = torch.full((batch.x.shape[0], 1), batch.home_feature.item())
-
-    return torch.cat([batch.x, home_feature, distances], dim=1)
+    return torch.cat([x, batch.distances.to(x.dtype)], dim=-1)
 
 
-def extracted_features_dim(dataset: ActivityDataset, use_demographics: bool = True) -> int:
+def extracted_features_dim(dataset: ActivityDataset, use_demographics: bool = True, full_info: bool = False) -> int:
     """Output width of extract_features for this dataset, given the same flags."""
     dim = dataset.num_features
     if use_demographics:
         dim += dataset.demographics.shape[1]
+    if full_info:
+        dim += dataset.distances.shape[-1]
     return dim
 
 
@@ -60,7 +61,12 @@ class ActivityGraphModule(L.LightningModule):
         lambda_reg: L1 coefficient (ignored when ``reg`` is None).
         full_info: If True, augment node features with home indicator and distances.
         k: Rank cutoff for precision, recall, and NDCG metrics.
+        weight_decay: AdamW weight decay.
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
+        home_hop_distance: Optional ``[num_nodes, num_nodes]`` contiguity-hop distance matrix
+            enabling distance-from-home hop-band ranking metrics at test time. Requires ``is_home_idx``.
+        is_home_idx: Column index of ``is_home`` in the node feature matrix (for the hop-band metrics).
+        hop_bands: Hop-distance bands for the hop-band metrics.
     """
 
     pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
@@ -76,6 +82,9 @@ class ActivityGraphModule(L.LightningModule):
         k: int = 5,
         weight_decay: float = 1e-4,
         schedule_lr: bool = False,
+        home_hop_distance: np.ndarray | torch.Tensor | None = None,
+        is_home_idx: int | None = None,
+        hop_bands: list[tuple[str, float, float]] = DEFAULT_HOP_BANDS,
     ):
         super().__init__()
         self.model = model
@@ -97,6 +106,26 @@ class ActivityGraphModule(L.LightningModule):
 
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
+
+        # Optional distance-from-home hop-band metrics (test time only).
+        self.is_home_idx = is_home_idx
+        self.hop_bands = hop_bands
+        if home_hop_distance is not None:
+            if is_home_idx is None:
+                raise ValueError("is_home_idx is required when home_hop_distance is provided.")
+            self.register_buffer(
+                "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
+            )
+            self.hop_band_test_metrics = build_hop_band_metrics(hop_bands, k)
+            # Per-band weighted BCE (node-pooled) and visited-node count, for context alongside the ranking bands.
+            self.hop_band_bce = torch.nn.ModuleDict({label: MeanMetric() for label, _, _ in hop_bands})
+            self.hop_band_pos = torch.nn.ModuleDict({label: SumMetric() for label, _, _ in hop_bands})
+            self._seen_hop_bands: set[str] = set()
+        else:
+            self.home_hop_distance = None
+            self.hop_band_test_metrics = None
+            self.hop_band_bce = None
+            self.hop_band_pos = None
 
     def forward(
         self,
@@ -146,6 +175,41 @@ class ActivityGraphModule(L.LightningModule):
             out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch]
         )
 
+        if self.hop_band_test_metrics is not None:
+            self._update_hop_band_metrics(batch, out)
+
+    def _update_hop_band_metrics(self, batch: pyg.data.Batch, out: torch.Tensor) -> None:
+        """Update the hop-band ranking metrics, grouping nodes by hop distance from each user's home."""
+        device = out.device
+        logits = out.squeeze(-1)
+        scores = logits.sigmoid()
+        target = batch.y.squeeze(-1).long()
+
+        # Each node's position within its graph is its network node index (graphs share the network order).
+        node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
+        is_home = batch.x[:, self.is_home_idx] > 0.0
+        home_idx_per_graph = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
+        home_idx_per_graph[batch.batch[is_home]] = node_idx[is_home]
+
+        hop = self.home_hop_distance[home_idx_per_graph[batch.batch], node_idx]
+        user_ids = batch.user_id[batch.batch]
+
+        for label, low, high in self.hop_bands:
+            mask = (hop >= low) & (hop <= high)
+            if not mask.any():
+                continue
+            band_target = target[mask]
+            self.hop_band_test_metrics[label].update(scores[mask], band_target, indexes=user_ids[mask])
+
+            band_bce = F.binary_cross_entropy_with_logits(
+                logits[mask], band_target.float(), pos_weight=self.pos_weight, reduction="none"
+            )
+            self.hop_band_bce[label].update(band_bce)
+            self.hop_band_pos[label].update(band_target.sum())
+
+            if band_target.sum() > 0:
+                self._seen_hop_bands.add(label)
+
     def _common_val_test_step(self, batch: pyg.data.Batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = extract_features(batch, self.full_info)
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
@@ -158,6 +222,20 @@ class ActivityGraphModule(L.LightningModule):
     def on_test_epoch_end(self) -> None:
         self.log_dict(self.test_metrics.compute())
         self.test_metrics.reset()
+
+        if self.hop_band_test_metrics is not None:
+            # Only compute/log hop bands that saw at least one positive (others would have all groups skipped).
+            for label in self._seen_hop_bands:
+                self.log_dict(self.hop_band_test_metrics[label].compute())
+                self.log(f"test_hop_{label}_bce_weighted", self.hop_band_bce[label].compute())
+                self.log(f"test_hop_{label}_n_pos", self.hop_band_pos[label].compute())
+            for collection in self.hop_band_test_metrics.values():
+                collection.reset()
+            for metric in self.hop_band_bce.values():
+                metric.reset()
+            for metric in self.hop_band_pos.values():
+                metric.reset()
+            self._seen_hop_bands.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
