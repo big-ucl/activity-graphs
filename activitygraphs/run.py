@@ -14,7 +14,7 @@ from activitygraphs.ml.baselines import (
 )
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.experiment import evaluate_baseline, run_experiment
+from activitygraphs.ml.experiment import evaluate_baseline, run_experiment, WandBParams
 from activitygraphs.ml.lightning_module import extracted_features_dim
 from activitygraphs.ml.models import FullyConnectedMLP, GATSkip, GraphTransformer, NodeMLP
 
@@ -119,7 +119,7 @@ def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     pl.concat(results, how="diagonal").write_parquet(path / f"{name}-results-{max_num + 1}.parquet")
 
 
-def measure_baselines(num_nodes, datamodule: ActivityDataModule):
+def measure_baselines(num_nodes, datamodule: ActivityDataModule, wandb_params: WandBParams):
     """Fit and evaluate all four frequency baselines; return a list of result dicts."""
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
@@ -138,7 +138,7 @@ def measure_baselines(num_nodes, datamodule: ActivityDataModule):
         ("NodeMarginal", node_base),
         ("ConditionalNodeMarginal", conditional_base),
     ]:
-        res = evaluate_baseline(baseline, datamodule, name)
+        res = evaluate_baseline(baseline, datamodule, name, wandb_params=wandb_params)
         results.append(res)
 
     return results
@@ -150,6 +150,14 @@ def comparison_experiment(cfg: Config):
     Fixed hyperparameters: batch_size=64, epochs=50, hidden_channels=128, dropout=0.2.
     Results are written to ``cfg.paths.reports/data/{dataset}-results-{n}.parquet``.
     """
+    wandb_params = WandBParams(
+        cfg.train.wandb,
+        cfg.train.wandb_project,
+        cfg.train.wandb_entity,
+        f"{cfg.data.name}-comparison",
+        dataset_name=cfg.data.name,
+    )
+    
     batch_size = 64
     val_size = 0.1
     test_size = 0.2
@@ -182,7 +190,7 @@ def comparison_experiment(cfg: Config):
     verbose = 1
 
     num_nodes = train_dataset[0].num_nodes
-    baseline_results = measure_baselines(num_nodes, datamodule)
+    baseline_results = measure_baselines(num_nodes, datamodule, wandb_params)
 
     models_dir = cfg.paths.models
 
@@ -226,6 +234,7 @@ def comparison_experiment(cfg: Config):
         fast_dev_run=cfg.train.fast_dev_run,
         overfit_batches=cfg.train.overfit_batches,
         schedule_lr=cfg.train.schedule_lr,
+        wandb_params=wandb_params,
         debug=debug,
     )
 
@@ -237,15 +246,27 @@ def comparison_experiment(cfg: Config):
         model=full_mlp, name="FullMLP", lr=lr_for("FullMLP"), weight_decay=full_weight_decay
     )
     results_full_off = my_run_experiment(
-        model=full_mlp_off, name="FullMLP-pop-offset", lr=lr_for("FullMLP"), weight_decay=full_weight_decay, pop_mode="offset"
+        model=full_mlp_off,
+        name="FullMLP-pop-offset",
+        lr=lr_for("FullMLP"),
+        weight_decay=full_weight_decay,
+        pop_mode="offset",
     )
     results_full_feat = my_run_experiment(
-        model=full_mlp_feat, name="FullMLP-pop-feat", lr=lr_for("FullMLP"), weight_decay=full_weight_decay, pop_mode="feature"
+        model=full_mlp_feat,
+        name="FullMLP-pop-feat",
+        lr=lr_for("FullMLP"),
+        weight_decay=full_weight_decay,
+        pop_mode="feature",
     )
 
     results_gat = my_run_experiment(model=gat, name=gat_name, lr=lr_for("GATSkip"))
-    results_gat_off = my_run_experiment(model=gat_pop_off, name=gat_name + "-pop-offset", lr=lr_for("GATSkip"), pop_mode="offset")
-    results_gat_feat = my_run_experiment(model=gat_pop_feat, name=gat_name + "-pop-feat", lr=lr_for("GATSkip"), pop_mode="feature")
+    results_gat_off = my_run_experiment(
+        model=gat_pop_off, name=gat_name + "-pop-offset", lr=lr_for("GATSkip"), pop_mode="offset"
+    )
+    results_gat_feat = my_run_experiment(
+        model=gat_pop_feat, name=gat_name + "-pop-feat", lr=lr_for("GATSkip"), pop_mode="feature"
+    )
 
     # results_gps = my_run_experiment(model=gps, name=gps_name, lr=lr_for("GTransformer"))
     # results_mlp_dist = my_run_experiment(model=mlp_dist, name="MLP-dist", lr=lr_for("MLP-dist"), full_info=True)

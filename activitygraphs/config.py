@@ -204,6 +204,10 @@ class TrainConfig:
     schedule_lr: bool
     debug: bool
 
+    wandb: bool
+    wandb_project: str
+    wandb_entity: str | None
+
 
 @dataclass
 class Config:

@@ -1,5 +1,6 @@
 """Training orchestration: run_experiment, evaluate_baseline, and shared feature/weight helpers."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -7,11 +8,20 @@ import lightning as L
 import polars as pl
 import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
+
+
+@dataclass
+class WandBParams:
+    use_wandb: bool
+    project: str | None = None
+    entity: str | None = None
+    group: str | None = None
+    dataset_name: str | None = None
 
 
 def evaluate_baseline(
@@ -19,6 +29,7 @@ def evaluate_baseline(
     datamodule: ActivityDataModule,
     name: str,
     k: int = 5,
+    wandb_params: WandBParams | None = None,
 ) -> pl.DataFrame:
     """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
 
@@ -34,9 +45,28 @@ def evaluate_baseline(
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
     )
-    trainer = L.Trainer(logger=False, enable_progress_bar=False)
-    (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
-    (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
+
+    if wandb_params and wandb_params.use_wandb:
+        logger: WandbLogger | bool = WandbLogger(
+            project=wandb_params.project,
+            entity=wandb_params.entity,
+            name=name,
+            group=wandb_params.group,
+            tags=[t for t in [wandb_params.dataset_name, "baseline"] if t],
+        )
+    else:
+        logger = False
+
+    trainer = L.Trainer(logger=logger, enable_progress_bar=False)
+
+    try:
+        (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
+        (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
+    finally:
+        if wandb_params and wandb_params.use_wandb:
+            import wandb
+
+            wandb.finish()
 
     fit_row = {"name": name, "stage": "fit", "epoch": 0, "train_loss": 0.0, **val_results}
     test_row = {"name": name, "stage": "test", "epoch": None, **test_results}
@@ -58,6 +88,7 @@ def run_experiment(
     weight_decay: float = 1e-4,
     schedule_lr: bool = False,
     pop_mode: Literal["none", "offset", "feature"] = "none",
+    wandb_params: WandBParams | None = None,
     debug: bool = False,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
@@ -80,6 +111,7 @@ def run_experiment(
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
             features to the model.
+        wandb_params: parameters to configure WandB logging.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
 
     Returns:
@@ -125,7 +157,34 @@ def run_experiment(
         callbacks.append(OverfitDebugCallback())
 
     log_dir = str(model_save_dir) if model_save_dir is not None else "."
-    logger = CSVLogger(save_dir=log_dir, name=name)
+
+    # Configure logging
+
+    if wandb_params and wandb_params.use_wandb:
+        logger = WandbLogger(
+            project=wandb_params.project,
+            entity=wandb_params.entity,
+            name=name,
+            group=wandb_params.group,
+            save_dir=log_dir,
+            tags=[wandb_params.dataset_name] if wandb_params.dataset_name else None,
+        )
+        logger.log_hyperparams({
+            "model": name,
+            "dataset": wandb_params.dataset_name,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "num_epochs": num_epochs,
+            "reg": reg,
+            "full_info": full_info,
+            "schedule_lr": schedule_lr,
+            "overfit_batches": overfit_batches,
+            "pop_mode": pop_mode,
+        })
+    else:
+        logger = CSVLogger(save_dir=log_dir, name=name)
+
+    # Create trainer and fit
 
     trainer = L.Trainer(
         max_epochs=num_epochs,
@@ -141,16 +200,24 @@ def run_experiment(
 
     trainer.fit(lit_model, datamodule=datamodule)
 
-    if fast_dev_run:
-        return pl.DataFrame()
+    # Process results
 
-    if model_save_dir is not None:
-        trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
+    try:
+        if fast_dev_run:
+            return pl.DataFrame()
 
-    results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
+        if model_save_dir is not None:
+            trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-    first_cols = ["name", "stage", "epoch"]
-    other_cols = [c for c in results.columns if c not in first_cols]
-    results = results.select(first_cols + other_cols)
+        results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
 
-    return results
+        first_cols = ["name", "stage", "epoch"]
+        other_cols = [c for c in results.columns if c not in first_cols]
+        results = results.select(first_cols + other_cols)
+
+        return results
+    finally:
+        if wandb_params and wandb_params.use_wandb:
+            import wandb
+
+            wandb.finish()

@@ -21,3 +21,6 @@ data/external
 
 # Models
 models
+
+# Weights and biases
+wandb

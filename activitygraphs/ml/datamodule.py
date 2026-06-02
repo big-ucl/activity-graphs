@@ -86,15 +86,15 @@ class ActivityDataModule(L.LightningDataModule):
 
     def train_dataloader(self) -> pyg.loader.DataLoader:
         assert self._train_dataset is not None
-        return pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=True)
+        return pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8)
 
     def val_dataloader(self) -> pyg.loader.DataLoader:
         assert self._val_dataset is not None
-        return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size)
+        return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size, num_workers=8)
 
     def test_dataloader(self) -> pyg.loader.DataLoader:
         assert self._test_dataset is not None
-        return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size)
+        return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size, num_workers=8)
 
     @property
     def train_dataset(self) -> ActivityDataset:

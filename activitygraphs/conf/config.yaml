@@ -14,3 +14,7 @@ train:
   overfit_batches: 0
   schedule_lr: true
   debug: false
+
+  wandb: true
+  wandb_project: activity-graphs
+  wandb_entity: luca-bataillard-ucl-university-college-london

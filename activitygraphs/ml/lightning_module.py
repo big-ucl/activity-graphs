@@ -194,7 +194,7 @@ class ActivityGraphModule(L.LightningModule):
 
     def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
         out = self.compute_logits(batch)
-        loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=None)  # TODO self.pos_weight)
+        loss = F.binary_cross_entropy_with_logits(out, batch.y.float())
 
         if self.reg == "l1":
             l1_norm = sum(p.abs().sum() for p in self.model.parameters())
