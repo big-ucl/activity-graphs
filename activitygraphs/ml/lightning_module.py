@@ -1,5 +1,8 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
+from collections.abc import Collection
+from typing import Literal
+
 import lightning as L
 import numpy as np
 import torch
@@ -12,7 +15,12 @@ from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, build_hop_band_metrics
 
 
-def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use_demographics: bool = True):
+def extract_features(
+    batch: pyg.data.Data | pyg.data.Batch,
+    full_info: bool,
+    use_demographics: bool = True,
+    pop_logit: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Return node features for a batch.
 
     Starts with ``batch.x`` (which already contains the network features and the per-user
@@ -23,6 +31,10 @@ def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use
     distance-to-home signal does not leak into the other models.
     """
     x = batch.x
+
+    if pop_logit is not None:
+        pop_logit_col = create_pop_logit_column(pop_logit, batch, standardize=True)
+        x = torch.cat([x, pop_logit_col], dim=-1)
 
     if use_demographics and batch.graph_x is not None:
         if batch.batch is not None:
@@ -37,14 +49,41 @@ def extract_features(batch: pyg.data.Data | pyg.data.Batch, full_info: bool, use
     return torch.cat([x, batch.distances.to(x.dtype)], dim=-1)
 
 
-def extracted_features_dim(dataset: ActivityDataset, use_demographics: bool = True, full_info: bool = False) -> int:
+def extracted_features_dim(
+    dataset: ActivityDataset, use_demographics: bool = True, full_info: bool = False, use_pop_feature: bool = False
+) -> int:
     """Output width of extract_features for this dataset, given the same flags."""
     dim = dataset.num_features
+
+    if use_pop_feature:
+        dim += 1
     if use_demographics:
         dim += dataset.demographics.shape[1]
     if full_info:
         dim += dataset.distances.shape[-1]
+
     return dim
+
+
+def create_pop_logit_column(pop_logit: torch.Tensor, batch, standardize: bool):
+    """Per-node popularity logit aligned to the nodes in `batch`, shape [num_nodes, 1].
+
+    `standardize` z-scores it over the node vector (for the pop-logit-as-input-feature variant).
+    """
+    pop_logit_col = pop_logit[_compute_node_index_within_graph(batch, pop_logit.device)]
+    if standardize:
+        pop_logit_col = (pop_logit_col - pop_logit.mean()) / pop_logit.std().clamp(min=1e-6)
+
+    return pop_logit_col.unsqueeze(-1)
+
+
+def _compute_node_index_within_graph(batch, device: torch.device) -> torch.Tensor:
+    """Index of each node within its own graph (0..N-1), aligned to batch.x row order."""
+    n = batch.num_nodes
+    if getattr(batch, "batch", None) is None:
+        return torch.arange(n, device=device)
+
+    return torch.arange(n, device=device) - batch.ptr.to(device)[batch.batch]
 
 
 class ActivityGraphModule(L.LightningModule):
@@ -67,6 +106,9 @@ class ActivityGraphModule(L.LightningModule):
             enabling distance-from-home hop-band ranking metrics at test time. Requires ``is_home_idx``.
         is_home_idx: Column index of ``is_home`` in the node feature matrix (for the hop-band metrics).
         hop_bands: Hop-distance bands for the hop-band metrics.
+        pop_logit: Logits of global per-node visit frequencies.
+        pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
+            features to the model.
     """
 
     pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
@@ -84,7 +126,9 @@ class ActivityGraphModule(L.LightningModule):
         schedule_lr: bool = False,
         home_hop_distance: np.ndarray | torch.Tensor | None = None,
         is_home_idx: int | None = None,
-        hop_bands: list[tuple[str, float, float]] = DEFAULT_HOP_BANDS,
+        hop_bands: Collection[tuple[str, float, float]] = DEFAULT_HOP_BANDS,
+        pop_logit: torch.Tensor | None = None,
+        pop_mode: Literal["none", "offset", "feature"] = "none",
     ):
         super().__init__()
         self.model = model
@@ -127,6 +171,18 @@ class ActivityGraphModule(L.LightningModule):
             self.hop_band_bce = None
             self.hop_band_pos = None
 
+        # Population logits injection
+        if pop_mode not in ("none", "offset", "feature"):
+            raise ValueError(f"pop_mode must be none|offset|feature, got {pop_mode}")
+        if pop_mode != "none" and pop_logit is None:
+            raise ValueError(f"pop_mode must be none|offset, got {pop_mode}")
+
+        self.pop_mode = pop_mode
+        if pop_logit is not None:
+            self.register_buffer("pop_logit", pop_logit, persistent=False)
+        else:
+            self.pop_logit = None
+
     def forward(
         self,
         x: torch.Tensor,
@@ -137,9 +193,8 @@ class ActivityGraphModule(L.LightningModule):
         return self.model(x, edge_index, edge_attr, batch)
 
     def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
-        x = extract_features(batch, self.full_info)
-        out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
-        loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=None)# TODO self.pos_weight)
+        out = self.compute_logits(batch)
+        loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=None)  # TODO self.pos_weight)
 
         if self.reg == "l1":
             l1_norm = sum(p.abs().sum() for p in self.model.parameters())
@@ -202,7 +257,7 @@ class ActivityGraphModule(L.LightningModule):
             self.hop_band_test_metrics[label].update(scores[mask], band_target, indexes=user_ids[mask])
 
             band_bce = F.binary_cross_entropy_with_logits(
-                logits[mask], band_target.float(), pos_weight=self.pos_weight, reduction="none"
+                logits[mask], band_target.float(), reduction="none"
             )
             self.hop_band_bce[label].update(band_bce)
             self.hop_band_pos[label].update(band_target.sum())
@@ -211,9 +266,7 @@ class ActivityGraphModule(L.LightningModule):
                 self._seen_hop_bands.add(label)
 
     def _common_val_test_step(self, batch: pyg.data.Batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = extract_features(batch, self.full_info)
-        out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
-
+        out = self.compute_logits(batch)
         bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
         bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
 
@@ -227,7 +280,7 @@ class ActivityGraphModule(L.LightningModule):
             # Only compute/log hop bands that saw at least one positive (others would have all groups skipped).
             for label in self._seen_hop_bands:
                 self.log_dict(self.hop_band_test_metrics[label].compute())
-                self.log(f"test_hop_{label}_bce_weighted", self.hop_band_bce[label].compute())
+                self.log(f"test_hop_{label}_bce", self.hop_band_bce[label].compute())
                 self.log(f"test_hop_{label}_n_pos", self.hop_band_pos[label].compute())
             for collection in self.hop_band_test_metrics.values():
                 collection.reset()
@@ -247,3 +300,16 @@ class ActivityGraphModule(L.LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"}}
 
         return optimizer
+
+    def _pop_logits_feature(self) -> torch.Tensor | None:
+        return self.pop_logit if self.pop_mode == "feature" else None
+
+    def compute_logits(self, batch) -> torch.Tensor:
+        """Model logits for a batch, includes node-popularity feature column or offset if configured."""
+        x = extract_features(batch, self.full_info, pop_logit=self._pop_logits_feature())
+        out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
+
+        if self.pop_mode == "offset":
+            out = out + create_pop_logit_column(self.pop_logit, batch, standardize=False)
+
+        return out

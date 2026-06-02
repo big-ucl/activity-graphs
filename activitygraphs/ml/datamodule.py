@@ -18,6 +18,20 @@ def _compute_training_weights(train_dataset: ActivityDataset) -> torch.Tensor:
     return torch.sqrt((y.numel() - num_pos) / num_pos)
 
 
+def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tensor:
+    """Compute the per-node visit popularity logit over the training dataset. logit(p_n), where p_n is the
+    train visit rate of node n. Shape [num_nodes].
+
+    Same per-node rate as NodeBaseline, injected into the ML model outputs to see if they learn anything beyond the
+    "general" popularity signal."""
+
+    idx = train_dataset.indices()
+    y = train_dataset.spatial_labels[idx].float()
+    p = y.mean(dim=0).squeeze(-1).clamp(1e-6, 1 - 1e-6)
+
+    return torch.log(p / (1 - p))
+
+
 class ActivityDataModule(L.LightningDataModule):
     """LightningDataModule wrapping ``load_dataset`` for activity graph prediction.
 
@@ -55,6 +69,7 @@ class ActivityDataModule(L.LightningDataModule):
         self._test_dataset: ActivityDataset | None = None
         self._scalers: FittedScalers | None = None
         self._pos_weight: torch.Tensor | None = None
+        self._pop_logit: torch.Tensor | None = None
 
     def setup(self, stage: str | None = None) -> None:
         if self._train_dataset is not None:
@@ -64,15 +79,21 @@ class ActivityDataModule(L.LightningDataModule):
             self.cfg, self.val_size, self.test_size, self.seed, self.project_root
         )
 
+        assert self._train_dataset is not None
+
         self._pos_weight = _compute_training_weights(self._train_dataset)
+        self._pop_logit = _compute_node_popularity_logit(self._train_dataset)
 
     def train_dataloader(self) -> pyg.loader.DataLoader:
+        assert self._train_dataset is not None
         return pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=True)
 
     def val_dataloader(self) -> pyg.loader.DataLoader:
+        assert self._val_dataset is not None
         return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size)
 
     def test_dataloader(self) -> pyg.loader.DataLoader:
+        assert self._test_dataset is not None
         return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size)
 
     @property
@@ -104,3 +125,9 @@ class ActivityDataModule(L.LightningDataModule):
         if self._pos_weight is None:
             raise RuntimeError("Call setup() before accessing pos_weight.")
         return self._pos_weight
+
+    @property
+    def pop_logit(self) -> torch.Tensor:
+        if self._pop_logit is None:
+            raise RuntimeError("Call setup() before accessing pop_logit.")
+        return self._pop_logit

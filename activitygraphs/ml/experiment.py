@@ -1,6 +1,7 @@
 """Training orchestration: run_experiment, evaluate_baseline, and shared feature/weight helpers."""
 
 from pathlib import Path
+from typing import Literal
 
 import lightning as L
 import polars as pl
@@ -56,6 +57,7 @@ def run_experiment(
     overfit_batches: int = 0,
     weight_decay: float = 1e-4,
     schedule_lr: bool = False,
+    pop_mode: Literal["none", "offset", "feature"] = "none",
     debug: bool = False,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
@@ -76,6 +78,8 @@ def run_experiment(
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
         weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
+        pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
+            features to the model.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
 
     Returns:
@@ -89,6 +93,8 @@ def run_experiment(
 
     datamodule.setup()
 
+    pop_logit = datamodule.pop_logit if pop_mode != "none" else None
+
     lit_model = ActivityGraphModule(
         model=model,
         lr=lr,
@@ -99,6 +105,8 @@ def run_experiment(
         schedule_lr=schedule_lr,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
+        pop_logit=pop_logit,
+        pop_mode=pop_mode,
     )
 
     # Build the callbacks

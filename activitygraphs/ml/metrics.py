@@ -7,6 +7,7 @@ reports recall@k / ndcg@k within each band, using the per-hop-band torchmetrics 
 built here. Per-step ranking metrics use ``torchmetrics`` directly in the Lightning module;
 there is intentionally no hand-rolled metric implementation.
 """
+from collections.abc import Collection
 
 import numpy as np
 import torch
@@ -16,13 +17,13 @@ from torchmetrics import MetricCollection
 from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalRecall
 
 # Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
-DEFAULT_HOP_BANDS: list[tuple[str, float, float]] = [
+DEFAULT_HOP_BANDS: tuple[tuple[str, float, float], ...] = (
     ("0-2", 0, 2),
     ("3-5", 3, 5),
     ("6-8", 6, 8),
     ("9-12", 9, 12),
     ("13+", 13, float("inf")),
-]
+)
 
 
 def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.ndarray:
@@ -37,7 +38,7 @@ def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.nd
     return shortest_path(adjacency, method="D", unweighted=True, directed=False)
 
 
-def build_hop_band_metrics(hop_bands: list[tuple[str, float, float]], k: int) -> torch.nn.ModuleDict:
+def build_hop_band_metrics(hop_bands: Collection[tuple[str, float, float]], k: int) -> torch.nn.ModuleDict:
     """Build one ``recall@k`` / ``ndcg@k`` torchmetrics collection per hop band.
 
     Each collection is keyed by its hop-band label and prefixed ``test_hop_<label>_`` so the

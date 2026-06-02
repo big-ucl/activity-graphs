@@ -49,6 +49,7 @@ dependencies = [
     "torch-geometric>=2.7.0",
     "tqdm>=4.67.1",
     "torchmetrics>=1.9.0",
+    "scipy-stubs~=1.17.1",
 ]
 
 [project.scripts]
