@@ -139,7 +139,7 @@ class ActivityGraphModule(L.LightningModule):
     def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
         x = extract_features(batch, self.full_info)
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
-        loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
+        loss = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=None)# TODO self.pos_weight)
 
         if self.reg == "l1":
             l1_norm = sum(p.abs().sum() for p in self.model.parameters())
@@ -244,6 +244,6 @@ class ActivityGraphModule(L.LightningModule):
         # signal when purposefully overfitting
         if self.trainer.overfit_batches == 0 and self.schedule_lr:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce_weighted"}}
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"}}
 
         return optimizer
