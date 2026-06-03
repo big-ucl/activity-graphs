@@ -1,18 +1,21 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
 from collections.abc import Collection
-from typing import Literal
+from typing import Literal, cast
 
 import lightning as L
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
+from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection, SumMetric
-from torchmetrics.retrieval import RetrievalMRR, RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
+from torchmetrics.classification import BinaryCalibrationError
+from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, build_hop_band_metrics
+from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, build_hop_band_metrics, RetrievalRPrecision
+from activitygraphs.ml.sampling import poisson_sampling
 
 
 def extract_features(
@@ -30,7 +33,7 @@ def extract_features(
     this is used only by the distance-augmented MLP baseline so that the explicit
     distance-to-home signal does not leak into the other models.
     """
-    x = batch.x
+    x = cast(torch.Tensor, batch.x)
 
     if pop_logit is not None:
         pop_logit_col = create_pop_logit_column(pop_logit, batch, standardize=True)
@@ -141,17 +144,21 @@ class ActivityGraphModule(L.LightningModule):
         self.weight_decay = weight_decay
         self.schedule_lr = schedule_lr
 
+        # Metrics: General setup
         metrics = MetricCollection({
-            f"precision@{k}": RetrievalPrecision(top_k=k, empty_target_action="skip"),
+            "r_precision": RetrievalRPrecision(),
             f"recall@{k}": RetrievalRecall(top_k=k, empty_target_action="skip"),
-            "mrr": RetrievalMRR(empty_target_action="skip"),
             f"ndcg@{k}": RetrievalNormalizedDCG(top_k=k, empty_target_action="skip"),
+            f"precision@{k}": RetrievalPrecision(top_k=k, empty_target_action="skip"),
         })
 
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
 
-        # Optional distance-from-home hop-band metrics (test time only).
+        self.val_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
+        self.test_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
+
+        # Metrics: Optional distance-from-home hop-band metrics (test time only).
         self.is_home_idx = is_home_idx
         self.hop_bands = hop_bands
         if home_hop_distance is not None:
@@ -171,7 +178,15 @@ class ActivityGraphModule(L.LightningModule):
             self.hop_band_bce = None
             self.hop_band_pos = None
 
-        # Population logits injection
+        # Metrics: Capture predicted and true expected |RG_i| sizes
+        self.test_pred_size = MeanMetric()
+        self.test_true_size = MeanMetric()
+
+        # Metrics: evaluate actual Poisson-sampled sets
+        self.test_sampled_recall = MeanMetric()
+        self.test_sampled_size = MeanMetric()
+
+        # Training: Population logits injection
         if pop_mode not in ("none", "offset", "feature"):
             raise ValueError(f"pop_mode must be none|offset|feature, got {pop_mode}")
         if pop_mode != "none" and pop_logit is None:
@@ -192,7 +207,7 @@ class ActivityGraphModule(L.LightningModule):
     ) -> torch.Tensor:
         return self.model(x, edge_index, edge_attr, batch)
 
-    def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch, batch_idx: int) -> torch.Tensor:
         out = self.compute_logits(batch)
         loss = F.binary_cross_entropy_with_logits(out, batch.y.float())
 
@@ -203,35 +218,60 @@ class ActivityGraphModule(L.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         return loss
 
-    def validation_step(self, batch: pyg.data.Batch, batch_idx: int) -> None:
-        out, bce, bce_weighted = self._common_val_test_step(batch)
+    def _common_val_test_step(self, batch) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        out = self.compute_logits(batch)
+        bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
+        bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
+        probs = out.squeeze(-1).sigmoid()
+        target = batch.y.squeeze(-1)
+        users = batch.user_id[batch.batch]
+
+        return out, bce, bce_weighted, probs, target, users
+
+    def validation_step(self, batch, batch_idx: int) -> None:
+        out, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
 
         self.log("val_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("val_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
         # torchmetrics Retrieval* treat preds as probabilities and drop preds <= 0, so feed sigmoid
         # (monotonic, preserves ranking) rather than raw logits.
-        self.val_metrics.update(
-            out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch]
-        )
+        self.val_metrics.update(out.squeeze(-1).sigmoid(), target.long(), indexes=users)
+
+        self.val_calibration.update(probs, target.long())
 
     def on_validation_epoch_end(self) -> None:
         self.log_dict(self.val_metrics.compute())
         self.val_metrics.reset()
 
-    def test_step(self, batch: pyg.data.Batch, batch_idx: int) -> None:
-        out, bce, bce_weighted = self._common_val_test_step(batch)
+        self.log("val_calibration_l1", self.val_calibration.compute())
+        self.val_calibration.reset()
 
+    def test_step(self, batch, batch_idx: int) -> None:
+        out, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
+
+        # Log BCEs
         self.log("test_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("test_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
-        # See validation_step: feed sigmoid so the Retrieval* preds > 0 filter does not drop nodes.
-        self.test_metrics.update(
-            out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=batch.user_id[batch.batch]
-        )
+        # Update other metrics, feed sigmoid to conform to torchmetrics calling convention (see validation step)
+        self.test_metrics.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
 
+        # Update hop-band metrics
         if self.hop_band_test_metrics is not None:
             self._update_hop_band_metrics(batch, out)
+
+        # Update BCE calibration
+        self.test_calibration.update(probs, target.long())
+
+        # Update true and predicted expected |RG_i| set sizes
+        for idx in torch.unique(batch.user_id):
+            m = users == idx
+            self.test_pred_size.update(probs[m].sum())
+            self.test_true_size.update(target[m].sum())
+
+        # Update sampled set recall and size metrics
+        self._update_sampled_sets_metrics(batch, out)
 
     def _update_hop_band_metrics(self, batch: pyg.data.Batch, out: torch.Tensor) -> None:
         """Update the hop-band ranking metrics, grouping nodes by hop distance from each user's home."""
@@ -256,21 +296,31 @@ class ActivityGraphModule(L.LightningModule):
             band_target = target[mask]
             self.hop_band_test_metrics[label].update(scores[mask], band_target, indexes=user_ids[mask])
 
-            band_bce = F.binary_cross_entropy_with_logits(
-                logits[mask], band_target.float(), reduction="none"
-            )
+            band_bce = F.binary_cross_entropy_with_logits(logits[mask], band_target.float(), reduction="none")
             self.hop_band_bce[label].update(band_bce)
             self.hop_band_pos[label].update(band_target.sum())
 
             if band_target.sum() > 0:
                 self._seen_hop_bands.add(label)
 
-    def _common_val_test_step(self, batch: pyg.data.Batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        out = self.compute_logits(batch)
-        bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
-        bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
+    def _update_sampled_sets_metrics(self, batch, out, n_draws: int = 8):
+        logits = out.squeeze(-1)
+        target = batch.y.squeeze(-1).float()
+        users = batch.user_id[batch.batch]
+        gen = torch.Generator(device=out.device).manual_seed(42)
 
-        return out, bce, bce_weighted
+        # pos_weight=None under plain-BCE training (the default); pass float(self.pos_weight) only
+        # if the model was trained with weighted BCE.
+        for _ in range(n_draws):
+            chosen = poisson_sampling(logits, gen, pos_weight=None).squeeze(-1)
+            for idx in torch.unique(users):
+                m = users == idx
+                r = target[m].sum()
+                if r == 0:
+                    continue
+                hits = (chosen[m] * target[m]).sum()
+                self.test_sampled_recall.update(hits / r)
+                self.test_sampled_size.update(chosen[m].sum())
 
     def on_test_epoch_end(self) -> None:
         self.log_dict(self.test_metrics.compute())
@@ -280,7 +330,7 @@ class ActivityGraphModule(L.LightningModule):
             # Only compute/log hop bands that saw at least one positive (others would have all groups skipped).
             for label in self._seen_hop_bands:
                 self.log_dict(self.hop_band_test_metrics[label].compute())
-                self.log(f"test_hop_{label}_bce", self.hop_band_bce[label].compute())
+                self.log(f"test_hop_{label}_nll", self.hop_band_bce[label].compute())
                 self.log(f"test_hop_{label}_n_pos", self.hop_band_pos[label].compute())
             for collection in self.hop_band_test_metrics.values():
                 collection.reset()
@@ -289,6 +339,19 @@ class ActivityGraphModule(L.LightningModule):
             for metric in self.hop_band_pos.values():
                 metric.reset()
             self._seen_hop_bands.clear()
+
+        self.log("test_calibration_l1", self.test_calibration.compute())
+        self.test_calibration.reset()
+
+        self.log("test_pred_size", self.test_pred_size.compute())
+        self.log("test_true_size", self.test_true_size.compute())
+        self.test_pred_size.reset()
+        self.test_true_size.reset()
+
+        self.log("test_sampled_recall", self.test_sampled_recall.compute())
+        self.log("test_sampled_size", self.test_sampled_size.compute())
+        self.test_sampled_recall.reset()
+        self.test_sampled_size.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

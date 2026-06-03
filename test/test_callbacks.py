@@ -35,9 +35,9 @@ class TestEpochMetricsCollector:
 
     def test_test_row_keeps_test_only_with_null_epoch(self):
         collector = EpochMetricsCollector()
-        # Ranking metrics (test_mrr etc.) are only in callback_metrics by on_test_end, after the
+        # Ranking metrics (test_r_precision etc.) are only in callback_metrics by on_test_end, after the
         # module's on_test_epoch_end runs; the collector must read them there, not at epoch end.
-        trainer = fake_trainer({"val_bce": 0.4, "test_bce": 0.3, "test_precision@5": 0.25, "test_mrr": 0.5})
+        trainer = fake_trainer({"val_bce": 0.4, "test_bce": 0.3, "test_precision@5": 0.25, "test_r_precision": 0.5})
 
         collector.on_test_end(trainer, None)
 
@@ -45,7 +45,7 @@ class TestEpochMetricsCollector:
         assert row["stage"] == "test"
         assert row["epoch"] is None
         assert row["test_bce"] == pytest.approx(0.3)
-        assert row["test_mrr"] == pytest.approx(0.5)
+        assert row["test_r_precision"] == pytest.approx(0.5)
         assert "val_bce" not in row
 
     def test_sanity_check_epoch_skipped(self):

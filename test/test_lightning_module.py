@@ -138,8 +138,8 @@ class TestTrainingStep:
 
 
 class TestValidationStep:
-    def test_all_six_val_keys_logged(self, monkeypatch):
-        """validation_step + on_validation_epoch_end must populate the two BCE and four ranking keys."""
+    def test_val_metric_keys_logged(self, monkeypatch):
+        """validation_step + on_validation_epoch_end must populate the BCE, ranking, and calibration keys."""
         module = make_module()
         batch = make_batch(num_graphs=3, num_nodes=8)
         force_positive_per_graph(batch)
@@ -152,7 +152,15 @@ class TestValidationStep:
         module.on_validation_epoch_end()
 
         k = module.k
-        expected = {"val_bce", "val_bce_weighted", f"val_precision@{k}", f"val_recall@{k}", "val_mrr", f"val_ndcg@{k}"}
+        expected = {
+            "val_bce",
+            "val_bce_weighted",
+            "val_r_precision",
+            f"val_recall@{k}",
+            f"val_ndcg@{k}",
+            f"val_precision@{k}",
+            "val_calibration_l1",
+        }
         assert expected.issubset(logged.keys())
         assert all(torch.as_tensor(logged[key]).isfinite() for key in expected)
 
@@ -220,8 +228,8 @@ class TestValidationStep:
 
 
 class TestTestStep:
-    def test_all_six_test_keys_logged(self, monkeypatch):
-        """test_step + on_test_epoch_end must populate the two BCE and four ranking test keys."""
+    def test_test_metric_keys_logged(self, monkeypatch):
+        """test_step + on_test_epoch_end must populate the BCE, ranking, calibration, size, and sampled-set keys."""
         module = make_module()
         batch = make_batch(num_graphs=3, num_nodes=8)
         force_positive_per_graph(batch)
@@ -237,10 +245,15 @@ class TestTestStep:
         expected = {
             "test_bce",
             "test_bce_weighted",
-            f"test_precision@{k}",
+            "test_r_precision",
             f"test_recall@{k}",
-            "test_mrr",
             f"test_ndcg@{k}",
+            f"test_precision@{k}",
+            "test_calibration_l1",
+            "test_pred_size",
+            "test_true_size",
+            "test_sampled_recall",
+            "test_sampled_size",
         }
         assert expected.issubset(logged.keys())
 
@@ -251,9 +264,9 @@ class TestConfigureOptimizers:
         assert "optimizer" in result
         assert "lr_scheduler" in result
 
-    def test_scheduler_monitors_val_bce_weighted(self):
+    def test_scheduler_monitors_val_bce(self):
         result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
-        assert result["lr_scheduler"]["monitor"] == "val_bce_weighted"
+        assert result["lr_scheduler"]["monitor"] == "val_bce"
 
     def test_optimizer_is_adamw(self):
         result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()

@@ -134,6 +134,12 @@ class ActivityDataset(pyg.data.Dataset):
         """All-pairs hop distance matrix (over spatial adjacency graph) ``[num_nodes, num_nodes]`` for the network graph."""
         return compute_home_hop_distance(self.network_graph.edge_index, self.num_nodes)
 
+    @cached_property
+    def median_realised_size(self) -> int:
+        """Median number of visited nodes per user over the dataset (median |RG_i|)."""
+        sizes = [int(data.y.sum()) for data in self]
+        return int(np.median(sizes))
+
     @property
     def raw_file_names(self) -> list[str]:
         return []

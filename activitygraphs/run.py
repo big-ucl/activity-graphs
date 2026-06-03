@@ -1,6 +1,7 @@
 """Top-level experiment runners: model builders, baseline evaluation, and result persistence."""
 
 import functools
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
@@ -138,7 +139,9 @@ def measure_baselines(num_nodes, datamodule: ActivityDataModule, wandb_params: W
         ("NodeMarginal", node_base),
         ("ConditionalNodeMarginal", conditional_base),
     ]:
-        res = evaluate_baseline(baseline, datamodule, name, wandb_params=wandb_params)
+        res = evaluate_baseline(
+            baseline, datamodule, name, k=datamodule.train_dataset.median_realised_size, wandb_params=wandb_params
+        )
         results.append(res)
 
     return results
@@ -150,14 +153,16 @@ def comparison_experiment(cfg: Config):
     Fixed hyperparameters: batch_size=64, epochs=50, hidden_channels=128, dropout=0.2.
     Results are written to ``cfg.paths.reports/data/{dataset}-results-{n}.parquet``.
     """
+
+    run_group = f"{cfg.data.name}-{datetime.now():%Y%m%d-%H%M%S}"
     wandb_params = WandBParams(
-        cfg.train.wandb,
-        cfg.train.wandb_project,
-        cfg.train.wandb_entity,
-        f"{cfg.data.name}-comparison",
+        use_wandb=cfg.train.wandb,
+        project=cfg.train.wandb_project,
+        entity=cfg.train.wandb_entity,
+        group=run_group,
         dataset_name=cfg.data.name,
     )
-    
+
     batch_size = 64
     val_size = 0.1
     test_size = 0.2

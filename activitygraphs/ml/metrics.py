@@ -7,13 +7,14 @@ reports recall@k / ndcg@k within each band, using the per-hop-band torchmetrics 
 built here. Per-step ranking metrics use ``torchmetrics`` directly in the Lightning module;
 there is intentionally no hand-rolled metric implementation.
 """
+
 from collections.abc import Collection
 
 import numpy as np
 import torch
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import shortest_path
-from torchmetrics import MetricCollection
+from torchmetrics import MetricCollection, Metric
 from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalRecall
 
 # Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
@@ -54,3 +55,34 @@ def build_hop_band_metrics(hop_bands: Collection[tuple[str, float, float]], k: i
         )
         for label, _, _ in hop_bands
     })
+
+
+class RetrievalRPrecision(Metric):
+    """Per-user recall at k = number of visited nodes (R-precision).
+
+    For each user, scores the top-R nodes where R is that user's realised set size |RG_i|,
+    and reports hits / R, averaged over users. The cutoff tracks each user's realised set
+    size, so it stays comparable across datasets with very different set sizes (Geneva ~2-4,
+    Toronto ~26) where a fixed @5 does not.
+    """
+
+    higher_is_better = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.add_state("score_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("n_users", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
+        for idx in torch.unique(indexes):
+            mask = indexes == idx
+            t = target[mask]
+            r = int(t.sum())
+            if r == 0:
+                continue
+            top = preds[mask].topk(min(r, t.numel())).indices
+            self.score_sum = self.score_sum + t[top].sum() / r
+            self.n_users = self.n_users + 1
+
+    def compute(self) -> torch.Tensor:
+        return self.score_sum / self.n_users.clamp(min=1)

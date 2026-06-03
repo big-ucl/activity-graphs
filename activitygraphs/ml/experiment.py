@@ -7,7 +7,7 @@ from typing import Literal
 import lightning as L
 import polars as pl
 import torch
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
@@ -133,6 +133,7 @@ def run_experiment(
         pos_weight=datamodule.pos_weight,
         reg=reg,
         full_info=full_info,
+        k=datamodule.train_dataset.median_realised_size,
         weight_decay=weight_decay,
         schedule_lr=schedule_lr,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
@@ -144,7 +145,7 @@ def run_experiment(
     # Build the callbacks
 
     collector = EpochMetricsCollector()
-    callbacks: list[L.Callback] = [collector]
+    callbacks: list[L.Callback] = [collector, LearningRateMonitor(logging_interval="epoch")]
 
     if model_save_dir is not None:
         callbacks.append(
