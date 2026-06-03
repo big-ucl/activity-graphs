@@ -171,6 +171,16 @@ class TorontoData(NetworkData, DataFrameStore):
     def user_ids(self) -> pl.Series:
         return self.users_df["user_id"].sort()
 
+    @cached_property
+    def num_obs_days_per_user(self) -> pl.DataFrame:
+        """Per-user observed-day count t_i (0-7) from the activity diary."""
+        return (
+            self.activities_df
+            .group_by("person_id")
+            .agg(n_days=pl.col("act_date").n_unique().cast(pl.Int32))
+            .rename({"person_id": "user_id"})
+        )
+
     def _copy(self, filters: list[str] | None = None):
         return TorontoData(
             self.inputs, self._locations_gdf, self._user_journeys_df, self.activities_df, self.users_df, filters

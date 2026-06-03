@@ -63,12 +63,84 @@ def _(
         data, cfg.data, project_root
     )
 
-    network_graph, spatial_features, spatial_labels, demographics = convert_to_torch(data, network_nodes, network_edges)
+    network_graph, spatial_features, spatial_labels, demographics, distances = convert_to_torch(data, network_nodes, network_edges)
 
     dataset_path = project_root / cfg.data.paths.pyg_datasets
 
-    dataset = ActivityDataset(dataset_path, network_graph, spatial_features, spatial_labels, demographics)
+    dataset = ActivityDataset(dataset_path, network_graph, spatial_features, spatial_labels, demographics, distances)
     return data, dataset, network_edges, network_nodes
+
+
+@app.cell
+def _(data):
+    data.inputs.raw_person_df
+    return
+
+
+@app.cell
+def _(data, pl):
+    cols = [f"THATS D{n}DS? = 1" for n in range(1, 8)]
+    obs = data.inputs.raw_person_df.select("person_id", pl.sum_horizontal(cols).alias("num_obs_days"), "THATS Number of Trips", span=pl.col("THATS Experiment start day") - pl.col("THATS Experiment end day"))
+    ttrips = data.user_journeys_df.group_by("user_id").agg(n_trip_days=pl.col("dep_day").n_unique().cast(pl.Int32))
+    locs = data.location_visits.group_by("user_id").agg(num_locs=pl.col("loc_id").n_unique())
+
+
+    res = ttrips.join(obs, left_on="user_id", right_on="person_id").with_columns(day_diff=pl.col("n_trip_days") - pl.col("num_obs_days")).join(locs, on="user_id")
+    return obs, res
+
+
+@app.cell
+def _(alt, res):
+    alt.Chart(res).mark_bar().encode(x=alt.X("n_trip_days").bin(maxbins=50), y="count()")
+    return
+
+
+@app.cell
+def _(alt, obs):
+    alt.Chart(obs).mark_point().encode(x="num_obs_days", y="THATS Number of Trips")
+    return
+
+
+@app.cell
+def _(alt, res):
+    alt.Chart(res).mark_bar().encode(x="num_obs_days:N", y="count()")
+    return
+
+
+@app.cell
+def _(pl, res):
+    res.filter(pl.col("n_trip_days") <= 7, day_diff=0)
+    return
+
+
+@app.cell
+def _(alt, res):
+    alt.Chart(res).mark_point().encode(x="n_trip_days", y="THATS Number of Trips").properties(width=1000)
+    return
+
+
+@app.cell
+def _(alt, res):
+    alt.Chart(res).mark_point().encode(x="n_trip_days", y="num_locs")
+    return
+
+
+@app.cell
+def _(alt, res):
+    alt.Chart(res).mark_point().encode(x="num_obs_days", y="num_locs")
+    return
+
+
+@app.cell
+def _(data):
+    data.users_df
+    return
+
+
+@app.cell
+def _(data, pl):
+    data.user_journeys_df.group_by("user_id", maintain_order=True).agg(n_trip_days=pl.col("dep_day").unique())
+    return
 
 
 @app.cell

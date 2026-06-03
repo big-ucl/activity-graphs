@@ -113,6 +113,11 @@ class NetworkData(ABC):
         users = valid_homes["user_id"].unique().sort()
         return users
 
+    @cached_property
+    def num_obs_days_per_user(self) -> pl.DataFrame:
+        """Per-user observed-day count t_i, keyed by user_id."""
+        return self.user_journeys_df.group_by("user_id").agg(n_days=pl.col("dep_day").n_unique().cast(pl.Int32))
+
     def with_filter(self, loc_types: str | list[str]) -> Self:
         """Return a new instance restricted to locations whose ``type`` is in ``loc_types``.
 
