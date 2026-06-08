@@ -324,8 +324,13 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 
 
 def create_individual_demographics(data: NetworkData) -> torch.Tensor:
-    """Create the demographic tensor from NetworkData, returns a float32 tensor of shape ``[n_users, n_demo_features]``."""
+    """Create the demographic tensor from NetworkData, returns a float32 tensor of shape ``[n_users, n_demo_features]``.
+    If there are no demographics (e.g. Geneva), returns a (n_users, 1) dummy tensor of ones."""
     indiv_demographics = data.users_df.drop("user_id", "home_loc_id")
+
+    if len(indiv_demographics) == 0:
+        return torch.ones((len(data.user_ids), 1), dtype=torch.float32)
+
     return torch.tensor(indiv_demographics.to_numpy(), dtype=torch.float32)
 
 
@@ -484,7 +489,7 @@ def _load_toronto_data(cfg: TorontoDataConfig, project_root: Path | None = None)
 
 
 def _load_geneva_data(cfg: GenevaDataConfig, project_root: Path | None = None):
-    data = GenevaData.load(cfg, project_root)
+    data = GenevaData.load(cfg, project_root).with_filter("subsector")
     network_nodes, network_edges = load_gva_network_graph(data, cfg, project_root)
 
     return data, network_nodes, network_edges

@@ -100,7 +100,7 @@ class NetworkData(ABC):
 
     @cached_property
     def users_df(self) -> pl.DataFrame:
-        return self._filter_loc_types(self.home_locations).sort("user_id")
+        return self._filter_loc_types(self.home_locations).sort("user_id").select("user_id", home_loc_id="loc_id")
 
     @cached_property
     def user_ids(self) -> pl.Series:
@@ -187,7 +187,12 @@ class NetworkData(ABC):
         locations_by_purpose = (
             location_visits.group_by("user_id", "purpose").agg(pl.col("loc_id").unique()).sort("user_id")
         )
-        home_locations = locations_by_purpose.filter(purpose=Purpose.HOME).with_columns(pl.col("loc_id").list.first())
+        home_locations = (
+            locations_by_purpose
+            .filter(purpose=Purpose.HOME)
+            .with_columns(pl.col("loc_id").list.first())
+            .drop("purpose")
+        )
 
         return home_locations
 
