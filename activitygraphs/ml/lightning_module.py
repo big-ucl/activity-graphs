@@ -14,12 +14,13 @@ from torchmetrics.classification import BinaryCalibrationError
 from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, build_hop_band_metrics, RetrievalRPrecision
-from activitygraphs.ml.sampling import poisson_sampling
+from activitygraphs.ml.losses import BCELoss, Loss
+from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, RetrievalRPrecision, build_hop_band_metrics
+from activitygraphs.ml.sampling import pps_sampling
 
 
 def extract_features(
-    batch: pyg.data.Data | pyg.data.Batch,
+    batch: pyg.data.Batch,
     full_info: bool,
     use_demographics: bool = True,
     pop_logit: torch.Tensor | None = None,
@@ -68,7 +69,7 @@ def extracted_features_dim(
     return dim
 
 
-def create_pop_logit_column(pop_logit: torch.Tensor, batch, standardize: bool):
+def create_pop_logit_column(pop_logit: torch.Tensor, batch: pyg.data.Batch, standardize: bool):
     """Per-node popularity logit aligned to the nodes in `batch`, shape [num_nodes, 1].
 
     `standardize` z-scores it over the node vector (for the pop-logit-as-input-feature variant).
@@ -80,7 +81,7 @@ def create_pop_logit_column(pop_logit: torch.Tensor, batch, standardize: bool):
     return pop_logit_col.unsqueeze(-1)
 
 
-def _compute_node_index_within_graph(batch, device: torch.device) -> torch.Tensor:
+def _compute_node_index_within_graph(batch: pyg.data.Batch, device: torch.device) -> torch.Tensor:
     """Index of each node within its own graph (0..N-1), aligned to batch.x row order."""
     n = batch.num_nodes
     if getattr(batch, "batch", None) is None:
@@ -99,6 +100,7 @@ class ActivityGraphModule(L.LightningModule):
         model: Any ``nn.Module`` with the GNN forward signature.
         lr: Initial learning rate for AdamW.
         pos_weight: Scalar positive-class weight for BCE loss, computed from the train split.
+        loss: ``Loss`` instance. Defaults to BCE if none.
         reg: Optional regularisation type; only ``"l1"`` is supported.
         lambda_reg: L1 coefficient (ignored when ``reg`` is None).
         full_info: If True, augment node features with home indicator and distances.
@@ -121,6 +123,7 @@ class ActivityGraphModule(L.LightningModule):
         model: torch.nn.Module,
         lr: float,
         pos_weight: torch.Tensor,
+        loss: Loss | None = None,
         reg: str | None = None,
         lambda_reg: float = 0.01,
         full_info: bool = False,
@@ -136,6 +139,7 @@ class ActivityGraphModule(L.LightningModule):
         super().__init__()
         self.model = model
         self.lr = lr
+        self.loss = loss if loss is not None else BCELoss
         self.register_buffer("pos_weight", pos_weight)
         self.reg = reg
         self.lambda_reg = lambda_reg
@@ -207,9 +211,9 @@ class ActivityGraphModule(L.LightningModule):
     ) -> torch.Tensor:
         return self.model(x, edge_index, edge_attr, batch)
 
-    def training_step(self, batch, batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
         out = self.compute_logits(batch)
-        loss = F.binary_cross_entropy_with_logits(out, batch.y.float())
+        loss = self.loss.loss_fn(out, batch)
 
         if self.reg == "l1":
             l1_norm = sum(p.abs().sum() for p in self.model.parameters())
@@ -218,26 +222,32 @@ class ActivityGraphModule(L.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         return loss
 
-    def _common_val_test_step(self, batch) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def _common_val_test_step(self, batch) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         out = self.compute_logits(batch)
+
+        generator = torch.Generator(device=out.device).manual_seed(42)
+        loss = self.loss.loss_fn(out, batch, generator)
+
         bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
         bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
         probs = out.squeeze(-1).sigmoid()
         target = batch.y.squeeze(-1)
         users = batch.user_id[batch.batch]
 
-        return out, bce, bce_weighted, probs, target, users
+        return out, loss, bce, bce_weighted, probs, target, users
 
     def validation_step(self, batch, batch_idx: int) -> None:
-        out, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
+        out, loss, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
 
+        # Log losses
+        if self.loss.name != "bce":
+            self.log(f"val_{self.loss.name}", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("val_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("val_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
         # torchmetrics Retrieval* treat preds as probabilities and drop preds <= 0, so feed sigmoid
         # (monotonic, preserves ranking) rather than raw logits.
         self.val_metrics.update(out.squeeze(-1).sigmoid(), target.long(), indexes=users)
-
         self.val_calibration.update(probs, target.long())
 
     def on_validation_epoch_end(self) -> None:
@@ -248,9 +258,11 @@ class ActivityGraphModule(L.LightningModule):
         self.val_calibration.reset()
 
     def test_step(self, batch, batch_idx: int) -> None:
-        out, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
+        out, loss, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
 
         # Log BCEs
+        if self.loss.name != "bce":
+            self.log(f"test_{self.loss.name}", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("test_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
         self.log("test_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
@@ -312,7 +324,7 @@ class ActivityGraphModule(L.LightningModule):
         # pos_weight=None under plain-BCE training (the default); pass float(self.pos_weight) only
         # if the model was trained with weighted BCE.
         for _ in range(n_draws):
-            chosen = poisson_sampling(logits, gen, pos_weight=None).squeeze(-1)
+            chosen = pps_sampling(self.k, logits, batch.batch, gen).squeeze(-1)
             for idx in torch.unique(users):
                 m = users == idx
                 r = target[m].sum()
@@ -359,15 +371,18 @@ class ActivityGraphModule(L.LightningModule):
         # Only add a scheduler if not trying to overfit (i.e. not in diagnostic mode). Validation error is not a useful
         # signal when purposefully overfitting
         if self.trainer.overfit_batches == 0 and self.schedule_lr:
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_bce"}}
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode=self.loss.monitor_mode, factor=0.5, patience=5
+            )
+
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": self.loss.monitor}}
 
         return optimizer
 
     def _pop_logits_feature(self) -> torch.Tensor | None:
         return self.pop_logit if self.pop_mode == "feature" else None
 
-    def compute_logits(self, batch) -> torch.Tensor:
+    def compute_logits(self, batch: pyg.data.Batch) -> torch.Tensor:
         """Model logits for a batch, includes node-popularity feature column or offset if configured."""
         x = extract_features(batch, self.full_info, pop_logit=self._pop_logits_feature())
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)

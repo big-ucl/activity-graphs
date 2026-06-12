@@ -194,6 +194,16 @@ class OutputPaths:
 
 
 @dataclass
+class LossConfig:
+    """Loss configuration: type (BPR or BCE) and associated params."""
+
+    type: Literal["bce", "bpr"] = "bpr"
+    n_pairs: int = 128
+    neg_sampler: Literal["uniform", "hard"] = "uniform"
+    is_near_threshold: int = 5
+
+
+@dataclass
 class TrainConfig:
     """Training configuration for development and debugging."""
 
@@ -207,6 +217,8 @@ class TrainConfig:
     wandb: bool
     wandb_project: str
     wandb_entity: str | None
+
+    loss: LossConfig
 
 
 @dataclass

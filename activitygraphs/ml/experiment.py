@@ -7,12 +7,13 @@ from typing import Literal
 import lightning as L
 import polars as pl
 import torch
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.losses import Loss
 
 
 @dataclass
@@ -27,6 +28,7 @@ class WandBParams:
 def evaluate_baseline(
     baseline: torch.nn.Module,
     datamodule: ActivityDataModule,
+    loss: Loss,
     name: str,
     k: int = 5,
     wandb_params: WandBParams | None = None,
@@ -41,6 +43,7 @@ def evaluate_baseline(
         model=baseline,
         lr=0.0,
         pos_weight=datamodule.pos_weight,
+        loss=loss,
         k=k,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
@@ -76,6 +79,7 @@ def evaluate_baseline(
 def run_experiment(
     model: torch.nn.Module,
     datamodule: ActivityDataModule,
+    loss: Loss,
     num_epochs: int = 10,
     verbose: int = 1,
     name: str | None = None,
@@ -98,6 +102,7 @@ def run_experiment(
     Args:
         model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
         datamodule: ``ActivityDataModule`` instance (``setup()`` is called internally if needed).
+        loss: ``Loss`` instance
         num_epochs: Number of training epochs.
         verbose: Non-zero enables the Lightning progress bar.
         name: Experiment name used for logging and checkpoint filename.
@@ -131,6 +136,7 @@ def run_experiment(
         model=model,
         lr=lr,
         pos_weight=datamodule.pos_weight,
+        loss=loss,
         reg=reg,
         full_info=full_info,
         k=datamodule.train_dataset.median_realised_size,
@@ -150,7 +156,12 @@ def run_experiment(
     if model_save_dir is not None:
         callbacks.append(
             ModelCheckpoint(
-                dirpath=str(model_save_dir), filename=name, save_last=False, save_top_k=1, monitor="val_bce"
+                dirpath=str(model_save_dir),
+                filename=name,
+                save_last=False,
+                save_top_k=1,
+                monitor=loss.monitor,
+                mode=loss.monitor_mode,
             )
         )
 

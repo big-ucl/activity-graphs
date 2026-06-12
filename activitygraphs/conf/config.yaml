@@ -18,3 +18,9 @@ train:
   wandb: true
   wandb_project: activity-graphs
   wandb_entity: luca-bataillard-ucl-university-college-london
+
+  loss:
+    type: bpr
+    n_pairs: 128
+    neg_sampler: uniform
+    is_near_threshold: 5

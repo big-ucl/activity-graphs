@@ -120,21 +120,23 @@ class TestTrainingStep:
 
         assert loss_l1 > loss_base
 
-    def test_pos_weight_shifts_loss(self, monkeypatch):
-        """Larger pos_weight must yield strictly higher loss on positive-heavy batches."""
+    def test_pos_weight_does_not_affect_training_loss(self, monkeypatch):
+        """Training uses plain (unweighted) BCE, so pos_weight must not change the training loss."""
         batch = make_batch(seed=2)
         batch.y[0] = 1.0  # ensure at least one positive label
 
         module_low = make_module(pos_weight=1.0)
         monkeypatch.setattr(module_low, "log", lambda *a, **kw: None)
+        module_low.eval()  # disable dropout so the forward pass is deterministic
         loss_low = module_low.training_step(batch, 0).item()
 
         # reuse identical weights, only the pos_weight differs
         module_high = ActivityGraphModule(model=module_low.model, lr=1e-3, pos_weight=torch.tensor(10.0))
         monkeypatch.setattr(module_high, "log", lambda *a, **kw: None)
+        module_high.eval()
         loss_high = module_high.training_step(batch, 0).item()
 
-        assert loss_high > loss_low
+        assert loss_high == loss_low
 
 
 class TestValidationStep:

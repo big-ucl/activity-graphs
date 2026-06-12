@@ -10,7 +10,6 @@ from activitygraphs.ml.models import FullyConnectedMLP, NodeMLP
 # Path graph 0-1-2-3-4 (both directions): hop distance from node 0 is [0, 1, 2, 3, 4].
 PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 3]])
 
-
 class TestFullyConnectedMLP:
     def test_forward_shape(self):
         num_nodes, in_features, num_graphs = 4, 3, 2
@@ -81,9 +80,9 @@ class TestHopBandMetrics:
             f"test_hop_0-2_recall@{k}",
             f"test_hop_0-2_ndcg@{k}",
             f"test_hop_3-5_recall@{k}",
-            "test_hop_0-2_bce_weighted",
+            "test_hop_0-2_nll",
             "test_hop_0-2_n_pos",
-            "test_hop_3-5_bce_weighted",
+            "test_hop_3-5_nll",
         }
         assert expected.issubset(logged.keys())
         assert all(torch.as_tensor(logged[key]).isfinite() for key in expected)
@@ -92,5 +91,5 @@ class TestHopBandMetrics:
 
     def test_no_hop_band_metrics_without_hop_distance(self):
         model = NodeMLP(num_layers=2, in_channels=4, hidden_channels=8, out_channels=1)
-        module = ActivityGraphModule(model=model, lr=1e-3, pos_weight=torch.tensor(1.0))
+        module = ActivityGraphModule(model=model, loss=None, lr=1e-3, pos_weight=torch.tensor(1.0))
         assert module.hop_band_test_metrics is None

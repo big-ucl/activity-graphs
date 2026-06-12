@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import polars as pl
+import torch
 
 from activitygraphs.config import Config
 from activitygraphs.ml.baselines import (
@@ -15,8 +16,9 @@ from activitygraphs.ml.baselines import (
 )
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.experiment import evaluate_baseline, run_experiment, WandBParams
+from activitygraphs.ml.experiment import WandBParams, evaluate_baseline, run_experiment
 from activitygraphs.ml.lightning_module import extracted_features_dim
+from activitygraphs.ml.losses import Loss, build_loss
 from activitygraphs.ml.models import FullyConnectedMLP, GATSkip, GraphTransformer, NodeMLP
 
 
@@ -120,7 +122,7 @@ def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     pl.concat(results, how="diagonal").write_parquet(path / f"{name}-results-{max_num + 1}.parquet")
 
 
-def measure_baselines(num_nodes, datamodule: ActivityDataModule, wandb_params: WandBParams):
+def measure_baselines(num_nodes, datamodule: ActivityDataModule, loss: Loss, wandb_params: WandBParams):
     """Fit and evaluate all four frequency baselines; return a list of result dicts."""
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
@@ -140,7 +142,7 @@ def measure_baselines(num_nodes, datamodule: ActivityDataModule, wandb_params: W
         ("ConditionalNodeMarginal", conditional_base),
     ]:
         res = evaluate_baseline(
-            baseline, datamodule, name, k=datamodule.train_dataset.median_realised_size, wandb_params=wandb_params
+            baseline, datamodule, loss, name, k=datamodule.train_dataset.median_realised_size, wandb_params=wandb_params
         )
         results.append(res)
 
@@ -173,6 +175,9 @@ def comparison_experiment(cfg: Config):
 
     train_dataset = datamodule.train_dataset
 
+    home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
+    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx)
+
     hidden_channels = 128
     gat_layers = 8
     gps_layers = 2
@@ -195,7 +200,7 @@ def comparison_experiment(cfg: Config):
     verbose = 1
 
     num_nodes = train_dataset[0].num_nodes
-    baseline_results = measure_baselines(num_nodes, datamodule, wandb_params)
+    baseline_results = measure_baselines(num_nodes, datamodule, loss, wandb_params)
 
     models_dir = cfg.paths.models
 
@@ -232,6 +237,7 @@ def comparison_experiment(cfg: Config):
     my_run_experiment = functools.partial(
         run_experiment,
         datamodule=datamodule,
+        loss=loss,
         num_epochs=epochs,
         verbose=verbose,
         weight_decay=weight_decay,

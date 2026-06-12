@@ -72,8 +72,57 @@ def _(
 
 
 @app.cell
-def _(data):
-    data.inputs.raw_person_df
+def _():
+    import torch_geometric as pyg
+    import torch
+
+    return pyg, torch
+
+
+@app.cell
+def _(dataset, pyg):
+    batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=64)))
+    batch
+    return (batch,)
+
+
+@app.cell
+def _(batch, torch):
+    y = batch.y
+
+    logits = torch.rand_like(batch.y)
+    batch_index = batch.batch
+
+    neg_restrict = None
+    return batch_index, logits, neg_restrict, y
+
+
+@app.cell
+def _(batch_index, logits, neg_restrict, pyg, torch, y):
+    scores, mask = pyg.utils.to_dense_batch(logits.reshape(-1), batch_index)  # [B, N], [B, N]
+    labels, _ = pyg.utils.to_dense_batch(y.reshape(-1).float(), batch_index)
+
+    pos_mask = (labels > 0.5) & mask
+    neg_mask = (labels <= 0.5) & mask
+    if neg_restrict is not None:
+        restricted = neg_mask & neg_restrict
+
+        empty = ~restricted.any(dim=1, keepdim=True) # fall back to all unvisited for users whose restricted pool is empty
+        neg_mask = torch.where(empty, neg_mask, restricted)
+
+    has_pos = pos_mask.any(dim=1) & neg_mask.any(dim=1)
+    if not has_pos.any():
+        logits.sum() * 0.0  # keep graph connected, zero loss
+
+    pos_w = pos_mask[has_pos].float() # Weights
+    neg_w = neg_mask[has_pos].float()
+    s = scores[has_pos]
+
+    pos_idx = torch.multinomial(pos_w, 128, replacement=True) # [num_has_pos, n_pairs]
+    neg_idx = torch.multinomial(neg_w, 128, replacement=True)
+
+    diff = s.gather(1, pos_idx) - s.gather(1, neg_idx)  # [U, n_pairs]
+    pos_idx
     return
 
 
