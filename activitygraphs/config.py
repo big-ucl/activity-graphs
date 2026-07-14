@@ -212,6 +212,7 @@ class TrainConfig:
     fast_dev_run: bool
     overfit_batches: int
     schedule_lr: bool
+    compile: bool
     debug: bool
 
     wandb: bool

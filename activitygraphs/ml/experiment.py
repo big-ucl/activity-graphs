@@ -92,6 +92,8 @@ def run_experiment(
     weight_decay: float = 1e-4,
     schedule_lr: bool = False,
     pop_mode: Literal["none", "offset", "feature"] = "none",
+    use_home_pe: bool = False,
+    compile_model: bool = True,
     wandb_params: WandBParams | None = None,
     debug: bool = False,
 ) -> pl.DataFrame:
@@ -116,6 +118,7 @@ def run_experiment(
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
             features to the model.
+        use_home_pe: if true, add home-anchored positional encodings to features
         wandb_params: parameters to configure WandB logging.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
 
@@ -146,6 +149,8 @@ def run_experiment(
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
         pop_logit=pop_logit,
         pop_mode=pop_mode,
+        use_home_pe=use_home_pe,
+        compile_model=compile_model,
     )
 
     # Build the callbacks
@@ -192,6 +197,7 @@ def run_experiment(
             "schedule_lr": schedule_lr,
             "overfit_batches": overfit_batches,
             "pop_mode": pop_mode,
+            "use_home_pe": use_home_pe,
         })
     else:
         logger = CSVLogger(save_dir=log_dir, name=name)

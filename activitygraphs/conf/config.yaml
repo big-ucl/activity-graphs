@@ -13,6 +13,7 @@ train:
   fast_dev_run: false
   overfit_batches: 0
   schedule_lr: true
+  compile: true
   debug: false
 
   wandb: true

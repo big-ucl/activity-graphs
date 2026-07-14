@@ -29,6 +29,7 @@ def build_gat(
     dropout: float,
     use_demographics: bool = True,
     use_pop_feature: bool = False,
+    use_home_pe: bool = False,
 ) -> GATSkip:
     """Instantiate a ``GATSkip`` model sized for ``dataset`` (1 pre-layer, 3 post-layers)."""
     edge_dim = dataset[0].edge_attr.size(-1)
@@ -37,7 +38,9 @@ def build_gat(
         num_pre_layers=1,
         num_gcn_layers=num_gcn_layers,
         num_post_layers=3,
-        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics, use_pop_feature=use_pop_feature),
+        in_channels=extracted_features_dim(
+            dataset, use_demographics=use_demographics, use_pop_feature=use_pop_feature, use_home_pe=use_home_pe
+        ),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
         edge_dim=edge_dim,
@@ -53,12 +56,15 @@ def build_gps(
     dropout: float,
     use_demographics: bool = True,
     use_pop_feature: bool = False,
+    use_home_pe: bool = False,
 ):
     """Instantiate a ``GraphTransformer`` (GPS) model sized for ``dataset``."""
     edge_dim = dataset[0].edge_attr.size(-1)
 
     return GraphTransformer(
-        in_channels=extracted_features_dim(dataset, use_demographics=use_demographics, use_pop_feature=use_pop_feature),
+        in_channels=extracted_features_dim(
+            dataset, use_demographics=use_demographics, use_pop_feature=use_pop_feature, use_home_pe=use_home_pe
+        ),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
         edge_dim=edge_dim,
@@ -76,6 +82,7 @@ def build_mlp(
     use_demographics: bool = True,
     full_info: bool = False,
     use_pop_feature: bool = False,
+    use_home_pe: bool = False,
 ) -> NodeMLP:
     """Instantiate a ``NodeMLP`` model sized for ``dataset``.
 
@@ -85,7 +92,11 @@ def build_mlp(
     return NodeMLP(
         mlp_layers,
         in_channels=extracted_features_dim(
-            dataset, use_demographics=use_demographics, full_info=full_info, use_pop_feature=use_pop_feature
+            dataset,
+            use_demographics=use_demographics,
+            full_info=full_info,
+            use_pop_feature=use_pop_feature,
+            use_home_pe=use_home_pe,
         ),
         hidden_channels=hidden_channels,
         out_channels=dataset.num_classes - 1,
@@ -100,11 +111,13 @@ def build_full_mlp(
     dropout: float,
     use_demographics: bool = True,
     use_pop_feature: bool = False,
+    use_home_pe: bool = False,
 ) -> FullyConnectedMLP:
     """Instantiate a ``FullyConnectedMLP`` baseline (has all info from all nodes) sized for ``dataset``."""
     return FullyConnectedMLP(
         num_nodes=dataset.num_nodes,
-        in_features=extracted_features_dim(dataset, use_demographics=use_demographics, use_pop_feature=use_pop_feature),
+        in_features=extracted_features_dim(
+            dataset, use_demographics=use_demographics, use_pop_feature=use_pop_feature, use_home_pe=use_home_pe),
         hidden_channels=hidden_channels,
         num_layers=mlp_layers,
         dropout=dropout,
@@ -225,6 +238,7 @@ def comparison_experiment(cfg: Config):
     gat = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
     gat_pop_off = build_gat(train_dataset, gat_layers, hidden_channels, dropout)
     gat_pop_feat = build_gat(train_dataset, gat_layers, hidden_channels, dropout, use_pop_feature=True)
+    gat_home_pe = build_gat(train_dataset, gat_layers, hidden_channels, dropout, use_home_pe=True)
 
     full_mlp = build_full_mlp(train_dataset, mlp_layers, hidden_channels, full_dropout)
     full_mlp_off = build_full_mlp(train_dataset, mlp_layers, hidden_channels, full_dropout)
@@ -245,6 +259,7 @@ def comparison_experiment(cfg: Config):
         fast_dev_run=cfg.train.fast_dev_run,
         overfit_batches=cfg.train.overfit_batches,
         schedule_lr=cfg.train.schedule_lr,
+        compile_model=cfg.train.compile,
         wandb_params=wandb_params,
         debug=debug,
     )
@@ -279,6 +294,10 @@ def comparison_experiment(cfg: Config):
         model=gat_pop_feat, name=gat_name + "-pop-feat", lr=lr_for("GATSkip"), pop_mode="feature"
     )
 
+    results_home_pe = my_run_experiment(
+        model=gat_home_pe, name="GATSkip-home-pe", lr=lr_for("GATSkip"), use_home_pe=True
+    )
+
     # results_gps = my_run_experiment(model=gps, name=gps_name, lr=lr_for("GTransformer"))
     # results_mlp_dist = my_run_experiment(model=mlp_dist, name="MLP-dist", lr=lr_for("MLP-dist"), full_info=True)
 
@@ -291,6 +310,7 @@ def comparison_experiment(cfg: Config):
         results_gat,
         results_gat_off,
         results_gat_feat,
+        results_home_pe,
         results_full,
         results_full_off,
         results_full_feat,

@@ -2,10 +2,17 @@
 
 import types
 
+import pytest
 import torch
 import torch_geometric as pyg
 
-from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
+from activitygraphs.ml.lightning_module import (
+    HOME_PE_BINS,
+    ActivityGraphModule,
+    create_home_distance_encoding,
+    extract_features,
+    extracted_features_dim,
+)
 from activitygraphs.ml.models import NodeMLP
 
 
@@ -283,3 +290,118 @@ class TestConfigureOptimizers:
         """In overfit mode the scheduler is skipped and a bare optimizer is returned."""
         result = attach_fake_trainer(make_module(), overfit_batches=5).configure_optimizers()
         assert isinstance(result, torch.optim.AdamW)
+
+
+def make_home_batch(
+    num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, home_nodes: list[int] | None = None
+) -> tuple[pyg.data.Batch, torch.Tensor, int]:
+    """A batch with a clean one-hot ``is_home`` column plus a chain-graph hop-distance matrix.
+
+    Column 0 of ``x`` is repurposed as ``is_home`` (one node per graph set to 1). Because the graphs
+    are chains 0-1-...-(N-1), hop distance between nodes i and j is ``|i - j|``, so ``home_hop_distance``
+    is the ``[N, N]`` absolute-difference matrix. ``home_nodes`` picks each graph's home node index.
+    """
+    batch = make_batch(num_graphs=num_graphs, num_nodes=num_nodes, seed=seed)
+    is_home_idx = 0
+    batch.x[:, is_home_idx] = 0.0
+    if home_nodes is None:
+        home_nodes = [0] * num_graphs
+    for i, h in enumerate(home_nodes):
+        graph_rows = (batch.batch == i).nonzero(as_tuple=True)[0]
+        batch.x[graph_rows[h], is_home_idx] = 1.0
+
+    idx = torch.arange(num_nodes)
+    home_hop_distance = (idx[:, None] - idx[None, :]).abs().float()
+    return batch, home_hop_distance, is_home_idx
+
+
+def make_home_pe_module(
+    home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = HOME_PE_BINS
+) -> ActivityGraphModule:
+    """A module with the home-anchored PE enabled; model width accounts for the extra ``n_bins`` columns."""
+    model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS + n_bins, hidden_channels=8, out_channels=1)
+    return ActivityGraphModule(
+        model=model,
+        lr=1e-3,
+        pos_weight=torch.tensor(2.0),
+        home_hop_distance=home_hop_distance,
+        is_home_idx=is_home_idx,
+        use_home_pe=True,
+        home_pe_bins=n_bins,
+    )
+
+
+def fake_dataset(num_features: int = 6, num_demo: int = 3, num_dist: int = 1) -> types.SimpleNamespace:
+    """Minimal stand-in exposing the attributes extracted_features_dim reads."""
+    return types.SimpleNamespace(
+        num_features=num_features,
+        demographics=torch.zeros(1, num_demo),
+        distances=torch.zeros(1, num_dist),
+    )
+
+
+class TestHomePositionalEncoding:
+    def test_shape_and_home_is_peak(self):
+        """Encoding is [num_nodes, n_bins]; the home node (hop 0) peaks in the first RBF bin at value 1."""
+        batch, hhd, is_home_idx = make_home_batch()
+        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=8)
+
+        assert pe.shape == (batch.num_nodes, 8)
+        home_rows = batch.x[:, is_home_idx] > 0.0
+        assert torch.all(pe[home_rows].argmax(dim=1) == 0)
+        torch.testing.assert_close(pe[home_rows].amax(dim=1), torch.ones(int(home_rows.sum())))
+
+    def test_matches_rbf_formula(self):
+        """Explicit RBF over hop-to-home reproduces the encoding exactly (single graph, home = node 0)."""
+        batch, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
+        n_bins = 8
+        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=n_bins)
+
+        hops = hhd[0].clamp(max=40)  # row 0 == distances from the home node
+        centers = torch.linspace(0, 40, n_bins)
+        expected = torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)
+        torch.testing.assert_close(pe, expected)
+
+    def test_varies_per_user(self):
+        """Different home anchors give different encodings for the same node positions (the whole point)."""
+        batch, hhd, is_home_idx = make_home_batch(home_nodes=[0, 7])
+        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=8)
+        assert not torch.allclose(pe[batch.batch == 0], pe[batch.batch == 1])
+
+    def test_extract_features_appends_pe_columns(self):
+        """extract_features widens by exactly n_bins when the home PE is supplied."""
+        batch, hhd, is_home_idx = make_home_batch()
+        base = extract_features(batch, full_info=False)
+        with_pe = extract_features(
+            batch, full_info=False, home_hop_distance=hhd, is_home_idx=is_home_idx, home_pe_bins=8
+        )
+        assert with_pe.shape[1] - base.shape[1] == 8
+
+    def test_extract_features_requires_is_home_idx(self):
+        """Supplying home_hop_distance without is_home_idx is a configuration error."""
+        batch, hhd, _ = make_home_batch()
+        with pytest.raises(ValueError):
+            extract_features(batch, full_info=False, home_hop_distance=hhd, is_home_idx=None)
+
+    def test_extracted_features_dim_adds_bins(self):
+        """The in_channels helper accounts for the PE so model width matches extract_features output."""
+        ds = fake_dataset()
+        base = extracted_features_dim(ds, use_home_pe=False)
+        with_pe = extracted_features_dim(ds, use_home_pe=True)
+        assert with_pe - base == HOME_PE_BINS
+
+    def test_module_requires_hop_distance(self):
+        """use_home_pe=True without home_hop_distance must raise, not silently no-op."""
+        model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
+        with pytest.raises(ValueError):
+            ActivityGraphModule(model=model, lr=1e-3, pos_weight=torch.tensor(2.0), use_home_pe=True)
+
+    def test_training_step_is_finite(self, monkeypatch):
+        """A full training_step with the PE enabled returns a finite scalar loss."""
+        batch, hhd, is_home_idx = make_home_batch()
+        module = make_home_pe_module(hhd, is_home_idx, n_bins=8)
+        monkeypatch.setattr(module, "log", lambda *a, **kw: None)
+
+        loss = module.training_step(batch, 0)
+        assert loss.ndim == 0
+        assert loss.isfinite()

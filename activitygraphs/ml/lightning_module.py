@@ -18,27 +18,48 @@ from activitygraphs.ml.losses import BCELoss, Loss
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, RetrievalRPrecision, build_hop_band_metrics
 from activitygraphs.ml.sampling import pps_sampling
 
+HOME_PE_BINS = 8
+
 
 def extract_features(
     batch: pyg.data.Batch,
     full_info: bool,
     use_demographics: bool = True,
     pop_logit: torch.Tensor | None = None,
+    home_hop_distance: torch.Tensor | None = None,
+    is_home_idx: int | None = None,
+    home_pe_bins: int = HOME_PE_BINS,
 ) -> torch.Tensor:
     """Return node features for a batch.
 
     Starts with ``batch.x`` (which already contains the network features and the per-user
-    ``is_home`` indicator). If ``use_demographics`` is True, the per-graph user-specific demographics
-    (``batch.graph_x``) are broadcast over nodes and concatenated. If ``full_info`` is True,
-    the per-node distance-from-home (``batch.distances``) is appended as the last column;
-    this is used only by the distance-augmented MLP baseline so that the explicit
-    distance-to-home signal does not leak into the other models.
+    ``is_home`` indicator).
+
+     If ``pop_logit`` is provided, the ``NodeBaseline`` popularity logits for each node are appended
+    (``1`` column) is appended.
+
+     If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
+     hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column for the home index.
+
+    If ``use_demographics`` is True, the per-graph user-specific demographics (``batch.graph_x``) are broadcast over
+    nodes and concatenated.
+
+    If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column;
+    this is used only by the distance-augmented MLP baseline so that the explicit distance-to-home signal does not leak
+    into the other models.
     """
     x = cast(torch.Tensor, batch.x)
 
     if pop_logit is not None:
         pop_logit_col = create_pop_logit_column(pop_logit, batch, standardize=True)
         x = torch.cat([x, pop_logit_col], dim=-1)
+
+    if home_hop_distance is not None:
+        if is_home_idx is None:
+            raise ValueError("``is_home_idx`` is required for the home-anchored PE")
+
+        home_pe = create_home_distance_encoding(batch, home_hop_distance, is_home_idx, n_bins=home_pe_bins)
+        x = torch.cat([x, home_pe], dim=-1)
 
     if use_demographics and batch.graph_x is not None:
         if batch.batch is not None:
@@ -54,13 +75,20 @@ def extract_features(
 
 
 def extracted_features_dim(
-    dataset: ActivityDataset, use_demographics: bool = True, full_info: bool = False, use_pop_feature: bool = False
+    dataset: ActivityDataset,
+    use_demographics: bool = True,
+    full_info: bool = False,
+    use_pop_feature: bool = False,
+    use_home_pe: bool = False,
+    n_bins: int = HOME_PE_BINS,
 ) -> int:
     """Output width of extract_features for this dataset, given the same flags."""
     dim = dataset.num_features
 
     if use_pop_feature:
         dim += 1
+    if use_home_pe:
+        dim += n_bins
     if use_demographics:
         dim += dataset.demographics.shape[1]
     if full_info:
@@ -90,6 +118,24 @@ def _compute_node_index_within_graph(batch: pyg.data.Batch, device: torch.device
     return torch.arange(n, device=device) - batch.ptr.to(device)[batch.batch]
 
 
+def create_home_distance_encoding(
+    batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = 8
+) -> torch.Tensor:
+    """Positional-encoding based on distance from user home (single anchor). RBF expansion of num. hops to home for
+    each node, shape ``[num_nodes, n_bins]``."""
+
+    device = batch.x.device
+    node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
+    is_home = batch.x[:, is_home_idx] > 0.0
+
+    home = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
+    home[batch.batch[is_home]] = node_idx[is_home]
+    hops = home_hop_distance[home[batch.batch], node_idx].clamp(max=40)  # [num_nodes]
+    centers = torch.linspace(0, 40, n_bins, device=device)
+
+    return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)  # [num_nodes, n_bins]
+
+
 class ActivityGraphModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
 
@@ -114,6 +160,9 @@ class ActivityGraphModule(L.LightningModule):
         pop_logit: Logits of global per-node visit frequencies.
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
             features to the model.
+        use_home_pe: use home-anchored positional encodings in features, default False.
+        home_pe_bins: number of bins for the RBF expansion of the home PEs, default ``HOME_PE_BINS``.
+        compile_model: torch.compile the inner NN, default False.
     """
 
     pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
@@ -135,6 +184,9 @@ class ActivityGraphModule(L.LightningModule):
         hop_bands: Collection[tuple[str, float, float]] = DEFAULT_HOP_BANDS,
         pop_logit: torch.Tensor | None = None,
         pop_mode: Literal["none", "offset", "feature"] = "none",
+        use_home_pe: bool = False,
+        home_pe_bins: int = HOME_PE_BINS,
+        compile_model: bool = False,
     ):
         super().__init__()
         self.model = model
@@ -201,6 +253,27 @@ class ActivityGraphModule(L.LightningModule):
             self.register_buffer("pop_logit", pop_logit, persistent=False)
         else:
             self.pop_logit = None
+
+        # Training: Home-anchored positional encodings injection
+        if use_home_pe and home_hop_distance is None:
+            raise ValueError("`use_home_pe=True` requires `home_hop_distance` to be provided.")
+
+        self.use_home_pe = use_home_pe
+        self.home_pe_bins = home_pe_bins
+
+        # Training: torch.compile (applied in configure_model, not here)
+        self.compile_model = compile_model
+        self._compiled = False
+
+    def configure_model(self) -> None:
+        """Compile the inner NN with ``torch.compile``."""
+        if self._compiled or not self.compile_model:
+            return
+        if self.trainer.fast_dev_run or self.trainer.overfit_batches:
+            return
+
+        self.model = torch.compile(self.model, dynamic=True) # dynamic=True since graph sizes (i.e. batch sizes) differ
+        self._compiled = True
 
     def forward(
         self,
@@ -379,12 +452,19 @@ class ActivityGraphModule(L.LightningModule):
 
         return optimizer
 
-    def _pop_logits_feature(self) -> torch.Tensor | None:
-        return self.pop_logit if self.pop_mode == "feature" else None
-
     def compute_logits(self, batch: pyg.data.Batch) -> torch.Tensor:
         """Model logits for a batch, includes node-popularity feature column or offset if configured."""
-        x = extract_features(batch, self.full_info, pop_logit=self._pop_logits_feature())
+        pop_logits = self.pop_logit if self.pop_mode == "feature" else None
+        home_hop_distance = self.home_hop_distance if self.use_home_pe else None
+
+        x = extract_features(
+            batch,
+            self.full_info,
+            pop_logit=pop_logits,
+            home_hop_distance=home_hop_distance,
+            is_home_idx=self.is_home_idx,
+            home_pe_bins=self.home_pe_bins,
+        )
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
 
         if self.pop_mode == "offset":

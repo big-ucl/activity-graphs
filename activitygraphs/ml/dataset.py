@@ -442,7 +442,7 @@ def load_dataset(
 
     positional_encodings_transforms = T.Compose([
         T.AddRandomWalkPE(walk_length=20, attr_name=None),
-        T.AddLaplacianEigenvectorPE(k=8, attr_name=None),
+        # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
     ])
 
     dataset = load_or_build_dataset(
