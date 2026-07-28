@@ -184,12 +184,15 @@ class NetworkData(ABC):
 
     @staticmethod
     def _compute_home_locations(location_visits: pl.DataFrame) -> pl.DataFrame:
+        """Computes home location from visits. Drops users with num_home_locations != 1"""
+
         locations_by_purpose = (
             location_visits.group_by("user_id", "purpose").agg(pl.col("loc_id").unique()).sort("user_id")
         )
         home_locations = (
             locations_by_purpose
             .filter(purpose=Purpose.HOME)
+            .filter(pl.col("loc_id").list.len() == 1)
             .with_columns(pl.col("loc_id").list.first())
             .drop("purpose")
         )

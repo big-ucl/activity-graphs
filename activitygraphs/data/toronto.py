@@ -545,7 +545,7 @@ def build_toronto_users(
         hh_num_children="THATS NumChildren",
         hh_num_vehicles="THATS NumVeh",
         hh_num_bikes="THATS NumBike",
-    )  # TODO add HH demographics: HH size (num adults, num children), HH income, HH location, num vehicles, num bikes.
+    )  # TODO add HH demographics: HH size (num adults, num children), HH income, num vehicles, num bikes.
 
     demographics = persons.join(hhs, on="hh_id", how="left").drop("hh_id")
     user_ids = user_journeys_df.select("user_id").unique()
@@ -556,4 +556,6 @@ def build_toronto_users(
         home_loc_id=pl.when(pl.col("home_loc_id").is_in(locations_ids)).then("home_loc_id").otherwise(pl.lit(NA))
     ).with_columns(pl.col("home_loc_id").fill_null(NA))
 
-    return user_ids.join(demographics, left_on="user_id", right_on="person_id")
+    return user_ids.join(demographics, left_on="user_id", right_on="person_id").filter(
+        pl.col("home_loc_id") != pl.lit(NA)
+    )

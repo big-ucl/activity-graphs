@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - data: toronto
+  - data: thats
 
 paths:
   reports: reports
@@ -9,6 +9,12 @@ paths:
 
 train:
   epochs: 50
+  seed: 42
+
+  batch_size: 64
+  val_size: 0.1
+  test_size: 0.2
+
 
   fast_dev_run: false
   overfit_batches: 0

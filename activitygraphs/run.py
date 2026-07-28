@@ -4,6 +4,7 @@ import functools
 from datetime import datetime
 from pathlib import Path
 
+import lightning as L
 import polars as pl
 import torch
 
@@ -178,10 +179,12 @@ def comparison_experiment(cfg: Config):
         dataset_name=cfg.data.name,
     )
 
-    batch_size = 64
-    val_size = 0.1
-    test_size = 0.2
-    seed = 42
+    batch_size = cfg.train.batch_size
+    val_size = cfg.train.val_size
+    test_size = cfg.train.test_size
+    seed = cfg.train.seed
+
+    L.seed_everything(seed, workers=True)
 
     datamodule = ActivityDataModule(cfg, val_size=val_size, test_size=test_size, seed=seed, batch_size=batch_size)
     datamodule.setup()

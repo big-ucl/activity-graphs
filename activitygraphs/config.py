@@ -208,6 +208,11 @@ class TrainConfig:
     """Training configuration for development and debugging."""
 
     epochs: int
+    seed: int
+
+    batch_size: int
+    val_size: float
+    test_size: float
 
     fast_dev_run: bool
     overfit_batches: int

@@ -105,7 +105,7 @@ class ConditionalNodeBaseline(torch.nn.Module):
                 home_nodes = home_mask[graph_mask].nonzero()
 
                 if len(home_nodes) == 0:
-                    continue
+                    raise ValueError("No home node found.")
 
                 home = home_nodes[0].item()
                 visit_counts[node_indices[graph_mask], home] += batch.y[graph_mask].squeeze().float().cpu()
@@ -127,7 +127,10 @@ class ConditionalNodeBaseline(torch.nn.Module):
             graph_mask = batch == i
             home_nodes = home_mask[graph_mask].nonzero()
 
-            home_indices[i] = 0 if len(home_nodes) == 0 else home_nodes[0].item()
+            if len(home_nodes) == 0:
+                raise ValueError("No home node found.")
+
+            home_indices[i] = home_nodes[0].item()
 
         node_home = home_indices[batch]
-        return self.logits.to(x.device)[node_indices, node_home.cpu()].unsqueeze(1).to(x.device)
+        return self.logits.to(x.device)[node_indices, node_home].unsqueeze(1).to(x.device)

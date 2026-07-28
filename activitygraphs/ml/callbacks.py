@@ -2,7 +2,7 @@ import lightning as L
 import torch
 import torch_geometric as pyg
 
-from activitygraphs.ml.lightning_module import ActivityGraphModule, extract_features
+from activitygraphs.ml.lightning_module import ActivityGraphModule
 
 
 class OverfitDebugCallback(L.Callback):
@@ -27,8 +27,7 @@ class OverfitDebugCallback(L.Callback):
 
         if trainer.max_epochs is not None and trainer.current_epoch == trainer.max_epochs - 1:
             with torch.no_grad():
-                x = extract_features(batch, pl_module.full_info)
-                out = pl_module.compute_logits(x, batch.edge_index, batch.edge_attr, batch.batch)
+                out = pl_module.compute_logits(batch)
 
             print(
                 f"[overfit-debug-final] out std={out.std().item():.4f} "

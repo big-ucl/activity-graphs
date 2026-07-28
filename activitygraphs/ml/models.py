@@ -2,11 +2,22 @@
 
 import functools
 import itertools
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
+from torch import Tensor
+from torch.nn import Module
 from torch_geometric.nn.conv import GCNConv, GPSConv, GATConv
+
+EDGE_ATTR_CONVS = [
+    GATConv,
+]
+
+
+def accepts_edge_attr(conv: Module) -> bool:
+    return any(isinstance(conv, valid_conv) for valid_conv in EDGE_ATTR_CONVS)
 
 
 def build_module_list(
@@ -72,28 +83,34 @@ class GCN(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
-        for conv in self.convs[:-1]:
+        # Single layer case
+        if len(self.convs) == 1:
+            return self.convolve(self.convs[0], x, edge_index, edge_attr)
+
+        # Multi layer case
+        x_res = x
+        x = self.convolve(self.convs[0], x, edge_index, edge_attr)
+        x = x + x_res if self.residuals else x
+        x = F.leaky_relu(x)
+
+        for conv in self.convs[1:-1]:
             x_res = x
             x = F.dropout(x, p=self.dropout, training=self.training)
-
-            if edge_attr is not None:
-                x = conv(x, edge_index, edge_attr)
-            else:
-                x = conv(x, edge_index)
-
-            if self.residuals:
-                x = x + x_res
-
+            x = self.convolve(conv, x, edge_index, edge_attr)
+            x = x + x_res if self.residuals else x
             x = F.leaky_relu(x)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
-
-        if edge_attr is not None:
-            x = self.convs[-1](x, edge_index, edge_attr)
-        else:
-            x = self.convs[-1](x, edge_index)
+        x = self.convolve(self.convs[-1], x, edge_index, edge_attr)
 
         return x
+
+    @staticmethod
+    def convolve(conv: Module, x: Tensor, edge_index: Tensor, edge_attr: Tensor | None) -> torch.Tensor:
+        if edge_attr is not None and accepts_edge_attr(conv):
+            return conv(x, edge_index, edge_attr=edge_attr)
+        else:
+            return conv(x, edge_index)
 
 
 class NodeMLP(torch.nn.Module):
@@ -110,7 +127,14 @@ class NodeMLP(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
-        for lin in self.lins[:-1]:
+        # Single layer case
+        if len(self.lins) == 1:
+            return self.lins[0](x)
+
+        # Multiple layer case
+        x = self.lins[0](x).relu()
+
+        for lin in self.lins[1:-1]:
             x = F.dropout(x, p=self.dropout, training=self.training)
             x = lin(x).relu()
 

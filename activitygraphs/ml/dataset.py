@@ -105,6 +105,13 @@ class ActivityDataset(pyg.data.Dataset):
         self.demographics: torch.Tensor = torch.load(processed_dir / "demographics.pt", weights_only=True)
         self.distances: torch.Tensor = torch.load(processed_dir / "distances.pt", weights_only=True)
 
+        # Check that each user has one and only one home node
+        home_counts = self.spatial_features[:, :, self.is_home_spatial_idx].sum(dim=1)
+        if not torch.all(home_counts == 1):
+            num_bad = int((home_counts != 1).sum())
+            raise ValueError(f"{num_bad} users do not have exactly one home node. Expected one per user.")
+
+        # Check that the graph actually has nodes
         num_nodes = self.network_graph.num_nodes
         if num_nodes is None:
             raise ValueError("Network graph has `None` number of nodes")
@@ -277,7 +284,7 @@ def load_or_build_dataset(
         dataset_path = project_root / cfg.data.paths.pyg_datasets
 
         return ActivityDataset(
-            str(dataset_path), network_graph, spatial_features, spatial_labels, demographics, distances
+            str(dataset_path), network_graph, spatial_features, spatial_labels, demographics, distances, **build_kwargs
         )
 
     return ActivityDataset(root=str(dataset_path), **build_kwargs)
