@@ -122,7 +122,7 @@ def _():
 
 @app.cell
 def _(train_dataset):
-    from activitygraphs.run import build_gat, build_mlp
+    from activitygraphs.experiments import build_gat, build_mlp
 
     gat = build_gat(train_dataset, 8, 128, 0.2)
     gat.load_state_dict(torch.load(project_root / "models" / "GATSkip-8-res.pth", weights_only=True))

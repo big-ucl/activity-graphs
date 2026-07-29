@@ -1,11 +1,15 @@
-"""Unit tests for ml callbacks (EpochMetricsCollector)."""
+"""Unit tests for ml callbacks (EpochMetricsCollector, HopBandTableLogger)."""
 
 import types
+from unittest.mock import MagicMock
 
 import pytest
 import torch
+from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
-from activitygraphs.ml.callbacks import EpochMetricsCollector
+from activitygraphs.ml.callbacks import EpochMetricsCollector, HopBandTableLogger
+from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.models import NodeMLP
 
 
 def fake_trainer(callback_metrics: dict, sanity_checking: bool = False, current_epoch: int = 0):
@@ -63,3 +67,40 @@ class TestEpochMetricsCollector:
         collector.on_train_epoch_end(trainer, None)
 
         assert collector.rows == []
+
+
+class TestHopBandTableLogger:
+    def _make_module(self, rows: list[dict]) -> ActivityGraphModule:
+        model = NodeMLP(num_layers=2, in_channels=4, hidden_channels=8, out_channels=1)
+        module = ActivityGraphModule(model=model, lr=1e-3, pos_weight=torch.tensor(1.0))
+        module.hop_band_rows = rows
+        return module
+
+    def test_logs_table_of_hop_band_rows(self):
+        rows = [
+            {"hop_band": "0-2", "hop_low": 0, "k": 5, "ndcg": 0.5, "n_pos": 3.0},
+            {"hop_band": "3-5", "hop_low": 3, "k": 5, "ndcg": 0.2, "n_pos": 7.0},
+        ]
+        trainer = types.SimpleNamespace(logger=MagicMock(spec=WandbLogger))
+
+        HopBandTableLogger().on_test_end(trainer, self._make_module(rows))
+
+        (logged,), _ = trainer.logger.experiment.log.call_args
+        table = logged["hop_bands"]
+        assert table.columns == ["hop_band", "hop_low", "k", "ndcg", "n_pos"]
+        assert table.data == [["0-2", 0, 5, 0.5, 3.0], ["3-5", 3, 5, 0.2, 7.0]]
+
+    def test_no_op_without_wandb_logger(self):
+        rows = [{"hop_band": "0-2", "hop_low": 0, "k": 5, "ndcg": 0.5, "n_pos": 3.0}]
+        trainer = types.SimpleNamespace(logger=MagicMock(spec=CSVLogger))
+
+        HopBandTableLogger().on_test_end(trainer, self._make_module(rows))
+
+        trainer.logger.experiment.log.assert_not_called()
+
+    def test_no_op_when_hop_bands_disabled(self):
+        trainer = types.SimpleNamespace(logger=MagicMock(spec=WandbLogger))
+
+        HopBandTableLogger().on_test_end(trainer, self._make_module([]))
+
+        trainer.logger.experiment.log.assert_not_called()

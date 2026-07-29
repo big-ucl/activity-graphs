@@ -10,10 +10,28 @@ import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
-from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
+from activitygraphs.ml.callbacks import EpochMetricsCollector, HopBandTableLogger, OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.losses import Loss
+
+PER_USER_STAGE = "test_user"
+
+
+def per_user_frame(module: ActivityGraphModule, name: str) -> pl.DataFrame:
+    """Per-user test scores as ``stage="test_user"`` rows, one row per scored test user.
+
+    Carried inside the same long-format frame as the aggregate rows so that every caller keeps a
+    single return value; ``save_results`` splits the two stages into separate parquet files.
+    """
+    if not module.per_user_columns:
+        return pl.DataFrame()
+
+    return pl.DataFrame(module.per_user_columns).with_columns(
+        name=pl.lit(name),
+        stage=pl.lit(PER_USER_STAGE),
+        epoch=pl.lit(None, dtype=pl.Int64),
+    )
 
 
 @dataclass
@@ -50,17 +68,23 @@ def evaluate_baseline(
     )
 
     if wandb_params and wandb_params.use_wandb:
-        logger: WandbLogger | bool = WandbLogger(
+        logger: WandbLogger = WandbLogger(
             project=wandb_params.project,
             entity=wandb_params.entity,
             name=name,
             group=wandb_params.group,
             tags=[t for t in [wandb_params.dataset_name, "baseline"] if t],
         )
+        logger.log_hyperparams({
+            "model": name,
+            "dataset": wandb_params.dataset_name,
+            "model_type": "baseline",
+        })
+
     else:
         logger = False
 
-    trainer = L.Trainer(logger=logger, enable_progress_bar=False)
+    trainer = L.Trainer(logger=logger, callbacks=[HopBandTableLogger()], enable_progress_bar=False)
 
     try:
         (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
@@ -73,10 +97,11 @@ def evaluate_baseline(
 
     fit_row = {"name": name, "stage": "fit", "epoch": 0, "train_loss": 0.0, **val_results}
     test_row = {"name": name, "stage": "test", "epoch": None, **test_results}
-    return pl.DataFrame([fit_row, test_row])
+
+    return pl.concat([pl.DataFrame([fit_row, test_row]), per_user_frame(baseline_module, name)], how="diagonal")
 
 
-def run_experiment(
+def train_and_evaluate_model(
     model: torch.nn.Module,
     datamodule: ActivityDataModule,
     loss: Loss,
@@ -96,6 +121,7 @@ def run_experiment(
     compile_model: bool = True,
     wandb_params: WandBParams | None = None,
     debug: bool = False,
+    run_tag: str | None = None,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
@@ -121,15 +147,20 @@ def run_experiment(
         use_home_pe: if true, add home-anchored positional encodings to features
         wandb_params: parameters to configure WandB logging.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
+        run_tag: Suffix distinguishing repeated runs of the same model (e.g. per training seed). It
+            qualifies the checkpoint filename and logger run name only; ``name`` still identifies
+            the model in the returned frame, so repeated runs group together.
 
     Returns:
         Long-format DataFrame tagged by ``stage``: one ``stage="fit"`` row per epoch carrying
         ``train_loss`` and the ``val_*`` metrics, plus (when a test run executed) one
-        ``stage="test"`` row carrying the ``test_*`` metrics. Columns: ``name``, ``stage``,
-        ``epoch``, ``train_loss``, ``val_*``, ``test_*``; cells absent for a row's stage are null.
-        Empty when ``fast_dev_run`` is True.
+        ``stage="test"`` row carrying the ``test_*`` metrics and one ``stage="test_user"`` row per
+        test user carrying that user's ``r_precision`` and ``recall``. Columns: ``name``, ``stage``,
+        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_id``, ``n_pos``, ``r_precision``,
+        ``recall``; cells absent for a row's stage are null. Empty when ``fast_dev_run`` is True.
     """
     name = name or model.__class__.__name__
+    run_name = name if run_tag is None else f"{name}-{run_tag}"
 
     datamodule.setup()
 
@@ -156,13 +187,13 @@ def run_experiment(
     # Build the callbacks
 
     collector = EpochMetricsCollector()
-    callbacks: list[L.Callback] = [collector, LearningRateMonitor(logging_interval="epoch")]
+    callbacks: list[L.Callback] = [collector, HopBandTableLogger(), LearningRateMonitor(logging_interval="epoch")]
 
     if model_save_dir is not None:
         callbacks.append(
             ModelCheckpoint(
                 dirpath=str(model_save_dir),
-                filename=name,
+                filename=run_name,
                 save_last=False,
                 save_top_k=1,
                 monitor=loss.monitor,
@@ -181,13 +212,14 @@ def run_experiment(
         logger = WandbLogger(
             project=wandb_params.project,
             entity=wandb_params.entity,
-            name=name,
+            name=run_name,
             group=wandb_params.group,
             save_dir=log_dir,
             tags=[wandb_params.dataset_name] if wandb_params.dataset_name else None,
         )
         logger.log_hyperparams({
             "model": name,
+            "run_tag": run_tag,
             "dataset": wandb_params.dataset_name,
             "lr": lr,
             "weight_decay": weight_decay,
@@ -200,7 +232,7 @@ def run_experiment(
             "use_home_pe": use_home_pe,
         })
     else:
-        logger = CSVLogger(save_dir=log_dir, name=name)
+        logger = CSVLogger(save_dir=log_dir, name=run_name)
 
     # Create trainer and fit
 
@@ -228,6 +260,7 @@ def run_experiment(
             trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
         results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
+        results = pl.concat([results, per_user_frame(lit_model, name)], how="diagonal")
 
         first_cols = ["name", "stage", "epoch"]
         other_cols = [c for c in results.columns if c not in first_cols]

@@ -39,7 +39,7 @@ def _():
 @app.cell
 def _():
     from activitygraphs.ml.dataset import load_gva_dataset
-    from activitygraphs.run import build_gat, build_mlp
+    from activitygraphs.experiments import build_gat, build_mlp
 
     return build_gat, build_mlp, load_gva_dataset
 

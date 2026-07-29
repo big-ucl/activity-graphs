@@ -8,26 +8,53 @@ paths:
   models: models
 
 train:
+  # Number of training epochs
   epochs: 50
-  seed: 42
+  # Dataset split seed: kept same across models to ensure same data evaluation.
+  split_seed: 42
+  # Training seeds; each model is trained once per entry. Use several to measure run-to-run spread.
+  train_seeds: [42]
 
+  # comparison = comparison between ML architectures; depth_sweep = GATSkip receptive-field sweep over `depths`.
+  experiment: comparison
+  # GATSkip message-passing depths for the depth sweep (a NodeMLP depth-0 anchor is always included).
+  depths: [2, 4, 8]
+
+  # Batch size (number of user "graphs" per batch).
   batch_size: 64
+  # Size of the validation set (as a fraction of the total dataset size).
   val_size: 0.1
+  # Size of the test set.
   test_size: 0.2
 
 
+  # Enables Lightning fast-dev-run (no training but all code parts are run).
   fast_dev_run: false
+  # Number of batches to train on (to test model overfit), disabled when = 0.
   overfit_batches: 0
+  # Use the ReduceLROnPlateau scheduler.
   schedule_lr: true
+  # Enable PyTorch model compilation (Dynamo).
   compile: true
+  # Enable the `OverfitDebugCallback` statistics, prints at the start and end of training.
   debug: false
 
+  # Enable Weights and Biases logging
   wandb: true
+  # Weights and Biases project to submit logs to.
   wandb_project: activity-graphs
+  # Weights and Biases entity.
   wandb_entity: luca-bataillard-ucl-university-college-london
 
+  # Loss function configuration
   loss:
+    # bce = Binary Cross Entropy loss function (classification), bpr = Bayesian Personalised Ranking (ranking)
     type: bpr
+
+    # BPR configuration
+    # Number of (pos, neg) pairs in BPR loss
     n_pairs: 128
+    # Negative examples sampling strategy: uniform = Uniform Sampling, hard = Negatives sampled near home
     neg_sampler: uniform
+    # Max distance for hard negative samples (number of hops)
     is_near_threshold: 5

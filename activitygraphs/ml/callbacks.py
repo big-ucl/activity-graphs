@@ -1,6 +1,7 @@
 import lightning as L
 import torch
 import torch_geometric as pyg
+from lightning.pytorch.loggers import WandbLogger
 
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 
@@ -61,3 +62,29 @@ class EpochMetricsCollector(L.Callback):
         # logged. Reading at epoch-end would capture only the per-batch test_bce/test_bce_weighted.
         metrics = {key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith("test_")}
         self.rows.append({"stage": "test", "epoch": None, **metrics})
+
+
+class HopBandTableLogger(L.Callback):
+    """Logs the per-hop-band test results to W&B as a ``hop_bands`` summary table.
+
+    The band is a column rather than part of a metric name, so a W&B custom chart can query
+    ``runs.summaryTable`` and group bars by band across every run in the group. Does nothing when the
+    run is not logging to W&B or when hop-band metrics are disabled.
+    """
+
+    def __init__(self, key: str = "hop_bands") -> None:
+        self.key = key
+
+    def on_test_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        # `on_test_end`, not `on_test_epoch_end`: see the note in `EpochMetricsCollector`. The rows
+        # are built in the LightningModule's `on_test_epoch_end`, which runs after this callback's.
+        assert isinstance(pl_module, ActivityGraphModule)
+
+        if not isinstance(trainer.logger, WandbLogger) or not pl_module.hop_band_rows:
+            return
+
+        import wandb
+
+        columns = list(pl_module.hop_band_rows[0])
+        table = wandb.Table(columns=columns, data=[[row[c] for c in columns] for row in pl_module.hop_band_rows])
+        trainer.logger.experiment.log({self.key: table})

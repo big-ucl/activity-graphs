@@ -208,7 +208,11 @@ class TrainConfig:
     """Training configuration for development and debugging."""
 
     epochs: int
-    seed: int
+    split_seed: int
+    train_seeds: list[int]
+
+    experiment: Literal["comparison", "depth_sweep"]
+    depths: list[int]
 
     batch_size: int
     val_size: float

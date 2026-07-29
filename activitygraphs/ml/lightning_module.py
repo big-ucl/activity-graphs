@@ -9,13 +9,19 @@ import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
 from torch import Tensor
-from torchmetrics import MeanMetric, MetricCollection, SumMetric
+from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
 from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.losses import BCELoss, Loss
-from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS, RetrievalRPrecision, build_hop_band_metrics
+from activitygraphs.ml.metrics import (
+    DEFAULT_HOP_BANDS,
+    HopBandMetrics,
+    PerUserRanking,
+    RetrievalRPrecision,
+    hop_band_scalars,
+)
 from activitygraphs.ml.sampling import pps_sampling
 
 HOME_PE_BINS = 8
@@ -118,20 +124,26 @@ def _compute_node_index_within_graph(batch: pyg.data.Batch, device: torch.device
     return torch.arange(n, device=device) - batch.ptr.to(device)[batch.batch]
 
 
+def compute_home_hops(batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
+    """Hop distance from each node to the user's home node in the graph, shape ``[num_nodes]``."""
+    device = batch.x.device
+    node_idx = _compute_node_index_within_graph(batch, device)
+    is_home = batch.x[:, is_home_idx] > 0.0
+
+    home = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
+    home[batch.batch[is_home]] = node_idx[is_home]
+
+    return home_hop_distance[home[batch.batch], node_idx]
+
+
 def create_home_distance_encoding(
     batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = 8
 ) -> torch.Tensor:
     """Positional-encoding based on distance from user home (single anchor). RBF expansion of num. hops to home for
     each node, shape ``[num_nodes, n_bins]``."""
 
-    device = batch.x.device
-    node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
-    is_home = batch.x[:, is_home_idx] > 0.0
-
-    home = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
-    home[batch.batch[is_home]] = node_idx[is_home]
-    hops = home_hop_distance[home[batch.batch], node_idx].clamp(max=40)  # [num_nodes]
-    centers = torch.linspace(0, 40, n_bins, device=device)
+    hops = compute_home_hops(batch, home_hop_distance, is_home_idx).clamp(max=40)
+    centers = torch.linspace(0, 40, n_bins, device=batch.x.device)
 
     return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)  # [num_nodes, n_bins]
 
@@ -216,23 +228,24 @@ class ActivityGraphModule(L.LightningModule):
 
         # Metrics: Optional distance-from-home hop-band metrics (test time only).
         self.is_home_idx = is_home_idx
-        self.hop_bands = hop_bands
         if home_hop_distance is not None:
             if is_home_idx is None:
                 raise ValueError("is_home_idx is required when home_hop_distance is provided.")
             self.register_buffer(
                 "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
             )
-            self.hop_band_test_metrics = build_hop_band_metrics(hop_bands, k)
-            # Per-band weighted BCE (node-pooled) and visited-node count, for context alongside the ranking bands.
-            self.hop_band_bce = torch.nn.ModuleDict({label: MeanMetric() for label, _, _ in hop_bands})
-            self.hop_band_pos = torch.nn.ModuleDict({label: SumMetric() for label, _, _ in hop_bands})
-            self._seen_hop_bands: set[str] = set()
+            self.hop_band_metrics = HopBandMetrics(hop_bands, k)
         else:
             self.home_hop_distance = None
-            self.hop_band_test_metrics = None
-            self.hop_band_bce = None
-            self.hop_band_pos = None
+            self.hop_band_metrics = None
+
+        # Hop-band results in long format (one row per band), populated by `on_test_epoch_end`.
+        self.hop_band_rows: list[dict[str, float | str]] = []
+
+        # Metrics: per-user test scores retained for paired model comparison, in column format
+        # (one entry per test user), populated by `on_test_epoch_end`.
+        self.test_per_user = PerUserRanking(k)
+        self.per_user_columns: dict[str, list[float]] = {}
 
         # Metrics: Capture predicted and true expected |RG_i| sizes
         self.test_pred_size = MeanMetric()
@@ -272,7 +285,7 @@ class ActivityGraphModule(L.LightningModule):
         if self.trainer.fast_dev_run or self.trainer.overfit_batches:
             return
 
-        self.model = torch.compile(self.model, dynamic=True) # dynamic=True since graph sizes (i.e. batch sizes) differ
+        self.model = torch.compile(self.model, dynamic=True)  # dynamic=True since graph sizes (i.e. batch sizes) differ
         self._compiled = True
 
     def forward(
@@ -341,10 +354,12 @@ class ActivityGraphModule(L.LightningModule):
 
         # Update other metrics, feed sigmoid to conform to torchmetrics calling convention (see validation step)
         self.test_metrics.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
+        self.test_per_user.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
 
         # Update hop-band metrics
-        if self.hop_band_test_metrics is not None:
-            self._update_hop_band_metrics(batch, out)
+        if self.hop_band_metrics is not None and self.is_home_idx is not None:
+            hops = compute_home_hops(batch, self.home_hop_distance, self.is_home_idx)
+            self.hop_band_metrics.update(hops, out.squeeze(-1), batch.y.squeeze(-1).long(), batch.user_id[batch.batch])
 
         # Update BCE calibration
         self.test_calibration.update(probs, target.long())
@@ -357,36 +372,6 @@ class ActivityGraphModule(L.LightningModule):
 
         # Update sampled set recall and size metrics
         self._update_sampled_sets_metrics(batch, out)
-
-    def _update_hop_band_metrics(self, batch: pyg.data.Batch, out: torch.Tensor) -> None:
-        """Update the hop-band ranking metrics, grouping nodes by hop distance from each user's home."""
-        device = out.device
-        logits = out.squeeze(-1)
-        scores = logits.sigmoid()
-        target = batch.y.squeeze(-1).long()
-
-        # Each node's position within its graph is its network node index (graphs share the network order).
-        node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
-        is_home = batch.x[:, self.is_home_idx] > 0.0
-        home_idx_per_graph = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
-        home_idx_per_graph[batch.batch[is_home]] = node_idx[is_home]
-
-        hop = self.home_hop_distance[home_idx_per_graph[batch.batch], node_idx]
-        user_ids = batch.user_id[batch.batch]
-
-        for label, low, high in self.hop_bands:
-            mask = (hop >= low) & (hop <= high)
-            if not mask.any():
-                continue
-            band_target = target[mask]
-            self.hop_band_test_metrics[label].update(scores[mask], band_target, indexes=user_ids[mask])
-
-            band_bce = F.binary_cross_entropy_with_logits(logits[mask], band_target.float(), reduction="none")
-            self.hop_band_bce[label].update(band_bce)
-            self.hop_band_pos[label].update(band_target.sum())
-
-            if band_target.sum() > 0:
-                self._seen_hop_bands.add(label)
 
     def _update_sampled_sets_metrics(self, batch, out, n_draws: int = 8):
         logits = out.squeeze(-1)
@@ -411,19 +396,14 @@ class ActivityGraphModule(L.LightningModule):
         self.log_dict(self.test_metrics.compute())
         self.test_metrics.reset()
 
-        if self.hop_band_test_metrics is not None:
-            # Only compute/log hop bands that saw at least one positive (others would have all groups skipped).
-            for label in self._seen_hop_bands:
-                self.log_dict(self.hop_band_test_metrics[label].compute())
-                self.log(f"test_hop_{label}_nll", self.hop_band_bce[label].compute())
-                self.log(f"test_hop_{label}_n_pos", self.hop_band_pos[label].compute())
-            for collection in self.hop_band_test_metrics.values():
-                collection.reset()
-            for metric in self.hop_band_bce.values():
-                metric.reset()
-            for metric in self.hop_band_pos.values():
-                metric.reset()
-            self._seen_hop_bands.clear()
+        # Not logged: these are per-user vectors, not scalars. Persisted by `run_experiment`.
+        self.per_user_columns = {name: value.cpu().tolist() for name, value in self.test_per_user.columns().items()}
+        self.test_per_user.reset()
+
+        if self.hop_band_metrics is not None:
+            self.hop_band_rows = self.hop_band_metrics.compute()
+            self.log_dict(hop_band_scalars(self.hop_band_rows))
+            self.hop_band_metrics.reset()
 
         self.log("test_calibration_l1", self.test_calibration.compute())
         self.test_calibration.reset()

@@ -22,5 +22,8 @@ data/external
 # Models
 models
 
+# Outputs
+reports
+
 # Weights and biases
 wandb

@@ -312,6 +312,7 @@ class GPSLayer(torch.nn.Module):
 
     def __init__(self, hidden_channels, edge_dim, num_heads=4, dropout=0.2):
         super().__init__()
+
         self.conv = GPSConv(
             channels=hidden_channels,
             conv=GATConv(hidden_channels, hidden_channels, heads=1, edge_dim=edge_dim, add_self_loops=False),
@@ -319,6 +320,10 @@ class GPSLayer(torch.nn.Module):
             dropout=dropout,
             attn_type="performer",
         )
+
+        self.conv.attn.forward = torch._dynamo.disable(
+            self.conv.attn.forward
+        )  # Disable compilation for Preformer attention
 
     def forward(self, x, edge_index, edge_attr, batch):
         return self.conv(x, edge_index, batch, edge_attr=edge_attr)

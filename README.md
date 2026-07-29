@@ -17,16 +17,30 @@ to setup the project and install dependencies.
 ## Usage
 
 ```bash
-uv run activity-graphs                       # full comparison run, default dataset (Toronto)
-uv run activity-graphs data=geneva           # switch dataset (geneva, toronto)
+uv run activity-graphs                       # full comparison run, default dataset (THATS)
+uv run activity-graphs data=geneva           # switch dataset (thats, geneva)
 
 uv run activity-graphs train.fast_dev_run=true      # single batch test run
 uv run activity-graphs train.loss.type=bce          # loss: bpr (default) or bce
 uv run activity-graphs train.loss.neg_sampler=hard  # hard near-home BPR negatives
 uv run activity-graphs train.wandb=false            # disable Weights & Biases logging
+
+uv run activity-graphs train.train_seeds=[1,2,3]    # repeat every model for each training seed
+uv run activity-graphs train.experiment=depth_sweep # sweep GATSkip depth instead of comparing architectures
+uv run activity-graphs train.experiment=depth_sweep train.depths=[2,4,8]
 ```
 
-Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line. A run trains the GNN variants (GATSkip, GraphTransformer, MLP) against frequency baselines and writes per-epoch metrics to WandB and `reports/data/{name}-results-{N}.parquet`, with best-validation checkpoints in `models/`.
+Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line. 
+
+`train.experiment` selects what to run: 
+ - `comparison` (default) trains the GNN variants (GATSkip, GraphTransformer, MLP) 
+against frequency baselines, 
+ - `depth_sweep` sweeps the message-passing depth of the best GATSkip variant.
+
+Both write per-epoch metrics to WandB and `reports/data/{name}-results-{N}.parquet`, per-test-user scores to 
+`{name}-per-user-{N}.parquet`, and best-validation checkpoints to `models/`. The train/val/test split is drawn with 
+`train.split_seed`; every model in every run is scored on the same test users; 
+`train.train_seeds` reseeds each model run to measure spread.
 
 ## Tests
 
@@ -39,14 +53,14 @@ uv run pytest test/ -m integration     # integration tests (skip when data is ab
 
 ```
 activitygraphs/
-  main.py, run.py      # Hydra entry point and experiment running
-  network.py           # Abstraction for travel data (NetworkData)
-  dataprocessing.py    # Graph construction and pytorch tensor building
-  data/                # Per-dataset loaders (geneva, toronto, ...)
-  conf/                # Hydra configs (root + per-dataset)
-  ml/                  # PyG dataset, Lightning module, models, losses, metrics, baselines
-test/                  # pytest suite
-reports/data/          # result dataframes
+  main.py, experiments.py  # Hydra entry point and experiment running
+  network.py               # Abstraction for travel data (NetworkData)
+  dataprocessing.py        # Graph construction and pytorch tensor building
+  data/                    # Per-dataset loaders (geneva, toronto, ...)
+  conf/                    # Hydra configs (root + per-dataset)
+  ml/                      # PyG dataset, Lightning module, training, models, losses, metrics, baselines
+test/                      # pytest suite
+reports/data/              # result dataframes
 ```
 
-Models are evaluated using metrics for consideration sets: realised visits are a subset of the latent target, so we use recall metrics that are set size-aware (R-precision, recall at a set-size budget). Precision-style metrics are diagnostics only.
+Models are evaluated using metrics for consideration sets: realised visits are a subset of the latent target, so we use recall metrics that are set size-aware (R-precision, recall at a set size). Precision-style metrics are diagnostics only.
