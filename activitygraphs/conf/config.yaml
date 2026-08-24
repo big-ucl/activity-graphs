@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - data: thats
+  - data: geneva
 
 paths:
   reports: reports
@@ -13,7 +13,7 @@ train:
   # Dataset split seed: kept same across models to ensure same data evaluation.
   split_seed: 42
   # Training seeds; each model is trained once per entry. Use several to measure run-to-run spread.
-  train_seeds: [42]
+  train_seeds: [42, 43, 44]
 
   # comparison = comparison between ML architectures; depth_sweep = GATSkip receptive-field sweep over `depths`.
   experiment: comparison
