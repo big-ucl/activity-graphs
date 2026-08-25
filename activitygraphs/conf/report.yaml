@@ -1,0 +1,11 @@
+# Entry point of the results analysis (`report-results`): the training config, minus the Hydra
+# run directory and job log, which a read-only report has no output to write.
+defaults:
+  - config
+  - override hydra/job_logging: disabled
+  - _self_
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

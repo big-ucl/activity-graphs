@@ -1,8 +1,9 @@
-"""Hydra entry point: registers config store and dispatches to the configured experiment."""
+"""Hydra entry points: ``main`` launches to the configured experiment, ``report_results`` analyses the results."""
 
 import hydra
 from hydra.core.config_store import ConfigStore
 
+from activitygraphs.analysis import print_report
 from activitygraphs.config import Config
 from activitygraphs.experiments import comparison_experiment, depth_sweep_experiment
 
@@ -19,6 +20,11 @@ def main(cfg: Config):
 
     experiment = EXPERIMENTS[cfg.train.experiment]
     experiment(cfg)
+
+
+@hydra.main(version_base=None, config_path="conf", config_name="report")
+def report_results(cfg: Config):
+    print_report(cfg.paths.reports_data, cfg.data.name, cfg.analysis.run, cfg.analysis)
 
 
 if __name__ == "__main__":

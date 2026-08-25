@@ -1,5 +1,6 @@
 """ActivityDataset, FittedScalers, and the ``load_dataset`` entry point for the ML pipeline."""
 
+import hashlib
 import json
 import pickle
 from collections.abc import Callable
@@ -12,6 +13,7 @@ import numpy as np
 import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as T
+from omegaconf import OmegaConf
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch_geometric.data.data import BaseData
@@ -25,6 +27,9 @@ from activitygraphs.utils import get_project_root
 # Full-`x` column index of `is_home` in the legacy GenevaDataset pickles only.
 # The main ActivityDataset path derives this from the data (see ActivityDataset.is_home_col_idx).
 _LEGACY_IS_HOME_COL_IDX = 37
+
+
+type Fingerprint = dict
 
 
 class GenevaDataset(pyg.data.InMemoryDataset):
@@ -254,6 +259,7 @@ class FittedScalers:
     network_edges: StandardScaler | None
     spatial: StandardScaler | None
     demographics: StandardScaler | None
+    fingerprint: Fingerprint
     distances: StandardScaler | None = None
     exclude_spatial_cols: list[int] | None = None
 
@@ -265,6 +271,62 @@ class FittedScalers:
     def load(path: Path) -> "FittedScalers":
         with path.open("rb") as f:
             return pickle.load(f)
+
+
+def load_dataset(
+    cfg: Config,
+    val_size: float,
+    test_size: float,
+    seed: int,
+    project_root: Path | None = None,
+    **build_kwargs,
+) -> tuple[ActivityDataset, ActivityDataset, ActivityDataset, FittedScalers]:
+    """Load, split, scale, and return the dataset as train/val/test subsets with cached scalers.
+
+    Split indices are cached in ``splits.json``; scalers are cached in ``scalers.pkl``
+    under ``cfg.data.paths.pyg_datasets``.
+
+    Returns:
+        Tuple ``(train_dataset, val_dataset, test_dataset, scalers)``.
+    """
+    project_root = get_project_root(project_root)
+    pyg_dir = project_root / cfg.data.paths.pyg_datasets
+    splits_cache = pyg_dir / f"splits_{seed}_val{val_size}_test{test_size}.json"
+    scalers_cache = pyg_dir / f"scalers_{seed}_val{val_size}_test{test_size}.pkl"
+
+    positional_encodings_transforms = T.Compose([
+        T.AddRandomWalkPE(walk_length=20, attr_name=None),
+        # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
+    ])
+
+    dataset = load_or_build_dataset(
+        cfg, project_root=project_root, pre_transform=positional_encodings_transforms, **build_kwargs
+    )
+
+    fingerprint = dataset_fingerprint(cfg, dataset)
+
+    train_idx, val_idx, test_idx = split_indices(
+        dataset, val_size, test_size, seed, cache_path=splits_cache, fingerprint=fingerprint
+    )
+
+    scalers = None
+    if scalers_cache.exists():
+        scalers = FittedScalers.load(scalers_cache)
+
+    if scalers is None or scalers.fingerprint != fingerprint:
+        scalers = fit_scalers(
+            dataset, train_idx, exclude_spatial_cols=[dataset.is_home_spatial_idx], fingerprint=fingerprint
+        )
+        scalers.save(scalers_cache)
+
+    apply_scalers(dataset, scalers)
+
+    return (
+        cast(ActivityDataset, dataset[train_idx]),
+        cast(ActivityDataset, dataset[val_idx]),
+        cast(ActivityDataset, dataset[test_idx]),
+        scalers,
+    )
 
 
 def load_or_build_dataset(
@@ -295,14 +357,18 @@ def split_indices(
     val_size: float,
     test_size: float,
     seed: int,
+    fingerprint: Fingerprint,
     cache_path: Path | None = None,
 ) -> tuple[list[int], list[int], list[int]]:
-    """Return (train_indices, val_indices, test_indices). Loads from ``cache_path`` if it exists, otherwise splits and caches."""
+    """Return (train_indices, val_indices, test_indices). Loads from ``cache_path`` if it matches ``fingerprint``, otherwise splits and caches."""
     if cache_path is not None and cache_path.exists():
         with cache_path.open() as f:
-            indices = json.load(f)
+            cached_indices = json.load(f)
 
-        return indices["train"], indices["val"], indices["test"]
+        if cached_indices.get("fingerprint") == fingerprint:
+            return cached_indices["train"], cached_indices["val"], cached_indices["test"]
+
+        print(f"Cached indices at `{cache_path.name}` do not match fingerprint, re-splitting.")
 
     train_val_idx, test_idx = train_test_split(
         list(range(len(dataset))),
@@ -320,7 +386,9 @@ def split_indices(
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("w") as f:
-            json.dump({"train": train_idx, "val": val_idx, "test": test_idx, "seed": seed}, f)
+            json.dump(
+                {"train": train_idx, "val": val_idx, "test": test_idx, "seed": seed, "fingerprint": fingerprint}, f
+            )
 
     return train_idx, val_idx, test_idx
 
@@ -328,6 +396,7 @@ def split_indices(
 def fit_scalers(
     dataset: ActivityDataset,
     train_idx: list[int],
+    fingerprint: Fingerprint,
     exclude_spatial_cols: list[int] | None = None,
     exclude_demographic_cols: list[int] | None = None,
 ) -> FittedScalers:
@@ -338,6 +407,7 @@ def fit_scalers(
         train_idx: Indices of training individuals.
         exclude_spatial_cols: Column indices excluded from spatial scaler fitting (e.g. ``[is_home_spatial_idx]``).
         exclude_demographic_cols: Column indices excluded from demographics scaler fitting.
+        fingerprint: Identity of the dataset being fitted on, stored for cache validation.
 
     Returns:
         ``FittedScalers`` with one scaler per feature group (network nodes, edges, spatial, demographics).
@@ -386,6 +456,7 @@ def fit_scalers(
         demographics=demo_scaler,
         distances=distances_scaler,
         exclude_spatial_cols=exclude_spatial_cols,
+        fingerprint=fingerprint,
     )
 
 
@@ -426,52 +497,21 @@ def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
     dataset._is_scaled = True
 
 
-def load_dataset(
-    cfg: Config,
-    val_size: float,
-    test_size: float,
-    seed: int,
-    project_root: Path | None = None,
-    **build_kwargs,
-) -> tuple[ActivityDataset, ActivityDataset, ActivityDataset, FittedScalers]:
-    """Load, split, scale, and return the dataset as train/val/test subsets with cached scalers.
+def dataset_fingerprint(cfg: Config, dataset: ActivityDataset) -> Fingerprint:
+    """Returns a fingerprint of the dataset for comparison with caches, based on the data config and dataset properties.
 
-    Split indices are cached in ``splits.json``; scalers are cached in ``scalers.pkl``
-    under ``cfg.data.paths.pyg_datasets``.
-
-    Returns:
-        Tuple ``(train_dataset, val_dataset, test_dataset, scalers)``.
+    Only ``cfg.data`` is hashed, so training hyperparameters do not invalidate the caches. Must be
+    called before ``apply_scalers``, which rewrites the feature tensors in place.
     """
-    project_root = get_project_root(project_root)
-    pyg_dir = project_root / cfg.data.paths.pyg_datasets
-    splits_cache = pyg_dir / f"splits_{seed}_val{val_size}_test{test_size}.json"
-    scalers_cache = pyg_dir / f"scalers_{seed}_val{val_size}_test{test_size}.pkl"
+    config_str = OmegaConf.to_yaml(cfg.data, resolve=True, sort_keys=True)
 
-    positional_encodings_transforms = T.Compose([
-        T.AddRandomWalkPE(walk_length=20, attr_name=None),
-        # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
-    ])
-
-    dataset = load_or_build_dataset(
-        cfg, project_root=project_root, pre_transform=positional_encodings_transforms, **build_kwargs
-    )
-
-    train_idx, val_idx, test_idx = split_indices(dataset, val_size, test_size, seed, cache_path=splits_cache)
-
-    if scalers_cache.exists():
-        scalers = FittedScalers.load(scalers_cache)
-    else:
-        scalers = fit_scalers(dataset, train_idx, exclude_spatial_cols=[dataset.is_home_spatial_idx])
-        scalers.save(scalers_cache)
-
-    apply_scalers(dataset, scalers)
-
-    return (
-        cast(ActivityDataset, dataset[train_idx]),
-        cast(ActivityDataset, dataset[val_idx]),
-        cast(ActivityDataset, dataset[test_idx]),
-        scalers,
-    )
+    return {
+        "n_users": len(dataset),
+        "n_nodes": dataset.num_nodes,
+        "n_spatial_cols": int(dataset.spatial_features.shape[-1]),
+        "n_demographic_cols": int(dataset.demographics.shape[-1]),
+        "data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest(),
+    }
 
 
 def load_gva_dataset(

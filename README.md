@@ -17,8 +17,8 @@ to setup the project and install dependencies.
 ## Usage
 
 ```bash
-uv run activity-graphs                       # full comparison run, default dataset (THATS)
-uv run activity-graphs data=geneva           # switch dataset (thats, geneva)
+uv run activity-graphs                       # full comparison run, default dataset (Geneva)
+uv run activity-graphs data=geneva           # switch dataset (geneva, thats)
 
 uv run activity-graphs train.fast_dev_run=true      # single batch test run
 uv run activity-graphs train.loss.type=bce          # loss: bpr (default) or bce
@@ -29,6 +29,19 @@ uv run activity-graphs train.train_seeds=[1,2,3]    # repeat every model for eac
 uv run activity-graphs train.experiment=depth_sweep # sweep GATSkip depth instead of comparing architectures
 uv run activity-graphs train.experiment=depth_sweep train.depths=[2,4,8]
 ```
+
+Once a run has finished, report its results:
+
+```bash
+uv run report-results                                     # analyse the latest run of the default dataset
+uv run report-results data=geneva analysis.run=3          # a specific dataset and run number
+uv run report-results analysis.reference_model=MLP-dist   # change reference model for comparisons
+```
+
+`report-results` reads the result Parquet files and prints: 
+ - the aggregate metric as mean +- sd over the training seeds;
+ - the per-user paired comparison of every model against `analysis.reference_model` (bootstrap CI and Wilcoxon p);
+ - the per-hop-band metrics table. 
 
 Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line. 
 
@@ -53,7 +66,8 @@ uv run pytest test/ -m integration     # integration tests (skip when data is ab
 
 ```
 activitygraphs/
-  main.py, experiments.py  # Hydra entry point and experiment running
+  main.py, experiments.py  # Hydra entry points and experiment running
+  analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
   network.py               # Abstraction for travel data (NetworkData)
   dataprocessing.py        # Graph construction and pytorch tensor building
   data/                    # Per-dataset loaders (geneva, toronto, ...)

@@ -4,6 +4,7 @@ defaults:
 
 paths:
   reports: reports
+  reports_data: ${..paths.reports}/data
   figures: ${..paths.reports}/figures
   models: models
 
@@ -58,3 +59,17 @@ train:
     neg_sampler: uniform
     # Max distance for hard negative samples (number of hops)
     is_near_threshold: 5
+
+analysis:
+  # Reference model to pair against in paired per-user comparison.
+  reference_model: ConditionalNodeMarginal
+  # Aggregate test metric reported as mean +- sd over the training seeds.
+  main_metric: test_r_precision
+  # Per-user metric used for the paired comparison.
+  per_user_metric: r_precision
+  # Home-zone occupancy thresholds `t` reported as `share_users_ge_{t}`.
+  occupancy_thresholds: [10, 25, 60]
+  # Restrict the hop-band table to these models. null reports all models.
+  hop_models: null
+  # Run number `n` of `{dataset}-results-{n}.parquet`. null reads the latest.
+  run: null

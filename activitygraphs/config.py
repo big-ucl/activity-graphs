@@ -189,6 +189,7 @@ class OutputPaths:
     """Filesystem paths for experiment outputs (reports, figures, saved models)."""
 
     reports: Path
+    reports_data: Path
     figures: Path
     models: Path
 
@@ -232,12 +233,25 @@ class TrainConfig:
 
 
 @dataclass
+class AnalysisConfig:
+    """Result analysis configuration"""
+
+    reference_model: str
+    main_metric: str
+    per_user_metric: str
+    occupancy_thresholds: list[int]
+    hop_models: list[str] | None
+    run: int | None
+
+
+@dataclass
 class Config:
     """Top-level Hydra config: dataset config plus output paths."""
 
     data: DataConfig
     paths: OutputPaths
     train: TrainConfig
+    analysis: AnalysisConfig
 
 
 # cs = ConfigStore.instance()
