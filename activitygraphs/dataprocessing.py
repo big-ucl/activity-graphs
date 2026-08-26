@@ -20,17 +20,17 @@ from activitygraphs.config import (
     DataConfig,
     GenevaStatsInputs,
     StatsInputs,
-    TorontoStatsInputs,
-    TorontoDataConfig,
+    THATSStatsInputs,
+    THATSDataConfig,
     GenevaDataConfig,
 )
 from activitygraphs.data.geneva import GenevaData
 from activitygraphs.data.overture import Overture
 from activitygraphs.data.statistics import (
     add_geneva_population_job_statistics,
-    add_toronto_population_job_statistics,
+    add_thats_population_job_statistics,
 )
-from activitygraphs.data.toronto import TorontoData
+from activitygraphs.data.thats import THATSData
 from activitygraphs.network import NetworkData
 from activitygraphs.utils import get_project_root
 
@@ -116,14 +116,14 @@ def load_gva_network_graph(
     return load_network_graph(gva_data, cfg, build_gva_network_graph, project_root, name)
 
 
-def load_toronto_network_graph(
-    toronto_data: TorontoData,
+def load_thats_network_graph(
+    thats_data: THATSData,
     cfg: DataConfig,
     project_root: Path | None = None,
     name: str = "NetworkGraph",
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Wrapper around ``load_network_graph`` for the Toronto dataset."""
-    return load_network_graph(toronto_data, cfg, build_toronto_network_graph, project_root, name)
+    return load_network_graph(thats_data, cfg, build_thats_network_graph, project_root, name)
 
 
 def build_gva_network_graph(
@@ -171,7 +171,7 @@ def build_gva_network_graph(
     return nodes, edges
 
 
-def build_toronto_network_graph(
+def build_thats_network_graph(
     locations: gpd.GeoDataFrame,
     overture: Overture,
     stats_cfg: StatsInputs,
@@ -180,9 +180,9 @@ def build_toronto_network_graph(
     utm_crs = locations.estimate_utm_crs()
     locations = locations.to_crs(utm_crs)
 
-    stats_cfg: TorontoStatsInputs
+    stats_cfg: THATSStatsInputs
 
-    network_locations = add_toronto_population_job_statistics(locations, stats_cfg)
+    network_locations = add_thats_population_job_statistics(locations, stats_cfg)
     network_locations = overture.add_poi_counts(network_locations)
     network_locations = overture.add_land_uses(network_locations)
     network_locations = network_locations.set_index("loc_id")
@@ -472,18 +472,18 @@ def build_user_pyg_graph(
 
 def load_data(cfg: DataConfig, project_root: Path | None = None):
     if cfg.name == "THATS":
-        cfg = cast(TorontoDataConfig, cfg)
-        return _load_toronto_data(cfg, project_root)
+        cfg = cast(THATSDataConfig, cfg)
+        return _load_thats_data(cfg, project_root)
     elif cfg.name == "GenevaTPG":
-        cfg = cast(TorontoDataConfig, cfg)
+        cfg = cast(THATSDataConfig, cfg)
         return _load_geneva_data(cfg, project_root)
 
     raise ValueError(f"Unknown Dataset {cfg.name}")
 
 
-def _load_toronto_data(cfg: TorontoDataConfig, project_root: Path | None = None):
-    data = TorontoData.load(cfg, project_root).with_filter("subsector")
-    network_nodes, network_edges = load_toronto_network_graph(data, cfg, project_root)
+def _load_thats_data(cfg: THATSDataConfig, project_root: Path | None = None):
+    data = THATSData.load(cfg, project_root).with_filter("subsector")
+    network_nodes, network_edges = load_thats_network_graph(data, cfg, project_root)
 
     return data, network_nodes, network_edges
 

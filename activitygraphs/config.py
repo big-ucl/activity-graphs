@@ -51,8 +51,8 @@ class GenevaBoundaryInputs:
 
 
 @dataclass
-class TorontoBoundaryInputs:
-    """File names for Toronto boundary shapefiles (CMA, census tracts, dissemination areas)."""
+class THATSBoundaryInputs:
+    """File names for Toronto THATS boundary shapefiles (CMA, census tracts, dissemination areas)."""
 
     directory: str
 
@@ -76,8 +76,8 @@ class GenevaStatsInputs(StatsInputs):
 
 
 @dataclass
-class TorontoStatsInputs(StatsInputs):
-    """Census statistics file config for Toronto (separate population and jobs CSVs)."""
+class THATSStatsInputs(StatsInputs):
+    """Census statistics file config for THATS (separate population and jobs CSVs)."""
 
     population: str
     jobs: str
@@ -99,7 +99,7 @@ class Inputs:
 
 @dataclass
 class LTDSInputs(Inputs):
-    """Raw-file inputs for the LTDS survey."""
+    """Raw file inputs for the LTDS survey."""
 
     raw_household: str
     raw_person: str
@@ -109,17 +109,17 @@ class LTDSInputs(Inputs):
 
 @dataclass
 class GenevaInputs(Inputs):
-    """Raw-file inputs for the Geneva MTMC survey."""
+    """Raw file inputs for the Geneva MTMC survey."""
 
     boundaries: GenevaBoundaryInputs
     gtfs: GTFSInputs
 
 
 @dataclass
-class TorontoInputs(Inputs):
-    """Raw-file inputs for the Toronto TTS survey."""
+class THATSInputs(Inputs):
+    """Raw file inputs for the Toronto THATS survey."""
 
-    boundaries: TorontoBoundaryInputs
+    boundaries: THATSBoundaryInputs
 
     raw_person: str
     raw_household: str
@@ -173,10 +173,10 @@ class GenevaDataConfig(DataConfig):
 
 
 @dataclass
-class TorontoDataConfig(DataConfig):
-    """Dataset config for the Toronto TTS survey."""
+class THATSDataConfig(DataConfig):
+    """Dataset config for the Toronto THATS survey."""
 
-    inputs: TorontoInputs
+    inputs: THATSInputs
 
 
 # ===================================================
@@ -258,13 +258,13 @@ class Config:
 # cs.store(name="ltds_config", node=Config)
 
 
-def load_config(project_root: Path, verbose=True, data: Literal["ltds", "geneva", "toronto"] = "geneva") -> Config:
+def load_config(project_root: Path, verbose=True, data: Literal["ltds", "geneva", "thats"] = "geneva") -> Config:
     """Load Hydra config for the given dataset.
 
     Args:
         project_root: Repo root; the config dir is resolved as ``project_root/activitygraphs/conf``.
         verbose: Print the resolved YAML to stdout.
-        data: Dataset name, one of ``ltds``, ``geneva``, or ``toronto``.
+        data: Dataset name, one of ``ltds``, ``geneva``, or ``thats``.
 
     Returns:
         Populated OmegaConf ``Config`` object.

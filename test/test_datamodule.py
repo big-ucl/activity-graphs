@@ -18,11 +18,11 @@ pytestmark = pytest.mark.integration
 def datamodule() -> ActivityDataModule:
     root = get_project_root()
     try:
-        cfg = load_config(root, verbose=False, data="toronto")
+        cfg = load_config(root, verbose=False, data="thats")
         dm = ActivityDataModule(cfg, val_size=0.2, test_size=0.1, seed=42, batch_size=64)
         dm.setup()
     except Exception as exc:  # config or processed data not present in this environment
-        pytest.skip(f"toronto dataset/config unavailable: {exc}")
+        pytest.skip(f"thats dataset/config unavailable: {exc}")
     return dm
 
 

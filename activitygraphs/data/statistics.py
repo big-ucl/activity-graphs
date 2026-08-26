@@ -5,7 +5,7 @@ from pathlib import Path
 import geopandas as gpd
 import polars as pl
 
-from activitygraphs.config import GenevaStatsInputs, TorontoStatsInputs
+from activitygraphs.config import GenevaStatsInputs, THATSStatsInputs
 from activitygraphs.utils import gdf_to_polars
 
 
@@ -43,8 +43,8 @@ def add_geneva_population_job_statistics(
     return normalise_statistics(stats_by_sector, normalise)
 
 
-def add_toronto_population_job_statistics(
-    locations: gpd.GeoDataFrame, cfg: TorontoStatsInputs, normalise: bool = True, project_root: Path | None = None
+def add_thats_population_job_statistics(
+    locations: gpd.GeoDataFrame, cfg: THATSStatsInputs, normalise: bool = True, project_root: Path | None = None
 ) -> gpd.GeoDataFrame:
     """Add census population and job counts to Toronto (CT/subsector) locations.
 

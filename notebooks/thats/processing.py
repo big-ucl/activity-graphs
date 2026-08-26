@@ -29,16 +29,16 @@ def _():
 
 @app.cell
 def _():
-    from activitygraphs.data.toronto import TorontoData
-    from activitygraphs.dataprocessing import load_toronto_network_graph, convert_to_torch
+    from activitygraphs.data.thats import THATSData
+    from activitygraphs.dataprocessing import load_thats_network_graph, convert_to_torch
 
     from activitygraphs.ml.dataset import ActivityDataset
 
     return (
         ActivityDataset,
-        TorontoData,
+        THATSData,
         convert_to_torch,
-        load_toronto_network_graph,
+        load_thats_network_graph,
     )
 
 
@@ -260,7 +260,7 @@ def _():
 @app.cell
 def _():
     from activitygraphs.base import Mode
-    from activitygraphs.data.toronto import MANUAL_MODE_MAP, MODE_MAP
+    from activitygraphs.data.thats import MANUAL_MODE_MAP, MODE_MAP
 
     return MANUAL_MODE_MAP, MODE_MAP, Mode
 
@@ -497,9 +497,9 @@ def _():
 
 @app.cell
 def _(data):
-    from activitygraphs.data.toronto import build_toronto_activities
+    from activitygraphs.data.thats import build_thats_activities
 
-    activs = build_toronto_activities(data.inputs, data.user_journeys_df)
+    activs = build_thats_activities(data.inputs, data.user_journeys_df)
     print(activs.head())
     return
 
