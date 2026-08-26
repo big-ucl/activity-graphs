@@ -326,7 +326,7 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 def create_individual_demographics(data: NetworkData) -> torch.Tensor:
     """Create the demographic tensor from NetworkData, returns a float32 tensor of shape ``[n_users, n_demo_features]``.
     If there are no demographics (e.g. Geneva), returns a (n_users, 1) dummy tensor of ones."""
-    indiv_demographics = data.users_df.drop("user_id", "home_loc_id")
+    indiv_demographics = data.users_df.drop("user_id", "hh_id", "home_loc_id")
 
     if len(indiv_demographics) == 0:
         return torch.ones((len(data.user_ids), 1), dtype=torch.float32)
@@ -475,7 +475,7 @@ def load_data(cfg: DataConfig, project_root: Path | None = None):
         cfg = cast(THATSDataConfig, cfg)
         return _load_thats_data(cfg, project_root)
     elif cfg.name == "GenevaTPG":
-        cfg = cast(THATSDataConfig, cfg)
+        cfg = cast(GenevaDataConfig, cfg)
         return _load_geneva_data(cfg, project_root)
 
     raise ValueError(f"Unknown Dataset {cfg.name}")

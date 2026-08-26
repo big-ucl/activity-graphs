@@ -1,5 +1,6 @@
 """Schema validation, geometry helpers, and I/O utilities."""
 
+import math
 from abc import ABC
 from collections.abc import Mapping
 from pathlib import Path
@@ -221,3 +222,15 @@ def invert_mapping(mapping: dict[Hashable, list[Hashable]]) -> dict[Hashable, Ha
             inversion[v] = k
 
     return inversion
+
+
+def bands_to_midpoint_map(
+    bands: dict[Hashable, tuple[float, float]], round_mid: bool = True
+) -> dict[Hashable, float | int]:
+    """Converts a map of band labels to their low and high points (e.g. income bands) to a map of band labels to their midpoints.
+    Rounds to nearest integer if ``round_mid`` is ``True``."""
+    midpoints = {band: (low + high) / 2 for band, (low, high) in bands.items()}
+    if round_mid:
+        midpoints = {k: round(v) for k, v in midpoints.items()}
+
+    return midpoints

@@ -75,9 +75,18 @@ USER_JOURNEY_SCHEMA = pl.Schema({
 
 USER_SCHEMA = pl.Schema({
     "user_id": pl.String,
+    "hh_id": pl.String,
     "home_loc_id": pl.String,
+    "has_missing_demographics": pl.Boolean,
     "hh_num_adults": pl.UInt32,
     "hh_num_children": pl.UInt32,
+    "hh_num_vehicles": pl.UInt32,
+    "hh_num_bicycle": pl.UInt32,
+    "hh_income_kusd": pl.Float64,
+    "age": pl.UInt32,
+    "is_employed": pl.Boolean,
+    "is_student": pl.Boolean,
+    "can_drive": pl.Boolean,
 })
 
 EDGE_LIST_SCHEMA = pl.Schema({

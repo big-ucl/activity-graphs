@@ -211,7 +211,7 @@ class THATSData(NetworkData, DataFrameStore):
         self.locations_gdf.to_parquet(data_dir / "locations_gdf.parquet")
         self.user_journeys_df.write_parquet(data_dir / "user_journeys_df.parquet")
         self.activities_df.write_parquet(data_dir / "activities_df.parquet")
-        self.users_df.write_parquet(data_dir / "users_df.parquet")
+        self.users_df.write_parquet(data_dir / "users_df.parquet") # TODO This should probably be _users_df instead?
 
 
 def load_files(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSInputs:
@@ -548,7 +548,7 @@ def build_thats_users(
     )  # TODO add HH demographics: HH size (num adults, num children), HH income, num vehicles, num bikes.
 
     demographics = persons.join(hhs, on="hh_id", how="left").drop("hh_id")
-    user_ids = user_journeys_df.select("user_id").unique()
+    user_ids = user_journeys_df.select("user_id", "hh_id").unique()
 
     # Replace unknown locations with NA
     locations_ids = locations_gdf["loc_id"]

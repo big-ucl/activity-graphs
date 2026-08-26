@@ -62,6 +62,14 @@ class THATSBoundaryInputs:
 
 
 @dataclass
+class CMAPBoundaryInputs:
+    """File names for CMAP MyDailyTravel boundary shapefiles (census tracts)."""
+
+    directory: str
+    census_tracts: str
+
+
+@dataclass
 class StatsInputs:
     """Base class for census statistics file config."""
 
@@ -70,7 +78,7 @@ class StatsInputs:
 
 @dataclass
 class GenevaStatsInputs(StatsInputs):
-    """Census statistics file config for Geneva (single grid file)."""
+    """Census statistics file config for Geneva (square grid of job and population data)."""
 
     file: str
 
@@ -78,6 +86,14 @@ class GenevaStatsInputs(StatsInputs):
 @dataclass
 class THATSStatsInputs(StatsInputs):
     """Census statistics file config for THATS (separate population and jobs CSVs)."""
+
+    population: str
+    jobs: str
+
+
+@dataclass
+class CMAPStatsInputs(StatsInputs):
+    """Census statistics file config for CMAP MyDailyTravel survey."""
 
     population: str
     jobs: str
@@ -124,6 +140,16 @@ class THATSInputs(Inputs):
     raw_person: str
     raw_household: str
     raw_activities: str
+
+
+@dataclass
+class CMAPInputs(Inputs):
+    """Raw file inputs for the CMAP MyDailyTravel survey."""
+
+    boundaries: CMAPBoundaryInputs
+
+    raw_person: str
+    raw_household: str
 
 
 # ===================================================
@@ -177,6 +203,13 @@ class THATSDataConfig(DataConfig):
     """Dataset config for the Toronto THATS survey."""
 
     inputs: THATSInputs
+
+
+@dataclass
+class CMAPDataConfig(DataConfig):
+    """Dataset config for the Chicago CMAP MyDailyTravel 2022 survey."""
+
+    inputs: CMAPInputs
 
 
 # ===================================================
@@ -257,8 +290,10 @@ class Config:
 # cs = ConfigStore.instance()
 # cs.store(name="ltds_config", node=Config)
 
+VALID_CONFIGS = Literal["ltds", "geneva", "thats", "cmap"]
 
-def load_config(project_root: Path, verbose=True, data: Literal["ltds", "geneva", "thats"] = "geneva") -> Config:
+
+def load_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "geneva") -> Config:
     """Load Hydra config for the given dataset.
 
     Args:

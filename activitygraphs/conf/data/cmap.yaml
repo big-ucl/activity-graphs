@@ -1,0 +1,31 @@
+# @package data
+name: CMAP
+
+inputs:
+  raw_journeys: trip_linked.csv
+  raw_person: person.csv
+  raw_household: hh.csv
+
+  statistics:
+    directory: ${...paths.external}/statistics/${...name}
+    population: acs_b01003_tract_il.csv # TODO
+    jobs: il_wac_S000_JT00_2022.csv.gz # TODO
+
+  overture:
+    directory: ${...paths.external}/overture/${...name}
+    land_use: land_use.geojson
+    place: place.geojson
+
+  boundaries:
+    directory: ${...paths.external}/boundaries/usa
+
+    census_tracts: tl_2020_17_tract.zip
+
+paths:
+  processed: data/processed/${..name}
+  raw: data/raw/${..name}
+
+  external: data/external
+  gtfs: ${..paths.external}/gtfs
+
+  pyg_datasets: ${..paths.processed}/PyGDatasets
