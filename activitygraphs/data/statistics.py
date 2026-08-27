@@ -5,7 +5,7 @@ from pathlib import Path
 import geopandas as gpd
 import polars as pl
 
-from activitygraphs.config import GenevaStatsInputs, THATSStatsInputs
+from activitygraphs.config import GenevaStatsInputs, THATSStatsInputs, CMAPStatsInputs
 from activitygraphs.utils import gdf_to_polars
 
 
@@ -115,7 +115,39 @@ def normalise_statistics(stats_by_sector: gpd.GeoDataFrame, normalise: bool = Tr
     """Divide ``population`` and ``jobs`` columns by ``area`` if ``normalise`` is True."""
     if normalise:
         stats_by_sector = stats_by_sector.copy()
-        stats_by_sector["population"] = stats_by_sector["population"] / stats_by_sector["area"]
-        stats_by_sector["jobs"] = stats_by_sector["jobs"] / stats_by_sector["area"]
+        stats_by_sector["population"] = (stats_by_sector["population"] / stats_by_sector["area"]).fillna(0)
+        stats_by_sector["jobs"] = (stats_by_sector["jobs"] / stats_by_sector["area"]).fillna(0)
 
     return stats_by_sector
+
+
+def add_cmap_population_job_statistics(
+    locations_gdf: gpd.GeoDataFrame, cfg: CMAPStatsInputs, normalise: bool = True, project_root: Path | None = None
+) -> gpd.GeoDataFrame:
+    """Add census population and job counts to Chicago CMAP MyDailyTravel locations (census tracts).
+
+    Args:
+        locations_gdf: CMAP locations (must have a ``loc_id`` matching ``GEO_ID``).
+        cfg: CMAP census files config.
+        normalise: If True, divide counts by area to obtain densities.
+        project_root: Repo root; defaults to ``Path(".")``.
+    """
+    project_root = project_root if project_root is not None else Path(".")
+    stats_dir = project_root / cfg.directory
+
+    utm_crs = locations_gdf.estimate_utm_crs()
+
+    pop_stats = pl.read_csv(stats_dir / cfg.population, skip_rows_after_header=1)
+    pop_stats = pop_stats.select(loc_id=pl.col("GEO_ID").str.split("US").list.last(), population=pl.col("B01003_001E"))
+
+    job_stats = pl.read_csv(stats_dir / cfg.jobs, schema_overrides={"w_geocode": pl.String})
+    job_stats = job_stats.with_columns(loc_id=pl.col("w_geocode").str.slice(0, 11))
+    job_stats = job_stats.group_by("loc_id").agg(jobs=pl.col("C000").sum())
+
+    locations_gdf = locations_gdf.merge(pop_stats.to_pandas(), on="loc_id", how="left")
+    locations_gdf = locations_gdf.merge(job_stats.to_pandas(), on="loc_id", how="left")
+
+    locations_gdf[["population", "jobs"]] = locations_gdf[["population", "jobs"]].fillna(0)
+    locations_gdf["area"] = locations_gdf.to_crs(utm_crs).geometry.area
+
+    return normalise_statistics(locations_gdf, normalise)

@@ -23,12 +23,16 @@ from activitygraphs.config import (
     THATSStatsInputs,
     THATSDataConfig,
     GenevaDataConfig,
+    CMAPDataConfig,
+    CMAPStatsInputs,
 )
+from activitygraphs.data.cmap import CMAPData
 from activitygraphs.data.geneva import GenevaData
 from activitygraphs.data.overture import Overture
 from activitygraphs.data.statistics import (
     add_geneva_population_job_statistics,
     add_thats_population_job_statistics,
+    add_cmap_population_job_statistics,
 )
 from activitygraphs.data.thats import THATSData
 from activitygraphs.network import NetworkData
@@ -126,6 +130,16 @@ def load_thats_network_graph(
     return load_network_graph(thats_data, cfg, build_thats_network_graph, project_root, name)
 
 
+def load_cmap_network_graph(
+    cmap_data: CMAPData,
+    cfg: DataConfig,
+    project_root: Path | None = None,
+    name: str = "NetworkGraph",
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Wrapper around ``load_network_graph`` for the CMAP dataset."""
+    return load_network_graph(cmap_data, cfg, build_cmap_network_graph, project_root, name)
+
+
 def build_gva_network_graph(
     locations: gpd.GeoDataFrame,
     overture: Overture,
@@ -183,6 +197,31 @@ def build_thats_network_graph(
     stats_cfg: THATSStatsInputs
 
     network_locations = add_thats_population_job_statistics(locations, stats_cfg)
+    network_locations = overture.add_poi_counts(network_locations)
+    network_locations = overture.add_land_uses(network_locations)
+    network_locations = network_locations.set_index("loc_id")
+
+    nodes, edges = c2g.contiguity_graph(network_locations, set_point_nodes=True)
+
+    nodes = nodes.to_crs(CRS)
+    edges: gpd.GeoDataFrame = pd.concat([edges])
+    edges = edges.to_crs(CRS)
+
+    return nodes, edges
+
+
+def build_cmap_network_graph(
+    locations: gpd.GeoDataFrame,
+    overture: Overture,
+    stats_cfg: StatsInputs,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Build the CMAP spatial contiguity graph enriched with census stats, POIs, and land uses."""
+    utm_crs = locations.estimate_utm_crs()
+    locations = locations.to_crs(utm_crs)
+
+    stats_cfg: CMAPStatsInputs
+
+    network_locations = add_cmap_population_job_statistics(locations, stats_cfg)
     network_locations = overture.add_poi_counts(network_locations)
     network_locations = overture.add_land_uses(network_locations)
     network_locations = network_locations.set_index("loc_id")
@@ -477,6 +516,9 @@ def load_data(cfg: DataConfig, project_root: Path | None = None):
     elif cfg.name == "GenevaTPG":
         cfg = cast(GenevaDataConfig, cfg)
         return _load_geneva_data(cfg, project_root)
+    elif cfg.name == "CMAP":
+        cfg = cast(CMAPDataConfig, cfg)
+        return _load_cmap_data(cfg, project_root)
 
     raise ValueError(f"Unknown Dataset {cfg.name}")
 
@@ -491,5 +533,12 @@ def _load_thats_data(cfg: THATSDataConfig, project_root: Path | None = None):
 def _load_geneva_data(cfg: GenevaDataConfig, project_root: Path | None = None):
     data = GenevaData.load(cfg, project_root).with_filter("subsector")
     network_nodes, network_edges = load_gva_network_graph(data, cfg, project_root)
+
+    return data, network_nodes, network_edges
+
+
+def _load_cmap_data(cfg: CMAPDataConfig, project_root: Path | None = None):
+    data = CMAPData.load(cfg, project_root).with_filter("subsector")
+    network_nodes, network_edges = load_cmap_network_graph(data, cfg, project_root)
 
     return data, network_nodes, network_edges

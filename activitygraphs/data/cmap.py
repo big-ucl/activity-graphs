@@ -38,6 +38,9 @@ CMAP_COUNTY_FP_CODES = [
     "197",  # Will
 ]
 
+# Exclude the two Census Tracts inside the lake
+EXCLUDED_CENSUS_TRACTS = ["17097990000", "17031990000"]
+
 MODE_MAP = invert_mapping({
     Mode.OTHER: [16, 17],
     Mode.UNKNOWN: [-1],
@@ -207,6 +210,7 @@ def build_cmap_locations(inputs: CMAPInputs) -> gpd.GeoDataFrame:
     subsector_locations["type"] = "subsector"
     subsector_locations = add_lon_lat_from_centroid(subsector_locations, index_col="loc_id")
     subsector_locations = subsector_locations[LOCATIONS_COLUMNS]
+    subsector_locations = subsector_locations[~subsector_locations["loc_id"].isin(EXCLUDED_CENSUS_TRACTS)]
 
     special_locations = build_special_locations()
 

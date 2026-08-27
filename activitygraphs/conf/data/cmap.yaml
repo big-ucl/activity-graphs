@@ -8,8 +8,8 @@ inputs:
 
   statistics:
     directory: ${...paths.external}/statistics/${...name}
-    population: acs_b01003_tract_il.csv # TODO
-    jobs: il_wac_S000_JT00_2022.csv.gz # TODO
+    population: ACSDT5Y2024.B01003-Data.csv
+    jobs: il_wac_S000_JT00_2023.csv.gz
 
   overture:
     directory: ${...paths.external}/overture/${...name}
