@@ -46,6 +46,44 @@ def _(cfg, project_root):
     from activitygraphs.dataprocessing import load_data
 
     cmap_data, network_nodes, network_edges = load_data(cfg.data, project_root)
+    return network_edges, network_nodes
+
+
+@app.cell
+def _(network_edges, network_nodes):
+    from activitygraphs.mapping import explore_locations_by_type, explore_walk_edges
+
+    _m = network_nodes.explore()
+    _m = network_edges.explore(m=_m)
+
+    _m
+    return
+
+
+@app.cell
+def _(cfg, project_root):
+    from activitygraphs.ml.dataset import load_or_build_dataset
+
+    tensors = load_or_build_dataset(cfg, project_root)
+    return (tensors,)
+
+
+@app.cell
+def _(tensors):
+    tensors.median_realised_size / len(tensors)
+    return
+
+
+@app.cell
+def _(tensors):
+    from activitygraphs.analysis import home_zone_summary
+
+    home_zone_summary(tensors)
+    return
+
+
+@app.cell
+def _():
     return
 
 

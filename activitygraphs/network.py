@@ -107,6 +107,10 @@ class NetworkData(ABC):
             .select("user_id", hh_id="user_id", home_loc_id="loc_id")
         )
 
+    @property
+    def demographic_columns(self) -> list[str]:
+        return []
+
     @cached_property
     def user_ids(self) -> pl.Series:
         if self._type_filters is None:

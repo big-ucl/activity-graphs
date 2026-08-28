@@ -28,6 +28,19 @@ from activitygraphs.utils import (
     bands_to_midpoint_map,
 )
 
+DEMOGRAPHIC_COLUMNS = [
+    "has_missing_demographics",
+    "age",
+    "is_employed",
+    "is_student",
+    "can_drive",
+    "hh_num_adults",
+    "hh_num_children",
+    "hh_num_vehicles",
+    "hh_num_bicycle",
+    "hh_income_kusd",
+]
+
 CMAP_COUNTY_FP_CODES = [
     "031",  # Cook
     "043",  # DuPage
@@ -142,6 +155,10 @@ class CMAPData(NetworkData, DataFrameStore):
     @cached_property
     def user_ids(self) -> pl.Series:
         return self.users_df["user_id"].sort()
+
+    @property
+    def demographic_columns(self) -> list[str]:
+        return DEMOGRAPHIC_COLUMNS
 
     def _copy(self, filters: list[str] | None = None):
         return CMAPData(self.inputs, self._locations_gdf, self._user_journeys_df, self.users_df, filters)
@@ -274,7 +291,7 @@ def build_cmap_users(
         hh_num_children=pl.col("num_kids").cast(pl.UInt32),
         hh_num_vehicles=pl.col("num_vehicles").cast(pl.UInt32),
         hh_num_bicycle=pl.col("num_bicycle").replace(995, None),
-        hh_income_kusd=pl.col("income_broad").replace_strict(INCOME_MIDPOINTS_KUSD, default=None),
+        hh_income_kusd=pl.col("income_detailed").replace_strict(INCOME_MIDPOINTS_KUSD, default=None),
     )
 
     persons_df = inputs.raw_persons_df.select(
@@ -289,7 +306,9 @@ def build_cmap_users(
         can_drive=(pl.col("can_drive") == 1).cast(pl.Boolean),
     )
 
-    journey_user_ids = user_journeys_df.select("user_id").unique()
+    # Filter out users which have only journeys to NA
+    journey_user_ids = user_journeys_df.filter((pl.col("dep_loc_id") != NA) | (pl.col("arr_loc_id") != NA))
+    journey_user_ids = journey_user_ids.select("user_id").unique()
 
     users_df = persons_df.join(hh_df, on="hh_id", how="inner")
     users_df = users_df.join(journey_user_ids, on="user_id", how="inner")  # Drop users with no journeys in study area

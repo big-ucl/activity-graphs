@@ -22,6 +22,15 @@ from activitygraphs.utils import (
 
 TORONTO_CMA = 535
 
+DEMOGRAPHIC_COLUMNS = [
+    "has_driving_license",
+    "has_pt_pass",
+    "hh_num_adults",
+    "hh_num_children",
+    "hh_num_vehicles",
+    "hh_num_bikes",
+]
+
 MODE_MAP = {
     "AIR_OR_HSR": Mode.OTHER,
     "BICYCLING": Mode.CYCLE,
@@ -171,6 +180,10 @@ class THATSData(NetworkData, DataFrameStore):
     def user_ids(self) -> pl.Series:
         return self.users_df["user_id"].sort()
 
+    @property
+    def demographic_columns(self) -> list[str]:
+        return DEMOGRAPHIC_COLUMNS
+
     @cached_property
     def num_obs_days_per_user(self) -> pl.DataFrame:
         """Per-user observed-day count t_i (0-7) from the activity diary."""
@@ -211,7 +224,7 @@ class THATSData(NetworkData, DataFrameStore):
         self.locations_gdf.to_parquet(data_dir / "locations_gdf.parquet")
         self.user_journeys_df.write_parquet(data_dir / "user_journeys_df.parquet")
         self.activities_df.write_parquet(data_dir / "activities_df.parquet")
-        self.users_df.write_parquet(data_dir / "users_df.parquet") # TODO This should probably be _users_df instead?
+        self._users_df.write_parquet(data_dir / "users_df.parquet")
 
 
 def load_files(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSInputs:
@@ -376,7 +389,7 @@ def build_thats_journeys(inputs: THATSInputs, locations_gdf: gpd.GeoDataFrame) -
     locations_ids = locations_gdf["loc_id"]
     user_journeys_df = user_journeys_df.with_columns(
         dep_loc_id=pl.when(pl.col("dep_loc_id").is_in(locations_ids)).then(pl.col("dep_loc_id")).otherwise(pl.lit(NA)),
-        arr_loc_id=pl.when(pl.col("arr_loc_id").is_in(locations_ids)).then(pl.col("dep_loc_id")).otherwise(pl.lit(NA)),
+        arr_loc_id=pl.when(pl.col("arr_loc_id").is_in(locations_ids)).then(pl.col("arr_loc_id")).otherwise(pl.lit(NA)),
     )
 
     return user_journeys_df.select(USER_JOURNEY_SCHEMA.keys()).sort(
@@ -536,7 +549,7 @@ def build_thats_users(
     """Build the user DataFrame with household demographics and home location for Toronto."""
     persons = inputs.raw_person_df.select(
         "person_id", "hh_id", has_driving_license="THATS driverslicence", has_pt_pass="THATS transitpass"
-    )  # TODO add demographics: HH role, age, gender, education, employment status, student status, driving license, PT pass.
+    )
 
     hhs = inputs.raw_household_df.select(
         "hh_id",
@@ -545,10 +558,10 @@ def build_thats_users(
         hh_num_children="THATS NumChildren",
         hh_num_vehicles="THATS NumVeh",
         hh_num_bikes="THATS NumBike",
-    )  # TODO add HH demographics: HH size (num adults, num children), HH income, num vehicles, num bikes.
+    )
 
-    demographics = persons.join(hhs, on="hh_id", how="left").drop("hh_id")
-    user_ids = user_journeys_df.select("user_id", "hh_id").unique()
+    demographics = persons.join(hhs, on="hh_id", how="left")
+    user_ids = user_journeys_df.select("user_id").unique()
 
     # Replace unknown locations with NA
     locations_ids = locations_gdf["loc_id"]

@@ -1,5 +1,6 @@
 """Unit tests for split and scaler cache fingerprinting."""
 
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -11,21 +12,29 @@ from activitygraphs.ml.dataset import dataset_fingerprint, split_indices
 
 @dataclass
 class FakeDataset:
-    """Minimal stand-in exposing only what ``dataset_fingerprint`` reads."""
+    """Minimal stand-in exposing only what ``dataset_fingerprint`` and ``split_indices`` read."""
 
     spatial_features: torch.Tensor
     demographics: torch.Tensor
     num_nodes: int
+    group_ids: torch.Tensor
 
     def __len__(self) -> int:
         return self.demographics.shape[0]
 
 
-def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5) -> FakeDataset:
+def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_per_group: int = 1) -> FakeDataset:
+    """Build a fake dataset whose users are laid out in consecutive groups of ``users_per_group``.
+
+    ``users_per_group=1`` reproduces the ungrouped case (Geneva, where ``hh_id`` is ``user_id``).
+    """
+    group_ids = torch.arange(n_users) // users_per_group
+
     return FakeDataset(
         spatial_features=torch.zeros((n_users, n_nodes, 4)),
         demographics=torch.zeros((n_users, n_demo)),
         num_nodes=n_nodes,
+        group_ids=group_ids,
     )
 
 
@@ -116,3 +125,65 @@ class TestSplitIndicesCache:
         uncached = split_indices(dataset, 0.2, 0.1, 42, fingerprint)
 
         assert cached == uncached
+
+    def test_detects_a_changed_grouping(self, cfg):
+        # An ungrouped cache must not be silently reused for a grouped run, and vice versa.
+        assert dataset_fingerprint(cfg, make_dataset(users_per_group=1)) != dataset_fingerprint(
+            cfg, make_dataset(users_per_group=2)
+        )
+
+
+class TestGroupedSplit:
+    @pytest.mark.parametrize("users_per_group", [1, 2, 5])
+    def test_splits_partition_every_user(self, users_per_group, cfg):
+        dataset = make_dataset(n_users=60, users_per_group=users_per_group)
+        train, val, test = split_indices(dataset, 0.2, 0.1, 42, dataset_fingerprint(cfg, dataset))
+
+        assert sorted(train + val + test) == list(range(60))
+
+    @pytest.mark.parametrize("users_per_group", [2, 5])
+    def test_no_group_spans_two_splits(self, users_per_group, cfg):
+        # The leak the household-grouped split exists to prevent: co-residents share a home tract
+        # and overlapping visit sets, so a household in both train and test leaks home conditioning.
+        dataset = make_dataset(n_users=60, users_per_group=users_per_group)
+        train, val, test = split_indices(dataset, 0.2, 0.1, 42, dataset_fingerprint(cfg, dataset))
+
+        groups = {
+            name: set(dataset.group_ids[idx].tolist())
+            for name, idx in zip(("train", "val", "test"), (train, val, test))
+        }
+
+        assert groups["train"] & groups["val"] == set()
+        assert groups["train"] & groups["test"] == set()
+        assert groups["val"] & groups["test"] == set()
+
+    def test_split_is_deterministic_for_a_seed(self, cfg):
+        # Results are reported as mean +- sd over train seeds, so the split must be a function of
+        # the split seed alone, not of the order group ids happened to be built in.
+        dataset = make_dataset(n_users=60, users_per_group=2)
+        fingerprint = dataset_fingerprint(cfg, dataset)
+
+        assert split_indices(dataset, 0.2, 0.1, 42, fingerprint) == split_indices(dataset, 0.2, 0.1, 42, fingerprint)
+
+    def test_different_seeds_give_different_splits(self, cfg):
+        dataset = make_dataset(n_users=60, users_per_group=2)
+        fingerprint = dataset_fingerprint(cfg, dataset)
+
+        assert split_indices(dataset, 0.2, 0.1, 42, fingerprint) != split_indices(dataset, 0.2, 0.1, 7, fingerprint)
+
+    def test_splits_are_roughly_the_requested_sizes(self, cfg):
+        # Grouping quantises the split, so only assert the sizes are in the right neighbourhood.
+        dataset = make_dataset(n_users=600, users_per_group=2)
+        train, val, test = split_indices(dataset, 0.2, 0.1, 42, dataset_fingerprint(cfg, dataset))
+
+        assert len(test) == pytest.approx(60, abs=10)
+        assert len(val) == pytest.approx(120, abs=10)
+        assert len(train) == pytest.approx(420, abs=20)
+
+    def test_indices_are_json_serialisable(self, tmp_path, cfg):
+        # GroupShuffleSplit returns numpy arrays; the cache write must not choke on them.
+        dataset = make_dataset(n_users=60, users_per_group=2)
+        cache = tmp_path / "splits.json"
+        split_indices(dataset, 0.2, 0.1, 42, dataset_fingerprint(cfg, dataset), cache_path=cache)
+
+        assert json.loads(cache.read_text())["train"]

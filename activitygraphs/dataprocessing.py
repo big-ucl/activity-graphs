@@ -358,19 +358,30 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 
 
 # =========================================
-# C. Individual demographics
+# C. Individual demographics and household IDs
 # =========================================
 
 
 def create_individual_demographics(data: NetworkData) -> torch.Tensor:
     """Create the demographic tensor from NetworkData, returns a float32 tensor of shape ``[n_users, n_demo_features]``.
-    If there are no demographics (e.g. Geneva), returns a (n_users, 1) dummy tensor of ones."""
-    indiv_demographics = data.users_df.drop("user_id", "hh_id", "home_loc_id")
-
-    if len(indiv_demographics) == 0:
+    Columns follow ``data.demographic_columns``. If there are none (e.g. Geneva), returns a (n_users, 1) dummy tensor
+    of ones."""
+    if len(data.demographic_columns) == 0:
         return torch.ones((len(data.user_ids), 1), dtype=torch.float32)
 
+    indiv_demographics = data.users_df.select(data.demographic_columns)
+
     return torch.tensor(indiv_demographics.to_numpy(), dtype=torch.float32)
+
+
+def create_group_ids(data: NetworkData) -> torch.Tensor:
+    """Create a tensor of numeric ``group_id``s matching the ``hh_id`` household IDs for each user in the dataset.
+    Shape ``[n_users]``"""
+    group_ids = data.users_df.select("hh_id").unique(maintain_order=True).with_row_index(name="group_id")
+    user_groups = data.users_df.select("user_id", "hh_id").join(group_ids, on="hh_id", how="left")
+    assert user_groups["user_id"].equals(data.user_ids)
+
+    return user_groups.select("group_id").to_torch().long().squeeze()
 
 
 # =========================================
@@ -380,18 +391,19 @@ def create_individual_demographics(data: NetworkData) -> torch.Tensor:
 
 def convert_to_torch(
     data: NetworkData, network_nodes: gpd.GeoDataFrame, network_edges: gpd.GeoDataFrame
-) -> tuple[pyg.data.Data | pyg.data.HeteroData, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[pyg.data.Data | pyg.data.HeteroData, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert network graph and network data into PyG and tensor form.
 
     Returns:
-        Tuple ``(network_graph, spatial_features, spatial_labels, demographics, distances)``:
+        Tuple ``(network_graph, spatial_features, spatial_labels, demographics, distances, group_ids)``:
         the shared PyG graph, per-user spatial features ``[n_users, n_nodes, n_feat]``,
         per-user labels ``[n_users, n_nodes, 1]``, individual demographics ``[n_users, n_demo]``,
-        and per-user distance-from-home ``[n_users, n_nodes, 1]``.
+        per-user distance-from-home ``[n_users, n_nodes, 1], and per-user group/hh-ids ``[n_users]``.
     """
     spatial_features, spatial_labels = create_spatial_demographics(data)
     demographics = create_individual_demographics(data)
     distances = create_home_distances(data, network_nodes)
+    hh_ids = create_group_ids(data)
 
     node_feature_cols = [col for col in network_nodes.columns if col not in COLS_EXCLUDED_FROM_FEATURES]
 
@@ -404,7 +416,7 @@ def convert_to_torch(
         device="cpu",
     )
 
-    return network_graph, spatial_features, spatial_labels, demographics, distances
+    return network_graph, spatial_features, spatial_labels, demographics, distances, hh_ids
 
 
 def load_pyg_graphs(

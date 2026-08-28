@@ -1,6 +1,5 @@
 """Schema validation, geometry helpers, and I/O utilities."""
 
-import math
 from abc import ABC
 from collections.abc import Mapping
 from pathlib import Path

@@ -14,7 +14,7 @@ import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as T
 from omegaconf import OmegaConf
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from torch_geometric.data.data import BaseData
 from tqdm import tqdm
@@ -74,6 +74,7 @@ class ActivityDataset(pyg.data.Dataset):
         "spatial_labels.pt",
         "demographics.pt",
         "distances.pt",
+        "group_ids.pt",
     ]
 
     def __init__(
@@ -84,6 +85,7 @@ class ActivityDataset(pyg.data.Dataset):
         spatial_labels: torch.Tensor | None = None,
         demographics: torch.Tensor | None = None,
         distances: torch.Tensor | None = None,
+        group_ids: torch.Tensor | None = None,
         transform: Callable | None = None,
         pre_transform: Callable | None = None,
         pre_filter: Callable | None = None,
@@ -93,6 +95,7 @@ class ActivityDataset(pyg.data.Dataset):
         self._spatial_labels_in = spatial_labels
         self._demographics_in = demographics
         self._distances_in = distances
+        self._group_ids_in = group_ids
 
         super().__init__(root, transform, pre_transform, pre_filter)
         del (
@@ -101,6 +104,7 @@ class ActivityDataset(pyg.data.Dataset):
             self._spatial_labels_in,
             self._demographics_in,
             self._distances_in,
+            self._group_ids_in,
         )
 
         processed_dir = Path(self.processed_dir)
@@ -109,6 +113,7 @@ class ActivityDataset(pyg.data.Dataset):
         self.spatial_labels: torch.Tensor = torch.load(processed_dir / "spatial_labels.pt", weights_only=True)
         self.demographics: torch.Tensor = torch.load(processed_dir / "demographics.pt", weights_only=True)
         self.distances: torch.Tensor = torch.load(processed_dir / "distances.pt", weights_only=True)
+        self.group_ids: torch.Tensor = torch.load(processed_dir / "group_ids.pt", weights_only=True)
 
         # Check that each user has one and only one home node
         home_counts = self.spatial_features[:, :, self.is_home_spatial_idx].sum(dim=1)
@@ -169,21 +174,23 @@ class ActivityDataset(pyg.data.Dataset):
         sl = self._spatial_labels_in
         demo = self._demographics_in
         dist = self._distances_in
+        group_ids = self._group_ids_in
 
-        if graph is None or sf is None or sl is None or demo is None or dist is None:
-            raise ValueError("First-time construction requires the five component Tensors/Data to be passed to init.")
+        if graph is None or sf is None or sl is None or demo is None or dist is None or group_ids is None:
+            raise ValueError("First-time construction requires all components Tensors/Data to be passed to init.")
 
         num_sf_users, num_sf_nodes, _ = sf.shape
         num_sl_users, num_sl_nodes, num_sl_labels = sl.shape
         num_dm_users, _ = demo.shape
         num_di_users, num_di_nodes, num_di_feat = dist.shape
+        num_grp_users = group_ids.shape[0]
 
         if not (graph.num_nodes == num_sf_nodes == num_sl_nodes == num_di_nodes):
             raise ValueError(
                 f"Node count mismatch: network has {graph.num_nodes}, spatial_features has {num_sf_nodes}, "
                 f"spatial_labels has {num_sl_nodes}, distances has {num_di_nodes}."
             )
-        if not (num_sf_users == num_sl_users == num_dm_users == num_di_users):
+        if not (num_sf_users == num_sl_users == num_dm_users == num_di_users == num_grp_users):
             raise ValueError(
                 f"Individual count mismatch: spatial_features has {num_sf_users}, spatial_labels has {num_sl_users}, "
                 f"demographics has {num_dm_users}, distances has {num_di_users}."
@@ -207,6 +214,7 @@ class ActivityDataset(pyg.data.Dataset):
         torch.save(sl, processed_dir / "spatial_labels.pt")
         torch.save(demo, processed_dir / "demographics.pt")
         torch.save(dist, processed_dir / "distances.pt")
+        torch.save(group_ids, processed_dir / "group_ids.pt")
 
     def len(self) -> int:
         return self.num_individuals
@@ -291,8 +299,8 @@ def load_dataset(
     """
     project_root = get_project_root(project_root)
     pyg_dir = project_root / cfg.data.paths.pyg_datasets
-    splits_cache = pyg_dir / f"splits_{seed}_val{val_size}_test{test_size}.json"
-    scalers_cache = pyg_dir / f"scalers_{seed}_val{val_size}_test{test_size}.pkl"
+    splits_cache = pyg_dir / f"splits_{seed}_val{val_size}_test{test_size}_grouped.json"
+    scalers_cache = pyg_dir / f"scalers_{seed}_val{val_size}_test{test_size}_grouped.pkl"
 
     positional_encodings_transforms = T.Compose([
         T.AddRandomWalkPE(walk_length=20, attr_name=None),
@@ -340,13 +348,20 @@ def load_or_build_dataset(
 
     if not all((dataset_path / file).exists() for file in ActivityDataset.PROCESSED_FILE_NAMES):
         data, network_nodes, network_edges = load_data(cfg.data, project_root)
-        network_graph, spatial_features, spatial_labels, demographics, distances = convert_to_torch(
+        network_graph, spatial_features, spatial_labels, demographics, distances, group_ids = convert_to_torch(
             data, network_nodes, network_edges
         )
         dataset_path = project_root / cfg.data.paths.pyg_datasets
 
         return ActivityDataset(
-            str(dataset_path), network_graph, spatial_features, spatial_labels, demographics, distances, **build_kwargs
+            str(dataset_path),
+            network_graph,
+            spatial_features,
+            spatial_labels,
+            demographics,
+            distances,
+            group_ids,
+            **build_kwargs,
         )
 
     return ActivityDataset(root=str(dataset_path), **build_kwargs)
@@ -370,18 +385,26 @@ def split_indices(
 
         print(f"Cached indices at `{cache_path.name}` do not match fingerprint, re-splitting.")
 
-    train_val_idx, test_idx = train_test_split(
-        list(range(len(dataset))),
-        test_size=test_size,
-        random_state=seed,
+    all_idx = list(range(len(dataset)))
+
+    # Split Test and Train-Val
+    gss_test = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+    train_val_idx, test_idx = next(iter(gss_test.split(all_idx, groups=dataset.group_ids)))
+
+    # Compute size of validation set and adjust the group Ids
+    train_val_group_ids = dataset.group_ids[train_val_idx]
+    proportional_val_size = val_size / (1 - test_size)
+
+    # Split Val and Train
+    gss_val = GroupShuffleSplit(n_splits=1, test_size=proportional_val_size, random_state=seed)
+    rel_train_idx, rel_val_idx = next(iter(gss_val.split(train_val_idx, groups=train_val_group_ids)))
+    train_idx, val_idx = train_val_idx[rel_train_idx], train_val_idx[rel_val_idx]
+
+    assert set(train_idx) & set(val_idx) == set() and set(train_val_idx) & set(test_idx) == set(), (
+        "Assert train/val/test sets are disjoint."
     )
 
-    proportional_val_size = val_size / (1 - test_size)
-    train_idx, val_idx = train_test_split(
-        train_val_idx,
-        test_size=proportional_val_size,
-        random_state=seed,
-    )
+    train_idx, val_idx, test_idx = train_idx.tolist(), val_idx.tolist(), test_idx.tolist()
 
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -510,6 +533,7 @@ def dataset_fingerprint(cfg: Config, dataset: ActivityDataset) -> Fingerprint:
         "n_nodes": dataset.num_nodes,
         "n_spatial_cols": int(dataset.spatial_features.shape[-1]),
         "n_demographic_cols": int(dataset.demographics.shape[-1]),
+        "n_groups": len(dataset.group_ids.unique()),
         "data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest(),
     }
 
