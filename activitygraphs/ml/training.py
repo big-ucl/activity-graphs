@@ -18,7 +18,7 @@ from activitygraphs.ml.losses import Loss
 PER_USER_STAGE = "test_user"
 
 
-def per_user_frame(module: ActivityGraphModule, name: str) -> pl.DataFrame:
+def per_user_frame(module: ActivityGraphModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
     """Per-user test scores as ``stage="test_user"`` rows, one row per scored test user.
 
     Carried inside the same long-format frame as the aggregate rows so that every caller keeps a
@@ -27,11 +27,13 @@ def per_user_frame(module: ActivityGraphModule, name: str) -> pl.DataFrame:
     if not module.per_user_columns:
         return pl.DataFrame()
 
-    return pl.DataFrame(module.per_user_columns).with_columns(
+    per_user_df = pl.DataFrame(module.per_user_columns).with_columns(
         name=pl.lit(name),
         stage=pl.lit(PER_USER_STAGE),
         epoch=pl.lit(None, dtype=pl.Int64),
     )
+
+    return per_user_df.join(home_coverage_df, on="user_id", how="left")
 
 
 @dataclass
@@ -98,7 +100,10 @@ def evaluate_baseline(
     fit_row = {"name": name, "stage": "fit", "epoch": 0, "train_loss": 0.0, **val_results}
     test_row = {"name": name, "stage": "test", "epoch": None, **test_results}
 
-    return pl.concat([pl.DataFrame([fit_row, test_row]), per_user_frame(baseline_module, name)], how="diagonal")
+    aggregate_results = pl.DataFrame([fit_row, test_row])
+    per_user_results = per_user_frame(baseline_module, name, datamodule.home_coverage)
+
+    return pl.concat([aggregate_results, per_user_results], how="diagonal")
 
 
 def train_and_evaluate_model(
@@ -145,6 +150,7 @@ def train_and_evaluate_model(
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
             features to the model.
         use_home_pe: if true, add home-anchored positional encodings to features
+        compile_model: use PyTorch Dynamo compilation on the model
         wandb_params: parameters to configure WandB logging.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
         run_tag: Suffix distinguishing repeated runs of the same model (e.g. per training seed). It
@@ -259,8 +265,10 @@ def train_and_evaluate_model(
         if model_save_dir is not None:
             trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-        results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
-        results = pl.concat([results, per_user_frame(lit_model, name)], how="diagonal")
+        aggregate_results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
+        per_user_results = per_user_frame(lit_model, name, datamodule.home_coverage)
+
+        results = pl.concat([aggregate_results, per_user_results], how="diagonal")
 
         first_cols = ["name", "stage", "epoch"]
         other_cols = [c for c in results.columns if c not in first_cols]

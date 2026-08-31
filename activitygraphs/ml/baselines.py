@@ -114,12 +114,12 @@ class ConditionalNodeBaseline(torch.nn.Module):
         p = visit_counts / home_node_counts.clamp(min=1).unsqueeze(0)
 
         # For nodes with no home users, predict global visit probability (fallback to ``NodeMarginal``)
-        node_never_visited = home_node_counts == 0
+        node_never_homed = home_node_counts == 0
         p_node_marginal = visit_counts.sum(dim=1) / home_node_counts.sum().clamp(min=1)
-        p[:, node_never_visited] = p_node_marginal.unsqueeze(1)
+        p[:, node_never_homed] = p_node_marginal.unsqueeze(1)
 
         p = p.clamp(1e-6, 1 - 1e-6)
-        
+
         self.logits = inverse_sigmoid(p)
 
         return self

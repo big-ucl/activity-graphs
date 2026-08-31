@@ -155,6 +155,52 @@ def paired_comparison(
     return pl.DataFrame(rows).sort("mean_diff", descending=True)
 
 
+def home_coverage_summary(per_user_results: pl.DataFrame) -> pl.DataFrame:
+    """Computes the proportion of test users with a home node that does not appear in the training set, one row for
+    ``home_seen_in_train=0`` and one row for ``home_seen_in_train=1``."""
+    users = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", "home_seen_in_train").unique()
+
+    return (
+        users
+        .group_by("home_seen_in_train")
+        .agg(n_users=pl.len())
+        .with_columns(share=pl.col("n_users") / pl.col("n_users").sum())
+        .sort("home_seen_in_train", descending=True)
+    )
+
+
+def paired_comparison_by_home_coverage(
+    per_user_results: pl.DataFrame,
+    reference_model: str,
+    metric: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """Two separate runs of ``paired_comparison``, one on the test users with a home node seen in training and the other
+     on the test users with an unseen home.
+
+    Returns:
+        Frame of ``home_seen_in_train, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``.
+    """
+    if "home_seen_in_train" not in per_user_results.columns:
+        raise KeyError("per-user frame has no home_seen_in_train column; re-run to regenerate it")
+
+    results_by_home_seen = []
+    for seen in (True, False):
+        subset = per_user_results.filter(pl.col("home_seen_in_train") == seen)
+        if subset.filter(pl.col("stage") == PER_USER_STAGE).is_empty():
+            continue
+
+        comparison = paired_comparison(subset, reference_model, metric, n_bootstrap, seed)
+        results_by_home_seen.append(comparison.with_columns(home_seen_in_train=pl.lit(seen)))
+
+    results: pl.DataFrame = pl.concat(results_by_home_seen)
+
+    return results.select("home_seen_in_train", pl.all().exclude("home_seen_in_train")).sort(
+        "home_seen_in_train", "mean_diff", descending=[True, True]
+    )
+
+
 def _average_metric_over_seeds(per_user: pl.DataFrame, metric: str) -> pl.DataFrame:
     """Average the per-user metrics over that model's training seeds. Avoids inflating apparent sample size
     of users (duplicate across seeds).
@@ -350,3 +396,10 @@ def print_report(
 
         print("\n-- hop bands (mean +- sd over seeds) --")
         print(compute_hop_band_table(aggregate, analysis.hop_models))
+
+        if "home_seen_in_train" in per_user.columns:
+            print("\n-- home coverage of test users --")
+            print(home_coverage_summary(per_user))
+
+            print(f"\n-- paired per-user {analysis.per_user_metric}, vs {analysis.reference_model}, by home coverage -")
+            print(paired_comparison_by_home_coverage(per_user, analysis.reference_model, analysis.per_user_metric))

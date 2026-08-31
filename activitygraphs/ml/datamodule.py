@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import lightning as L
+import polars as pl
 import torch
 import torch_geometric as pyg
 
@@ -30,6 +31,23 @@ def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tens
     p = y.mean(dim=0).squeeze(-1).clamp(1e-6, 1 - 1e-6)
 
     return torch.log(p / (1 - p))
+
+
+def _compute_home_coverage(train_dataset: ActivityDataset, test_dataset: ActivityDataset) -> pl.DataFrame:
+    """Compute, for each user in the _test_ dataset, 1) their home node and 2) whether any training user also has a home
+    there."""
+
+    # Index of the home node of every user in the survey: [n_users].
+    home_node_idx = train_dataset.spatial_features[:, :, train_dataset.is_home_spatial_idx].argmax(dim=1)
+
+    train_idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
+    test_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
+    train_home_idx = home_node_idx[train_idx].unique().tolist()
+
+    return pl.DataFrame({
+        "user_id": test_idx.tolist(),
+        "home_node": home_node_idx[test_idx].tolist(),
+    }).with_columns(home_seen_in_train=pl.col("home_node").is_in(train_home_idx))
 
 
 class ActivityDataModule(L.LightningDataModule):
@@ -70,6 +88,7 @@ class ActivityDataModule(L.LightningDataModule):
         self._scalers: FittedScalers | None = None
         self._pos_weight: torch.Tensor | None = None
         self._pop_logit: torch.Tensor | None = None
+        self._home_coverage: pl.DataFrame | None = None
 
     def setup(self, stage: str | None = None) -> None:
         if self._train_dataset is not None:
@@ -80,9 +99,11 @@ class ActivityDataModule(L.LightningDataModule):
         )
 
         assert self._train_dataset is not None
+        assert self._test_dataset is not None
 
         self._pos_weight = _compute_training_weights(self._train_dataset)
         self._pop_logit = _compute_node_popularity_logit(self._train_dataset)
+        self._home_coverage = _compute_home_coverage(self._train_dataset, self._test_dataset)
 
     def train_dataloader(self) -> pyg.loader.DataLoader:
         assert self._train_dataset is not None
@@ -131,3 +152,9 @@ class ActivityDataModule(L.LightningDataModule):
         if self._pop_logit is None:
             raise RuntimeError("Call setup() before accessing pop_logit.")
         return self._pop_logit
+
+    @property
+    def home_coverage(self) -> pl.DataFrame:
+        if self._home_coverage is None:
+            raise RuntimeError("Call setup() before accessing home_coverage.")
+        return self._home_coverage

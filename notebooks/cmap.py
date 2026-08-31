@@ -83,6 +83,22 @@ def _(tensors):
 
 
 @app.cell
+def _(cfg):
+    from activitygraphs.ml.datamodule import ActivityDataModule
+
+    datamodule = ActivityDataModule(cfg, cfg.train.val_size, cfg.train.test_size, cfg.train.split_seed, cfg.train.batch_size)
+    datamodule.setup()
+    return (datamodule,)
+
+
+@app.cell
+def _(datamodule):
+    full_dataset = datamodule.train_dataset
+    full_dataset.spatial_features[:, :, full_dataset.is_home_spatial_idx].argmax(dim=1).shape
+    return
+
+
+@app.cell
 def _():
     return
 
