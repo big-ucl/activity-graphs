@@ -175,14 +175,18 @@ class PerUserRanking(Metric):
     n_pos: list[torch.Tensor]
     r_precision: list[torch.Tensor]
     recall: list[torch.Tensor]
+    score_vector: list[torch.Tensor]
 
     _FIELDS = ("user_id", "n_pos", "r_precision", "recall")
 
-    def __init__(self, k: int) -> None:
+    def __init__(self, k: int, store_score_vectors: bool = False) -> None:
         super().__init__()
         self.k = k
+        self.store_score_vectors = store_score_vectors
         for field in self._FIELDS:
             self.add_state(field, default=[], dist_reduce_fx="cat")
+
+        self.add_state("score_vector", default=[], dist_reduce_fx="cat")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
         """Accumulate one row per user in the batch, skipping users with no positives."""
@@ -202,6 +206,9 @@ class PerUserRanking(Metric):
             self.r_precision.append((t[top_r].sum() / r).reshape(1).float())
             self.recall.append((t[top_k].sum() / r).reshape(1).float())
 
+            if self.store_score_vectors:
+                self.score_vector.append(scores.detach().float().reshape(1, -1).cpu())
+
     def columns(self) -> dict[str, torch.Tensor]:
         """Return the retained per-user columns, each a 1-D tensor of length n_users.
 
@@ -212,6 +219,18 @@ class PerUserRanking(Metric):
             return {field: torch.empty(0) for field in self._FIELDS}
 
         return {field: dim_zero_cat(getattr(self, field)) for field in self._FIELDS}
+
+    def score_vectors(self) -> torch.Tensor:
+        """Return the retained score vectors as ``[n_users, num_nodes]``, row-aligned with ``columns()``.
+
+        Empty when ``store_score_vectors`` is off. The scores are the model's per-node ranking scores over
+        the whole node universe, which the summary columns reduce away. The model-health checks are computed
+        from them and cannot be recovered from the summaries afterwards.
+        """
+        if not self.score_vector:
+            return torch.empty(0)
+
+        return dim_zero_cat(self.score_vector)
 
     def compute(self) -> dict[str, torch.Tensor]:
         return self.columns()

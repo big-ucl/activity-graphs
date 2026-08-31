@@ -14,11 +14,11 @@ from typing import cast
 
 import numpy as np
 import polars as pl
-from scipy.stats import wilcoxon
+from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.config import AnalysisConfig
 from activitygraphs.ml.dataset import ActivityDataset
-from activitygraphs.ml.training import PER_USER_STAGE
+from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
 
 DEFAULT_ANALYSIS = AnalysisConfig(
     reference_model="ConditionalNodeMarginal",
@@ -53,6 +53,18 @@ def load_run(report_data_path: str | Path, name: str, run: int | None = None) ->
     per_user_result = pl.read_parquet(path / f"{name}-per-user-{run}.parquet")
 
     return aggregate_results, per_user_result
+
+
+def load_score_vectors(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
+    """Load the full per-user score vectors of a run: ``name, seed, user_id, scores``."""
+    path = Path(report_data_path)
+    run = _latest_run(path, name) if run is None else run
+    scores_path = path / f"{name}-scores-{run}.parquet"
+
+    if not scores_path.exists():
+        raise FileNotFoundError(f"{scores_path} not found; re-run with train.save_score_vectors=true")
+
+    return pl.read_parquet(scores_path).filter(pl.col("stage") == SCORE_VECTOR_STAGE)
 
 
 def _latest_run(path: Path, name: str) -> int:
@@ -258,6 +270,176 @@ def _diff_sd_per_seed(per_user_results: pl.DataFrame, model_name: str, reference
 
 
 # =========================================
+# Model health checks
+# =========================================
+
+
+def check_overfit_health(aggregate_results: pl.DataFrame) -> pl.DataFrame:
+    """Checks to see if the models are capable of overfitting. Returns the best and final RPrecision on
+    the training set. If working, ``train_r_precision`` should reach ~1.0.
+
+    Returns:
+        Frame of ``name, epochs, best_train_r_precision, final_train_r_precision``, sorted from worst to best.
+    """
+    if "train_r_precision" not in aggregate_results.columns:
+        raise KeyError("no train_r_precision column; ``overfit_health`` needs a run with log_train_ranking enabled")
+
+    fit_rows = aggregate_results.filter((pl.col("stage") == "fit") & pl.col("train_r_precision").is_not_null())
+
+    return (
+        fit_rows
+        .sort("epoch")
+        .group_by("name")
+        .agg(
+            epochs=pl.len(),
+            best_train_r_precision=pl.col("train_r_precision").max(),
+            final_train_r_precision=pl.col("train_r_precision").last(),
+        )
+        .sort("best_train_r_precision")
+    )
+
+
+def check_user_invariance(scores: np.ndarray, max_users: int = 200, seed: int = 0) -> float:
+    """Check if the model gives users different scores or not. Computes the pairwise Spearman correlation between test
+    users' score vectors.
+
+    If ~1.0, then the model ranks every user identically: collapsed to a single global ordering and is ignoring
+    ``is_home``/distance/demographics. Computes at most ``max_users`` pairs, sampled from the test set.
+    """
+    if len(scores) < 2:
+        return float("nan")
+
+    if len(scores) > max_users:
+        rng = np.random.default_rng(seed)
+        scores = scores[rng.choice(len(scores), size=max_users, replace=False)]
+
+    unit_ranks = _row_ranks(scores)
+    correlations = unit_ranks @ unit_ranks.T
+
+    return float(np.median(correlations[np.triu_indices(len(scores), k=1)]))
+
+
+def check_popularity_correlation(scores: np.ndarray, popularity: np.ndarray) -> float:
+    """Check if the models are just learning the global/per-home-zone popularity or if they are extracting signal
+    beyond that. Computes the Spearman between the user-averaged score vector and the training set popularity ranking.
+
+    If ~1.0, then the model outputs the popularity marginal. Can work for ``logit(p_n)`` or the scores from NodeMarginal
+    since the two are monotonic transformations of the popularities.
+    """
+    if len(scores) == 0:
+        return float("nan")
+
+    unit_ranks = _row_ranks(np.stack([scores.mean(axis=0), popularity]))
+
+    return float(unit_ranks[0] @ unit_ranks[1])
+
+
+def check_home_node_rank(scores: np.ndarray, home_nodes: np.ndarray) -> tuple[float, float]:
+    """Check if the model ranks each user's home node at the top.
+
+    Returns:
+        ``(share of users whose home node ranks first, median home-node rank)``.
+    """
+    if len(scores) == 0:
+        return float("nan"), float("nan")
+
+    home_scores = scores[np.arange(len(scores)), home_nodes][:, None]
+    ranks = 1 + (scores > home_scores).sum(axis=1)
+
+    return float((ranks == 1).mean()), float(np.median(ranks))
+
+
+def check_model_health(
+    score_vectors: pl.DataFrame,
+    per_user_results: pl.DataFrame,
+    popularity_model: str = "NodeMarginal",
+    max_users: int = 200,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """Performs three health checks to make sure each model are learning appropriately: 1) User invariance;
+    2) Popularity correlation; 3) Home node rank.
+
+    Args:
+        score_vectors: DataFrame of per-user score vectors from ``load_score_vectors``.
+        per_user_results: Per-user results frame from ``load_run``.
+        popularity_model: Model whose score vector stands in for the train popularity ordering.
+        max_users: max number of user pairs for correlation tests.
+        seed: seed for the ``max_users`` subsample.
+
+    Returns:
+        Frame of ``name, n_seeds, user_invariance, popularity_corr, home_is_top1,
+        home_median_rank`` and the ``*_sd`` standard deviation columns, sorted by ``user_invariance``
+        descending (so that collapsed model at top).
+    """
+    if "home_node" not in per_user_results.columns:
+        raise KeyError("per-user frame has no home_node column; the home-rank check needs a run that recorded it")
+
+    home_by_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", "home_node").unique()
+
+    model_seeds = score_vectors.select("name", "seed").unique().sort("name", "seed")
+    popularity_rows = _score_matrix(score_vectors, popularity_model, None)
+
+    if len(popularity_rows) == 0:
+        raise KeyError(f"popularity reference {popularity_model} has no score vectors in this run")
+
+    rows = []
+
+    for name, model_seed in model_seeds.iter_rows():
+        scores = _score_matrix(score_vectors, name, model_seed)
+        users = score_vectors.filter(
+            (pl.col("name") == name)
+            & (pl.col("seed").is_null() if model_seed is None else pl.col("seed") == model_seed)
+        ).select("user_id")
+
+        home_nodes = users.join(home_by_user, on="user_id", how="left")["home_node"].to_numpy()
+
+        user_invariance = check_user_invariance(scores, max_users, seed)
+        popularity_corr = check_popularity_correlation(scores, popularity_rows[0])
+        home_is_top1, home_median_rank = check_home_node_rank(scores, home_nodes)
+
+        rows.append({
+            "name": name,
+            "seed": model_seed,
+            "user_invariance": user_invariance,
+            "popularity_corr": popularity_corr,
+            "home_is_top1": home_is_top1,
+            "home_median_rank": home_median_rank,
+        })
+
+    checks = ["user_invariance", "popularity_corr", "home_is_top1", "home_median_rank"]
+
+    return (
+        pl
+        .DataFrame(rows)
+        .group_by("name")
+        .agg(
+            pl.len().alias("n_seeds"),
+            *[pl.col(check).mean().alias(check) for check in checks],
+            *[pl.col(check).std().alias(f"{check}_sd") for check in checks],
+        )
+        .sort("user_invariance", "name", descending=[True, False])
+    )
+
+
+def _score_matrix(score_vectors: pl.DataFrame, name: str, seed: int | None) -> np.ndarray:
+    """Extracts the ``[n_users, num_nodes]`` matrix of user scores output by one model ``name`` and seed ``seed`` pair.
+    Sorted in same order as the ``score_vectors`` frame."""
+    rows = score_vectors.filter(pl.col("name") == name)
+    rows = rows.filter(pl.col("seed").is_null() if seed is None else pl.col("seed") == seed)
+
+    return np.asarray(rows["scores"].to_list(), dtype=np.float64)
+
+
+def _row_ranks(scores: np.ndarray) -> np.ndarray:
+    """Computes the ranks of each row (corrected for ties) and z-scores them, so a dot product over nodes is a Spearman
+    correlation."""
+    row_ranks = rankdata(scores, axis=-1)
+    centred_row_ranks = row_ranks - row_ranks.mean(axis=-1, keepdims=True)
+
+    return centred_row_ranks / np.linalg.norm(centred_row_ranks, axis=-1, keepdims=True).clip(min=1e-12)
+
+
+# =========================================
 # Hop band analysis
 # =========================================
 
@@ -381,7 +563,8 @@ def print_report(
     """Print results analyses for a run of the whole comparison experiment: aggregate results, paired comparison,
     and hop bands.
     """
-    run = run if run is not None else _latest_run(Path(report_data_path), name)
+    report_data_path: Path = Path(report_data_path)
+    run = run if run is not None else _latest_run(report_data_path, name)
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
     aggregate, per_user = load_run(report_data_path, name, run)
 
@@ -403,3 +586,7 @@ def print_report(
 
             print(f"\n-- paired per-user {analysis.per_user_metric}, vs {analysis.reference_model}, by home coverage -")
             print(paired_comparison_by_home_coverage(per_user, analysis.reference_model, analysis.per_user_metric))
+
+        if (report_data_path / f"{name}-scores-{run}.parquet").exists():
+            print("\n-- model health checks --")
+            print(check_model_health(load_score_vectors(report_data_path, name, run), per_user))

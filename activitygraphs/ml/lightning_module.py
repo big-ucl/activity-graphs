@@ -162,6 +162,7 @@ class ActivityGraphModule(L.LightningModule):
         reg: Optional regularisation type; only ``"l1"`` is supported.
         lambda_reg: L1 coefficient (ignored when ``reg`` is None).
         full_info: If True, augment node features with home indicator and distances.
+        use_demographics: concatenate the per-user demographics onto the node features.
         k: Rank cutoff for precision, recall, and NDCG metrics.
         weight_decay: AdamW weight decay.
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
@@ -175,6 +176,9 @@ class ActivityGraphModule(L.LightningModule):
         use_home_pe: use home-anchored positional encodings in features, default False.
         home_pe_bins: number of bins for the RBF expansion of the home PEs, default ``HOME_PE_BINS``.
         compile_model: torch.compile the inner NN, default False.
+        store_score_vectors: retain each test user's full per-node score vector.
+        log_train_ranking: log ``train_r_precision`` on the training batches, default True. Turn it off when per-user
+            computation becomes expensive.
     """
 
     pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
@@ -188,6 +192,7 @@ class ActivityGraphModule(L.LightningModule):
         reg: str | None = None,
         lambda_reg: float = 0.01,
         full_info: bool = False,
+        use_demographics: bool = True,
         k: int = 5,
         weight_decay: float = 1e-4,
         schedule_lr: bool = False,
@@ -199,6 +204,8 @@ class ActivityGraphModule(L.LightningModule):
         use_home_pe: bool = False,
         home_pe_bins: int = HOME_PE_BINS,
         compile_model: bool = False,
+        store_score_vectors: bool = False,
+        log_train_ranking: bool = True,
     ):
         super().__init__()
         self.model = model
@@ -208,6 +215,7 @@ class ActivityGraphModule(L.LightningModule):
         self.reg = reg
         self.lambda_reg = lambda_reg
         self.full_info = full_info
+        self.use_demographics = use_demographics
         self.k = k
         self.weight_decay = weight_decay
         self.schedule_lr = schedule_lr
@@ -222,6 +230,9 @@ class ActivityGraphModule(L.LightningModule):
 
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
+
+        self.log_train_ranking = log_train_ranking
+        self.train_r_precision = RetrievalRPrecision() if log_train_ranking else None
 
         self.val_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
         self.test_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
@@ -244,8 +255,11 @@ class ActivityGraphModule(L.LightningModule):
 
         # Metrics: per-user test scores retained for paired model comparison, in column format
         # (one entry per test user), populated by `on_test_epoch_end`.
-        self.test_per_user = PerUserRanking(k)
+        self.test_per_user = PerUserRanking(k, store_score_vectors=store_score_vectors)
         self.per_user_columns: dict[str, list[float]] = {}
+
+        # Full per-node score vector of each test user, kept only when `store_score_vectors` is set.
+        self.per_user_score_vectors: list[list[float]] = []
 
         # Metrics: Capture predicted and true expected |RG_i| sizes
         self.test_pred_size = MeanMetric()
@@ -306,6 +320,18 @@ class ActivityGraphModule(L.LightningModule):
             loss = loss + self.lambda_reg * l1_norm
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
+
+        if self.train_r_precision is not None:
+            users = batch.user_id[batch.batch]
+            self.train_r_precision.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
+            self.log(
+                "train_r_precision",
+                self.train_r_precision,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch.num_nodes,
+            )
+
         return loss
 
     def _common_val_test_step(self, batch) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -398,6 +424,7 @@ class ActivityGraphModule(L.LightningModule):
 
         # Not logged: these are per-user vectors, not scalars. Persisted by `run_experiment`.
         self.per_user_columns = {name: value.cpu().tolist() for name, value in self.test_per_user.columns().items()}
+        self.per_user_score_vectors = self.test_per_user.score_vectors().cpu().tolist()
         self.test_per_user.reset()
 
         if self.hop_band_metrics is not None:
@@ -440,6 +467,7 @@ class ActivityGraphModule(L.LightningModule):
         x = extract_features(
             batch,
             self.full_info,
+            use_demographics=self.use_demographics,
             pop_logit=pop_logits,
             home_hop_distance=home_hop_distance,
             is_home_idx=self.is_home_idx,

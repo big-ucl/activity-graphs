@@ -16,6 +16,29 @@ from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.losses import Loss
 
 PER_USER_STAGE = "test_user"
+SCORE_VECTOR_STAGE = "test_scores"
+
+
+def score_vector_frame(module: ActivityGraphModule, name: str) -> pl.DataFrame:
+    """Full per-node test score vectors as ``stage="test_scores"`` rows, one row per scored test user.
+
+    The ``scores`` column is a list of one score per node, in node-index order, row-aligned with the
+    ``test_user`` rows of the same run. Empty when the module was built without ``store_score_vectors``.
+    """
+    if not module.per_user_score_vectors:
+        return pl.DataFrame()
+
+    return pl.DataFrame(
+        {
+            "user_id": module.per_user_columns["user_id"],
+            "scores": module.per_user_score_vectors,
+        },
+        schema_overrides={"scores": pl.List(pl.Float32)},
+    ).with_columns(
+        name=pl.lit(name),
+        stage=pl.lit(SCORE_VECTOR_STAGE),
+        epoch=pl.lit(None, dtype=pl.Int64),
+    )
 
 
 def per_user_frame(module: ActivityGraphModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
@@ -38,11 +61,23 @@ def per_user_frame(module: ActivityGraphModule, name: str, home_coverage_df: pl.
 
 @dataclass
 class WandBParams:
+    """W&B logging identity shared by every run of one experiment invocation.
+
+    ``experiment`` is the name of the experiment that produced the run (``cfg.train.experiment``).
+    It is carried into the group, the tags and the logged hyperparameters, so a run can be traced
+    back to the experiment it belongs to from any of the three places W&B lets you filter on.
+    """
+
     use_wandb: bool
     project: str | None = None
     entity: str | None = None
     group: str | None = None
     dataset_name: str | None = None
+    experiment: str | None = None
+
+    def tags(self, *extra: str) -> list[str]:
+        """Run tags: the dataset, the experiment, and any run-specific extras, skipping the unset ones."""
+        return [tag for tag in [self.dataset_name, self.experiment, *extra] if tag]
 
 
 def evaluate_baseline(
@@ -52,6 +87,7 @@ def evaluate_baseline(
     name: str,
     k: int = 5,
     wandb_params: WandBParams | None = None,
+    store_score_vectors: bool = False,
 ) -> pl.DataFrame:
     """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
 
@@ -67,6 +103,7 @@ def evaluate_baseline(
         k=k,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
+        store_score_vectors=store_score_vectors,
     )
 
     if wandb_params and wandb_params.use_wandb:
@@ -75,11 +112,12 @@ def evaluate_baseline(
             entity=wandb_params.entity,
             name=name,
             group=wandb_params.group,
-            tags=[t for t in [wandb_params.dataset_name, "baseline"] if t],
+            tags=wandb_params.tags("baseline"),
         )
         logger.log_hyperparams({
             "model": name,
             "dataset": wandb_params.dataset_name,
+            "experiment": wandb_params.experiment,
             "model_type": "baseline",
         })
 
@@ -102,8 +140,9 @@ def evaluate_baseline(
 
     aggregate_results = pl.DataFrame([fit_row, test_row])
     per_user_results = per_user_frame(baseline_module, name, datamodule.home_coverage)
+    score_vectors = score_vector_frame(baseline_module, name)
 
-    return pl.concat([aggregate_results, per_user_results], how="diagonal")
+    return pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal")
 
 
 def train_and_evaluate_model(
@@ -116,6 +155,7 @@ def train_and_evaluate_model(
     lr: float = 0.01,
     reg: str | None = None,
     full_info: bool = False,
+    use_demographics: bool = True,
     model_save_dir: Path | None = None,
     fast_dev_run: bool = False,
     overfit_batches: int = 0,
@@ -123,6 +163,9 @@ def train_and_evaluate_model(
     schedule_lr: bool = False,
     pop_mode: Literal["none", "offset", "feature"] = "none",
     use_home_pe: bool = False,
+    store_score_vectors: bool = False,
+    log_train_ranking: bool = True,
+    extra_hyperparams: dict | None = None,
     compile_model: bool = True,
     wandb_params: WandBParams | None = None,
     debug: bool = False,
@@ -152,6 +195,8 @@ def train_and_evaluate_model(
         use_home_pe: if true, add home-anchored positional encodings to features
         compile_model: use PyTorch Dynamo compilation on the model
         wandb_params: parameters to configure WandB logging.
+        extra_hyperparams: run-specific values to log alongside the standard ones, (architecture
+            settings that otherwise exist inside the model name, e.g. GNN ``depth``).
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
         run_tag: Suffix distinguishing repeated runs of the same model (e.g. per training seed). It
             qualifies the checkpoint filename and logger run name only; ``name`` still identifies
@@ -179,6 +224,7 @@ def train_and_evaluate_model(
         loss=loss,
         reg=reg,
         full_info=full_info,
+        use_demographics=use_demographics,
         k=datamodule.train_dataset.median_realised_size,
         weight_decay=weight_decay,
         schedule_lr=schedule_lr,
@@ -188,6 +234,8 @@ def train_and_evaluate_model(
         pop_mode=pop_mode,
         use_home_pe=use_home_pe,
         compile_model=compile_model,
+        store_score_vectors=store_score_vectors,
+        log_train_ranking=log_train_ranking,
     )
 
     # Build the callbacks
@@ -221,21 +269,24 @@ def train_and_evaluate_model(
             name=run_name,
             group=wandb_params.group,
             save_dir=log_dir,
-            tags=[wandb_params.dataset_name] if wandb_params.dataset_name else None,
+            tags=wandb_params.tags(),
         )
         logger.log_hyperparams({
             "model": name,
             "run_tag": run_tag,
             "dataset": wandb_params.dataset_name,
+            "experiment": wandb_params.experiment,
             "lr": lr,
             "weight_decay": weight_decay,
             "num_epochs": num_epochs,
             "reg": reg,
             "full_info": full_info,
+            "use_demographics": use_demographics,
             "schedule_lr": schedule_lr,
             "overfit_batches": overfit_batches,
             "pop_mode": pop_mode,
             "use_home_pe": use_home_pe,
+            **(extra_hyperparams or {}),
         })
     else:
         logger = CSVLogger(save_dir=log_dir, name=run_name)
@@ -267,8 +318,9 @@ def train_and_evaluate_model(
 
         aggregate_results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
         per_user_results = per_user_frame(lit_model, name, datamodule.home_coverage)
+        score_vectors = score_vector_frame(lit_model, name)
 
-        results = pl.concat([aggregate_results, per_user_results], how="diagonal")
+        results = pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal")
 
         first_cols = ["name", "stage", "epoch"]
         other_cols = [c for c in results.columns if c not in first_cols]

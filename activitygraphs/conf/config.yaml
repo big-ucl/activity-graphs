@@ -14,12 +14,13 @@ train:
   # Dataset split seed: kept same across models to ensure same data evaluation.
   split_seed: 42
   # Training seeds; each model is trained once per entry. Use several to measure run-to-run spread.
-  train_seeds: [42, 43, 44]
+  train_seeds: [ 42, 43, 44 ]
 
-  # comparison = comparison between ML architectures; depth_sweep = GATSkip receptive-field sweep over `depths`.
+  # comparison = comparison between ML architectures; depth_sweep = GATSkip receptive-field sweep over `depths`;
+  # demographics_ablation = use_demographics on/off on best MLP and GNN; overfit_health = single batch fit.
   experiment: comparison
   # GATSkip message-passing depths for the depth sweep (a NodeMLP depth-0 anchor is always included).
-  depths: [2, 4, 8]
+  depths: [ 2, 4, 8 ]
 
   # Batch size (number of user "graphs" per batch).
   batch_size: 64
@@ -33,12 +34,21 @@ train:
   fast_dev_run: false
   # Number of batches to train on (to test model overfit), disabled when = 0.
   overfit_batches: 0
+  # Learning rate forced on every architecture while overfitting. Set to null to keep the per-model rates.
+  overfit_lr: 1e-2
+  # Epochs to run while overfitting.
+  overfit_epochs: 500
   # Use the ReduceLROnPlateau scheduler.
   schedule_lr: true
   # Enable PyTorch model compilation (Dynamo).
   compile: true
   # Enable the `OverfitDebugCallback` statistics, prints at the start and end of training.
   debug: false
+  # Save each test user's full per-node score vector to `<name>-scores-<n>.parquet`. Required by the
+  # model-health checks; costs ~4 bytes per test user per node per model per seed.
+  save_score_vectors: true
+  # Log `train_r_precision` on the training batches
+  log_train_ranking: true
 
   # Enable Weights and Biases logging
   wandb: true
@@ -68,7 +78,7 @@ analysis:
   # Per-user metric used for the paired comparison.
   per_user_metric: r_precision
   # Home-zone occupancy thresholds `t` reported as `share_users_ge_{t}`.
-  occupancy_thresholds: [10, 25, 60]
+  occupancy_thresholds: [ 10, 25, 60 ]
   # Restrict the hop-band table to these models. null reports all models.
   hop_models: null
   # Run number `n` of `{dataset}-results-{n}.parquet`. null reads the latest.

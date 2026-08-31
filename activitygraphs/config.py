@@ -245,7 +245,7 @@ class TrainConfig:
     split_seed: int
     train_seeds: list[int]
 
-    experiment: Literal["comparison", "depth_sweep"]
+    experiment: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health"]
     depths: list[int]
 
     batch_size: int
@@ -254,9 +254,13 @@ class TrainConfig:
 
     fast_dev_run: bool
     overfit_batches: int
+    overfit_lr: float | None
+    overfit_epochs: int
     schedule_lr: bool
     compile: bool
     debug: bool
+    save_score_vectors: bool
+    log_train_ranking: bool
 
     wandb: bool
     wandb_project: str

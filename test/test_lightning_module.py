@@ -74,11 +74,21 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
 
 
 def make_module(
-    reg: str | None = None, lambda_reg: float = 0.01, pos_weight: float = 2.0, schedule_lr: bool = False
+    reg: str | None = None,
+    lambda_reg: float = 0.01,
+    pos_weight: float = 2.0,
+    schedule_lr: bool = False,
+    store_score_vectors: bool = False,
 ) -> ActivityGraphModule:
     model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
     return ActivityGraphModule(
-        model=model, lr=1e-3, pos_weight=torch.tensor(pos_weight), reg=reg, lambda_reg=lambda_reg, schedule_lr=schedule_lr
+        model=model,
+        lr=1e-3,
+        pos_weight=torch.tensor(pos_weight),
+        reg=reg,
+        lambda_reg=lambda_reg,
+        schedule_lr=schedule_lr,
+        store_score_vectors=store_score_vectors,
     )
 
 
@@ -265,6 +275,110 @@ class TestTestStep:
             "test_sampled_size",
         }
         assert expected.issubset(logged.keys())
+
+
+class TestUseDemographics:
+    """`use_demographics` is sized for at build time; the module must apply it at run time too."""
+
+    def _module(self, use_demographics: bool) -> ActivityGraphModule:
+        in_channels = NUM_NODE_FEATURES + (NUM_DEMO_FEATURES if use_demographics else 0)
+        model = NodeMLP(num_layers=2, in_channels=in_channels, hidden_channels=8, out_channels=1)
+
+        return ActivityGraphModule(
+            model=model, lr=1e-3, pos_weight=torch.tensor(2.0), use_demographics=use_demographics
+        )
+
+    def test_demographics_are_concatenated_by_default(self):
+        batch = make_batch(num_graphs=2, num_nodes=8)
+
+        assert self._module(use_demographics=True).compute_logits(batch).shape == (16, 1)
+
+    def test_a_model_built_without_demographics_runs_without_them(self):
+        """Without the runtime flag this raises a shape mismatch, which is what makes the ablation runnable."""
+        batch = make_batch(num_graphs=2, num_nodes=8)
+
+        assert self._module(use_demographics=False).compute_logits(batch).shape == (16, 1)
+
+    def test_the_two_arms_see_different_features(self):
+        batch = make_batch(num_graphs=2, num_nodes=8)
+
+        with_demo = extract_features(batch, full_info=False, use_demographics=True)
+        without_demo = extract_features(batch, full_info=False, use_demographics=False)
+
+        assert with_demo.shape[1] == without_demo.shape[1] + NUM_DEMO_FEATURES
+
+
+class TestTrainRanking:
+    def _module(self, **kwargs) -> ActivityGraphModule:
+        return ActivityGraphModule(
+            model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
+            lr=1e-3,
+            pos_weight=torch.tensor(2.0),
+            **kwargs,
+        )
+
+    def test_logs_r_precision_on_the_training_batch_by_default(self, monkeypatch):
+        """Paired with `val_r_precision` this is the train/val ranking gap, which the BPR loss cannot give."""
+        module = self._module()
+        batch = make_batch(num_graphs=2, num_nodes=8)
+        force_positive_per_graph(batch)
+        logged = capture_logs(module, monkeypatch)
+
+        module.training_step(batch, 0)
+
+        assert "train_r_precision" in logged
+        assert "train_loss" in logged
+
+    def test_can_be_switched_off(self, monkeypatch):
+        """The per-user loop costs ~8% of epoch time, so TTS-scale splits need to be able to skip it."""
+        module = self._module(log_train_ranking=False)
+        batch = make_batch(num_graphs=2, num_nodes=8)
+        force_positive_per_graph(batch)
+        logged = capture_logs(module, monkeypatch)
+
+        module.training_step(batch, 0)
+
+        assert module.train_r_precision is None
+        assert "train_r_precision" not in logged
+        assert "train_loss" in logged
+
+
+class TestScoreVectors:
+    def _tested(self, monkeypatch, store_score_vectors: bool):
+        module = make_module(store_score_vectors=store_score_vectors)
+        batch = make_batch(num_graphs=3, num_nodes=8)
+        force_positive_per_graph(batch)
+        capture_logs(module, monkeypatch)
+
+        module.eval()
+        with torch.no_grad():
+            module.test_step(batch, 0)
+        module.on_test_epoch_end()
+
+        return module, batch
+
+    def test_not_collected_by_default(self, monkeypatch):
+        module, _ = self._tested(monkeypatch, store_score_vectors=False)
+        assert module.per_user_score_vectors == []
+
+    def test_one_vector_per_node_per_scored_user(self, monkeypatch):
+        module, _ = self._tested(monkeypatch, store_score_vectors=True)
+
+        vectors = module.per_user_score_vectors
+        assert len(vectors) == len(module.per_user_columns["user_id"])
+        assert all(len(vector) == 8 for vector in vectors)
+
+    def test_vectors_reproduce_the_reported_r_precision(self, monkeypatch):
+        """The stored scores must be the quantity actually ranked, in node order, or the health checks lie."""
+        module, batch = self._tested(monkeypatch, store_score_vectors=True)
+
+        for row, user_id in enumerate(module.per_user_columns["user_id"]):
+            graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
+            target = batch.y.squeeze(-1)[batch.batch == graph]
+            r = int(target.sum())
+
+            top_r = torch.tensor(module.per_user_score_vectors[row]).topk(r).indices
+            assert float(target[top_r].sum() / r) == pytest.approx(module.per_user_columns["r_precision"][row])
 
 
 class TestConfigureOptimizers:

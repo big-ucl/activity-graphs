@@ -5,12 +5,22 @@ from hydra.core.config_store import ConfigStore
 
 from activitygraphs.analysis import print_report
 from activitygraphs.config import Config
-from activitygraphs.experiments import comparison_experiment, depth_sweep_experiment
+from activitygraphs.experiments import (
+    comparison_experiment,
+    demographics_ablation_experiment,
+    depth_sweep_experiment,
+    overfit_health_experiment,
+)
 
 cs = ConfigStore.instance()
 cs.store(name="geneva_config", node=Config)
 
-EXPERIMENTS = {"comparison": comparison_experiment, "depth_sweep": depth_sweep_experiment}
+EXPERIMENTS = {
+    "comparison": comparison_experiment,
+    "depth_sweep": depth_sweep_experiment,
+    "demographics_ablation": demographics_ablation_experiment,
+    "overfit_health": overfit_health_experiment,
+}
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")

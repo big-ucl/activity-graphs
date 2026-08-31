@@ -96,6 +96,32 @@ class TestPerUserRanking:
         metric.update(preds, target, indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]))
         return metric
 
+    def test_no_score_vectors_by_default(self):
+        assert self._updated().score_vectors().numel() == 0
+
+    def test_score_vectors_are_row_aligned_with_the_summary_columns(self):
+        metric = PerUserRanking(k=2, store_score_vectors=True)
+        preds = torch.tensor([0.9, 0.8, 0.2, 0.1, 0.9, 0.2, 0.8, 0.1])
+        target = torch.tensor([1, 1, 0, 0, 1, 1, 0, 0])
+        metric.update(preds, target, indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]))
+
+        vectors = metric.score_vectors()
+
+        assert vectors.shape == (2, 4)
+        assert metric.columns()["user_id"].tolist() == [0, 1]
+        assert vectors[0].tolist() == pytest.approx([0.9, 0.8, 0.2, 0.1])
+        assert vectors[1].tolist() == pytest.approx([0.9, 0.2, 0.8, 0.1])
+
+    def test_score_vectors_skip_users_without_positives(self):
+        """A user with no positives is dropped from the summary rows; its vector must be dropped too."""
+        metric = PerUserRanking(k=2, store_score_vectors=True)
+        preds = torch.tensor([0.9, 0.1, 0.5, 0.4])
+        target = torch.tensor([1, 0, 0, 0])
+        metric.update(preds, target, indexes=torch.tensor([0, 0, 1, 1]))
+
+        assert metric.columns()["user_id"].tolist() == [0]
+        assert metric.score_vectors().shape == (1, 2)
+
     def test_retains_one_row_per_user(self):
         columns = self._updated().columns()
 

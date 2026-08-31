@@ -1,5 +1,6 @@
 """Top-level experiment runners: experiment definitions, model specification and building and result saving."""
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,6 +11,7 @@ import lightning as L
 import polars as pl
 import torch
 
+from activitygraphs.analysis import check_overfit_health
 from activitygraphs.config import Config
 from activitygraphs.ml.baselines import (
     ConditionalNodeBaseline,
@@ -22,7 +24,13 @@ from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.lightning_module import extracted_features_dim
 from activitygraphs.ml.losses import Loss, build_loss
 from activitygraphs.ml.models import FullyConnectedMLP, GATSkip, GraphTransformer, NodeMLP
-from activitygraphs.ml.training import PER_USER_STAGE, WandBParams, evaluate_baseline, train_and_evaluate_model
+from activitygraphs.ml.training import (
+    PER_USER_STAGE,
+    SCORE_VECTOR_STAGE,
+    WandBParams,
+    evaluate_baseline,
+    train_and_evaluate_model,
+)
 
 # =========================================
 # Experiments
@@ -66,9 +74,7 @@ def comparison_experiment(cfg: Config):
         ),
         ModelSpec(gat_name, gat, lr_for("GATSkip"), {}),
         ModelSpec(gat_name + "-dist", partial(gat, full_info=True), lr_for("GATSkip"), {"full_info": True}),
-        ModelSpec(
-            gat_name + "-hpe", partial(gat, use_home_pe=True), lr_for("GATSkip"), {"use_home_pe": True}
-        ),
+        ModelSpec(gat_name + "-hpe", partial(gat, use_home_pe=True), lr_for("GATSkip"), {"use_home_pe": True}),
         ModelSpec(
             gat_name + "-hpe-dist",
             partial(gat, full_info=True, use_home_pe=True),
@@ -93,8 +99,7 @@ def comparison_experiment(cfg: Config):
 
 
 def depth_sweep_experiment(cfg: Config):
-    """Sweep number of message passing layers of the GATSkip (with HPE and home distance) over ``cfg.train.depths``.
-    """
+    """Sweep number of message passing layers of the GATSkip (with HPE and home distance) over ``cfg.train.depths``."""
     setup = setup_experiment(cfg)
     dataset, hidden, dropout = setup.train_dataset, setup.hidden_channels, setup.dropout
     mlp_layers = 3
@@ -104,7 +109,7 @@ def depth_sweep_experiment(cfg: Config):
             "MLP-dist",
             partial(build_mlp, dataset, mlp_layers, hidden, dropout, full_info=True),
             setup.lr_for("MLP"),
-            {"full_info": True},
+            {"full_info": True, "extra_hyperparams": {"depth": 0}},
         ),
     ]
 
@@ -113,7 +118,7 @@ def depth_sweep_experiment(cfg: Config):
             f"GATSkip-{depth}-res-hpe-dist",
             partial(build_gat, dataset, depth, hidden, dropout, full_info=True, use_home_pe=True),
             setup.lr_for("GATSkip"),
-            {"full_info": True, "use_home_pe": True},
+            {"full_info": True, "use_home_pe": True, "extra_hyperparams": {"depth": depth}},
         )
 
         model_specs.append(gnn_spec)
@@ -124,6 +129,98 @@ def depth_sweep_experiment(cfg: Config):
         return
 
     save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results)
+
+
+def demographics_ablation_experiment(cfg: Config):
+    """Run an ablation on the user demographics with the two best performing ML models from ``comparison_experiment``.
+
+    Runs ``use_demographics`` True/False for each retained architecture at every training seed, with
+    everything else fixed, so the pair can be compared paired per user. Baselines are evaluated alongside.
+    """
+    setup = setup_experiment(cfg)
+    train_dataset = setup.train_dataset
+    hidden_channels = setup.hidden_channels
+    dropout = setup.dropout
+
+    gat_layers = 8
+    mlp_layers = 3
+
+    builders = {
+        "MLP-dist": (partial(build_mlp, train_dataset, mlp_layers, hidden_channels, dropout), setup.lr_for("MLP")),
+        f"GATSkip-{gat_layers}-res-dist": (
+            partial(build_gat, train_dataset, gat_layers, hidden_channels, dropout),
+            setup.lr_for("GATSkip"),
+        ),
+    }
+
+    model_specs = []
+
+    for name, (builder_f, lr) in builders.items():
+        for use_demographics in [True, False]:
+            model_spec = ModelSpec(
+                f"{name}-{'demo' if use_demographics else 'nodemo'}",
+                partial(builder_f, full_info=True, use_demographics=use_demographics),
+                lr,
+                {"full_info": True, "use_demographics": use_demographics},
+            )
+
+            model_specs.append(model_spec)
+
+    model_results = run_model_specs(setup, model_specs)
+
+    if cfg.train.fast_dev_run:
+        return
+
+    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results)
+
+
+def overfit_health_experiment(cfg: Config):
+    """Check if each architecture can overfit on a single batch.
+
+    Forces ``train.overfit_batches`` and requires ``train.log_train_ranking``, since the check is read entirely off
+    ``train_r_precision``. A healthy model drives ``train_r_precision`` to ~1.0 on a batch it has memorised; failure is
+    capacity or optimisation rather than data, and invalidates every downstream reading. Runs one seed and no baselines.
+    """
+    cfg = copy.deepcopy(cfg)
+    cfg.train.experiment = "overfit_health"
+    cfg.train.log_train_ranking = True
+    cfg.train.overfit_batches = max(1, cfg.train.overfit_batches)
+    cfg.train.train_seeds = cfg.train.train_seeds[:1]
+
+    setup = setup_experiment(cfg, with_baselines=False)
+    train_dataset = setup.train_dataset
+    hidden_channels = setup.hidden_channels
+    dropout = setup.dropout
+
+    gat_layers = 8
+    mlp_layers = 3
+
+    model_specs = [
+        ModelSpec(
+            "MLP-dist",
+            partial(build_mlp, train_dataset, mlp_layers, hidden_channels, dropout, full_info=True),
+            setup.lr_for("MLP"),
+            {"full_info": True},
+        ),
+        ModelSpec(
+            f"GATSkip-{gat_layers}-res-dist",
+            partial(build_gat, train_dataset, gat_layers, hidden_channels, dropout, full_info=True),
+            setup.lr_for("GATSkip"),
+            {"full_info": True},
+        ),
+    ]
+
+    model_results = run_model_specs(setup, model_specs)
+
+    if cfg.train.fast_dev_run:
+        return
+
+    results = pl.concat(model_results, how="diagonal")
+    save_results(cfg.paths.reports, cfg.data.name, results)
+
+    with pl.Config(tbl_rows=-1, float_precision=4):
+        print("\n-- overfit health: best train_r_precision on the memorised batch --")
+        print(check_overfit_health(results))
 
 
 # =========================================
@@ -149,22 +246,26 @@ class ExperimentSetup:
     lr_for: Callable[[str], float]
 
 
-def setup_experiment(cfg: Config) -> ExperimentSetup:
+def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetup:
     """Setup an experiment. Configure logging, build the datamodule, loss, baselines,
     and a preconfigured ``train_and_evaluate_model`` partial function that will run for each model.
 
     Hyperparameters not exposed by the config are fixed here: hidden_channels=128, dropout=0.2 and
-    the per-model learning rates (all overridden when ``cfg.train.overfit_batches > 0``). The split is
+    the per-model learning rates (all overridden when ``cfg.train.overfit_batches > 0``, unless
+    ``cfg.train.overfit_lr`` is null). The split is
     drawn with ``cfg.train.split_seed`` and is never reseeded, so every model in every experiment is
     scored on the same test users.
+
+    ``with_baselines=False`` skips fitting the frequency baselines.
     """
-    run_group = f"{cfg.data.name}-{datetime.now():%Y%m%d-%H%M%S}"
+    run_group = f"{cfg.data.name}-{cfg.train.experiment}-{datetime.now():%Y%m%d-%H%M%S}"
     wandb_params = WandBParams(
         use_wandb=cfg.train.wandb,
         project=cfg.train.wandb_project,
         entity=cfg.train.wandb_entity,
         group=run_group,
         dataset_name=cfg.data.name,
+        experiment=cfg.train.experiment,
     )
 
     batch_size = cfg.train.batch_size
@@ -191,8 +292,8 @@ def setup_experiment(cfg: Config) -> ExperimentSetup:
 
     if overfitting:
         dropout = 0.0
-        epochs = 500
-        lr = 1e-2
+        epochs = cfg.train.overfit_epochs
+        lr = cfg.train.overfit_lr
         weight_decay = 0.0
     else:
         dropout = 0.2
@@ -205,7 +306,11 @@ def setup_experiment(cfg: Config) -> ExperimentSetup:
     num_nodes = train_dataset[0].num_nodes
     baseline_results = [
         res.with_columns(seed=pl.lit(None, dtype=pl.Int64))
-        for res in measure_baselines(num_nodes, datamodule, loss, wandb_params)
+        for res in (
+            measure_baselines(num_nodes, datamodule, loss, wandb_params, cfg.train.save_score_vectors)
+            if with_baselines
+            else []
+        )
     ]
 
     models_dir = cfg.paths.models
@@ -215,7 +320,9 @@ def setup_experiment(cfg: Config) -> ExperimentSetup:
     lr_by_model = {"MLP": 1e-3, "GATSkip": 1e-3, "GTransformer": 1e-4, "MLP-dist": 1e-3, "FullMLP": 1e-3}
 
     def lr_for(key: str) -> float:
-        return lr if overfitting else lr_by_model[key]
+        """Learning rate for a model. Overfit mode forces one rate unless ``train.overfit_lr`` is null,
+        in which case every architecture keeps the rate it is normally trained at."""
+        return lr if overfitting and lr is not None else lr_by_model[key]
 
     my_run_experiment = partial(
         train_and_evaluate_model,
@@ -231,6 +338,8 @@ def setup_experiment(cfg: Config) -> ExperimentSetup:
         compile_model=cfg.train.compile,
         wandb_params=wandb_params,
         debug=debug,
+        store_score_vectors=cfg.train.save_score_vectors,
+        log_train_ranking=cfg.train.log_train_ranking,
     )
 
     return ExperimentSetup(
@@ -245,7 +354,13 @@ def setup_experiment(cfg: Config) -> ExperimentSetup:
     )
 
 
-def measure_baselines(num_nodes, datamodule: ActivityDataModule, loss: Loss, wandb_params: WandBParams):
+def measure_baselines(
+    num_nodes,
+    datamodule: ActivityDataModule,
+    loss: Loss,
+    wandb_params: WandBParams,
+    store_score_vectors: bool = False,
+):
     """Fit and evaluate all four frequency baselines; return a list of result dicts."""
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
@@ -265,7 +380,13 @@ def measure_baselines(num_nodes, datamodule: ActivityDataModule, loss: Loss, wan
         ("ConditionalNodeMarginal", conditional_base),
     ]:
         res = evaluate_baseline(
-            baseline, datamodule, loss, name, k=datamodule.train_dataset.median_realised_size, wandb_params=wandb_params
+            baseline,
+            datamodule,
+            loss,
+            name,
+            k=datamodule.train_dataset.median_realised_size,
+            wandb_params=wandb_params,
+            store_score_vectors=store_score_vectors,
         )
         results.append(res)
 
@@ -435,9 +556,10 @@ def build_full_mlp(
 def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     """Concatenate result DataFrames and write them to ``<path>/data/``.
 
-    The aggregate rows (``stage`` of ``fit``/``test``) go to ``<name>-results-<n>.parquet`` and the
-    per-user rows to ``<name>-per-user-<n>.parquet``, sharing the run number ``n``. They are split
-    because they are at different granularities: one row per epoch versus one row per test user.
+    The aggregate rows (``stage`` of ``fit``/``test``) go to ``<name>-results-<n>.parquet``, the
+    per-user summary rows to ``<name>-per-user-<n>.parquet`` and the full per-user score vectors to
+    ``<name>-scores-<n>.parquet``. All three are numbered ``n``. They are split because they are
+    different sizes, so only they only need to be loaded when required for analysis.
     """
     path = Path(path) / "data"
 
@@ -447,12 +569,16 @@ def save_results(path: str | Path, name: str, *results: pl.DataFrame):
 
     combined = pl.concat(results, how="diagonal")
     per_user = combined.filter(pl.col("stage") == PER_USER_STAGE)
-    aggregate = combined.filter(pl.col("stage") != PER_USER_STAGE)
+    score_vectors = combined.filter(pl.col("stage") == SCORE_VECTOR_STAGE)
+    aggregate = combined.filter(~pl.col("stage").is_in([PER_USER_STAGE, SCORE_VECTOR_STAGE]))
 
     drop_empty_columns(aggregate).write_parquet(path / f"{name}-results-{max_num + 1}.parquet")
 
     if not per_user.is_empty():
         drop_empty_columns(per_user).write_parquet(path / f"{name}-per-user-{max_num + 1}.parquet")
+
+    if not score_vectors.is_empty():
+        drop_empty_columns(score_vectors).write_parquet(path / f"{name}-scores-{max_num + 1}.parquet")
 
 
 def drop_empty_columns(df: pl.DataFrame) -> pl.DataFrame:
