@@ -16,7 +16,7 @@ def _():
     from pathlib import Path
 
     project_root = Path(mo.notebook_dir().parent)
-    cfg = load_config(project_root)
+    cfg = load_config(project_root, data="geneva")
     return cfg, mo, project_root
 
 
@@ -53,7 +53,9 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(analysis, mo):
-    mo.md(f"Metric: _{analysis.main_metric}_, averaged over seeds")
+    mo.md(f"""
+    Metric: _{analysis.main_metric}_, averaged over seeds
+    """)
     return
 
 
@@ -75,15 +77,8 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    Paired per-user _{analysis.per_user_metric}_, difference compaired to reference _{analysis.reference_model}_ (avg over seeds)
-    """)
-    return
-
-
-@app.cell
-def _():
+def _(analysis, mo):
+    mo.md(f"Paired per-user _{analysis.per_user_metric}_, difference compaired to reference _{analysis.reference_model}_ (avg over seeds)")
     return
 
 

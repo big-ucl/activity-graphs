@@ -94,7 +94,7 @@ class ConditionalNodeBaseline(torch.nn.Module):
     def fit(self, loader: pyg.loader.DataLoader):
         """Compute per-node-per-home visit rates over ``loader`` and store as logits ``[num_nodes, num_nodes]``."""
         visit_counts = torch.zeros(self.num_nodes, self.num_nodes)
-        graph_counts = torch.zeros(self.num_nodes)
+        home_node_counts = torch.zeros(self.num_nodes)
 
         for batch in loader:
             node_indices = torch.arange(batch.num_nodes) - batch.ptr[batch.batch]
@@ -109,10 +109,17 @@ class ConditionalNodeBaseline(torch.nn.Module):
 
                 home = home_nodes[0].item()
                 visit_counts[node_indices[graph_mask], home] += batch.y[graph_mask].squeeze().float().cpu()
-                graph_counts[home] += 1
+                home_node_counts[home] += 1
 
-        p = visit_counts / graph_counts.clamp(min=1).unsqueeze(0)
+        p = visit_counts / home_node_counts.clamp(min=1).unsqueeze(0)
+
+        # For nodes with no home users, predict global visit probability (fallback to ``NodeMarginal``)
+        node_never_visited = home_node_counts == 0
+        p_node_marginal = visit_counts.sum(dim=1) / home_node_counts.sum().clamp(min=1)
+        p[:, node_never_visited] = p_node_marginal.unsqueeze(1)
+
         p = p.clamp(1e-6, 1 - 1e-6)
+        
         self.logits = inverse_sigmoid(p)
 
         return self
