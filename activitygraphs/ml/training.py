@@ -41,6 +41,16 @@ def score_vector_frame(module: ActivityGraphModule, name: str) -> pl.DataFrame:
     )
 
 
+def aggregate_frame(rows: list[dict], name: str) -> pl.DataFrame:
+    """Collected ``stage="fit"``/``stage="test"`` rows as one named frame.
+
+    Scans every row for the schema: the single test row comes last, after one fit row per epoch, so
+    Polars' default 100-row inference window would silently drop the ``test_*`` metrics on any run
+    longer than that many epochs.
+    """
+    return pl.DataFrame(rows, infer_schema_length=None).with_columns(name=pl.lit(name))
+
+
 def per_user_frame(module: ActivityGraphModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
     """Per-user test scores as ``stage="test_user"`` rows, one row per scored test user.
 
@@ -316,7 +326,7 @@ def train_and_evaluate_model(
         if model_save_dir is not None:
             trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-        aggregate_results = pl.DataFrame(collector.rows).with_columns(pl.lit(name).alias("name"))
+        aggregate_results = aggregate_frame(collector.rows, name)
         per_user_results = per_user_frame(lit_model, name, datamodule.home_coverage)
         score_vectors = score_vector_frame(lit_model, name)
 

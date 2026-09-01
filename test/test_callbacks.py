@@ -3,6 +3,7 @@
 import types
 from unittest.mock import MagicMock
 
+import polars as pl
 import pytest
 import torch
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
@@ -10,6 +11,7 @@ from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from activitygraphs.ml.callbacks import EpochMetricsCollector, HopBandTableLogger
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.models import NodeMLP
+from activitygraphs.ml.training import aggregate_frame
 
 
 def fake_trainer(callback_metrics: dict, sanity_checking: bool = False, current_epoch: int = 0):
@@ -67,6 +69,31 @@ class TestEpochMetricsCollector:
         collector.on_train_epoch_end(trainer, None)
 
         assert collector.rows == []
+
+
+class TestAggregateFrame:
+    def _collect(self, num_epochs: int) -> list[dict]:
+        collector = EpochMetricsCollector()
+
+        for epoch in range(num_epochs):
+            collector.on_train_epoch_end(fake_trainer({"train_loss": 0.5, "val_bce": 0.4}, current_epoch=epoch), None)
+
+        collector.on_test_end(fake_trainer({"test_bce": 0.3, "test_r_precision": 0.5}), None)
+
+        return collector.rows
+
+    @pytest.mark.parametrize("num_epochs", [50, 500])
+    def test_test_metrics_survive_however_many_fit_rows_precede_them(self, num_epochs: int):
+        frame = aggregate_frame(self._collect(num_epochs), "MLP")
+
+        assert "test_r_precision" in frame.columns
+        test_row = frame.filter(pl.col("stage") == "test")
+        assert test_row["test_r_precision"].item() == pytest.approx(0.5)
+
+    def test_every_row_carries_the_model_name(self):
+        frame = aggregate_frame(self._collect(3), "MLP")
+
+        assert frame["name"].to_list() == ["MLP"] * 4
 
 
 class TestHopBandTableLogger:
