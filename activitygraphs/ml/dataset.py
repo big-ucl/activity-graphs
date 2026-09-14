@@ -32,6 +32,11 @@ _LEGACY_IS_HOME_COL_IDX = 37
 type Fingerprint = dict
 
 
+def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
+    """Boolean mask over the rows of ``x``, ``True`` at each user's own home node."""
+    return (x[..., is_home_idx] > 0.0).bool()
+
+
 class GenevaDataset(pyg.data.InMemoryDataset):
     """Legacy in-memory dataset: wraps a list of per-user PyG graphs loaded from a pickle file."""
 
@@ -133,8 +138,7 @@ class ActivityDataset(pyg.data.Dataset):
     @property
     def num_network_features(self) -> int:
         """Number of network node-feature columns (those preceding the spatial block in ``x``)."""
-        x = self.network_graph.x
-        return 0 if x is None else x.shape[1]
+        return self.network_graph.x.shape[1]
 
     @property
     def is_home_spatial_idx(self) -> int:
@@ -153,7 +157,7 @@ class ActivityDataset(pyg.data.Dataset):
 
     @cached_property
     def median_realised_size(self) -> int:
-        """Median number of visited nodes per user over the dataset (median |RG_i|)."""
+        """Median number of visited nodes per user over the dataset, counting the home node."""
         sizes = [int(data.y.sum()) for data in self]
         return int(np.median(sizes))
 
@@ -200,11 +204,6 @@ class ActivityDataset(pyg.data.Dataset):
         if num_di_feat != 1:
             raise ValueError(f"distances last dim must be 1, got {num_di_feat}.")
 
-        # Make sure the network graph has node features, otherwise, fall back to a zero-width tensor.
-        if graph.x is None:
-            graph = graph.clone()
-            graph.x = torch.empty((graph.num_nodes, 0), dtype=sf.dtype)
-
         if self.pre_transform is not None:
             graph = self.pre_transform(graph)
 
@@ -226,11 +225,8 @@ class ActivityDataset(pyg.data.Dataset):
         network_x = self.network_graph.x
         spatial_x = self.spatial_features[i]
 
-        if network_x is None:
-            network_x = torch.empty((self.num_nodes, 0), dtype=spatial_x.dtype)
-
         # Cast spatial features to same type as network graph features if mismatch
-        if network_x.numel() > 0 and spatial_x.dtype != network_x.dtype:
+        if spatial_x.dtype != network_x.dtype:
             spatial_x = spatial_x.to(network_x.dtype)
 
         # Create new individual-annotated network graph
@@ -263,13 +259,13 @@ class ActivityDataset(pyg.data.Dataset):
 class FittedScalers:
     """Container for ``StandardScaler`` instances fitted on the training split."""
 
-    network_features: StandardScaler | None
-    network_edges: StandardScaler | None
+    network_features: StandardScaler
+    network_edges: StandardScaler
     spatial: StandardScaler | None
-    demographics: StandardScaler | None
+    demographics: StandardScaler
+    distances: StandardScaler
+    exclude_spatial_cols: list[int]
     fingerprint: Fingerprint
-    distances: StandardScaler | None = None
-    exclude_spatial_cols: list[int] | None = None
 
     def save(self, path: Path) -> None:
         with path.open("wb") as f:
@@ -420,7 +416,7 @@ def fit_scalers(
     dataset: ActivityDataset,
     train_idx: list[int],
     fingerprint: Fingerprint,
-    exclude_spatial_cols: list[int] | None = None,
+    exclude_spatial_cols: list[int],
     exclude_demographic_cols: list[int] | None = None,
 ) -> FittedScalers:
     """Fit ``StandardScaler`` instances on the training split of each feature group.
@@ -435,24 +431,17 @@ def fit_scalers(
     Returns:
         ``FittedScalers`` with one scaler per feature group (network nodes, edges, spatial, demographics).
     """
-    network_features = dataset.network_graph.x
-    edge_attr = dataset.network_graph.edge_attr
-
     # Network node features: no need to separate between train and test, the network is the same.
-    network_scaler = None
-    if network_features is not None and network_features.numel() > 0:
-        network_scaler = StandardScaler()
-        network_scaler.fit(network_features.numpy())
+    network_scaler = StandardScaler()
+    network_scaler.fit(dataset.network_graph.x.numpy())
 
     # Network edge attributes: same as above
-    edge_scaler = None
-    if edge_attr is not None:
-        edge_scaler = StandardScaler()
-        edge_scaler.fit(edge_attr.numpy())
+    edge_scaler = StandardScaler()
+    edge_scaler.fit(dataset.network_graph.edge_attr.numpy())
 
     # Spatial features: individual-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
     spatial_train = dataset.spatial_features[train_idx]
-    keep = [c for c in range(spatial_train.shape[-1]) if c not in (exclude_spatial_cols or [])]
+    keep = [c for c in range(spatial_train.shape[-1]) if c not in exclude_spatial_cols]
     spatial_scaler = None
     if keep:
         spatial_flat = spatial_train[..., keep].reshape(-1, len(keep)).float().numpy()
@@ -488,34 +477,29 @@ def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
     if dataset._is_scaled:
         raise RuntimeError("apply_scalers called twice on the same ActivityDataset")
 
-    if scalers.network_features is not None:
-        x = dataset.network_graph.x.numpy()
-        dataset.network_graph.x = torch.from_numpy(scalers.network_features.transform(x)).float()
+    x = dataset.network_graph.x.numpy()
+    dataset.network_graph.x = torch.from_numpy(scalers.network_features.transform(x)).float()
 
-    if scalers.network_edges is not None:
-        ea = dataset.network_graph.edge_attr.numpy()
-        dataset.network_graph.edge_attr = torch.from_numpy(scalers.network_edges.transform(ea)).float()
+    ea = dataset.network_graph.edge_attr.numpy()
+    dataset.network_graph.edge_attr = torch.from_numpy(scalers.network_edges.transform(ea)).float()
 
     if scalers.spatial is not None:
         sf = dataset.spatial_features.float()
         n_cols = sf.shape[-1]
-        exclude = scalers.exclude_spatial_cols or []
-        keep = [c for c in range(n_cols) if c not in exclude]
+        keep = [c for c in range(n_cols) if c not in scalers.exclude_spatial_cols]
         flat = sf.reshape(-1, n_cols)[:, keep].numpy()
         scaled_keep = torch.from_numpy(scalers.spatial.transform(flat)).float()
         result = sf.reshape(-1, n_cols).clone()
         result[:, keep] = scaled_keep
         dataset.spatial_features = result.reshape(sf.shape)
 
-    if scalers.demographics is not None:
-        demo = dataset.demographics.float().numpy()
-        dataset.demographics = torch.from_numpy(scalers.demographics.transform(demo)).float()
+    demo = dataset.demographics.float().numpy()
+    dataset.demographics = torch.from_numpy(scalers.demographics.transform(demo)).float()
 
-    if scalers.distances is not None:
-        dist = dataset.distances.float()
-        shape = dist.shape
-        flat = dist.reshape(-1, shape[-1]).numpy()
-        dataset.distances = torch.from_numpy(scalers.distances.transform(flat)).float().reshape(shape)
+    dist = dataset.distances.float()
+    shape = dist.shape
+    flat = dist.reshape(-1, shape[-1]).numpy()
+    dataset.distances = torch.from_numpy(scalers.distances.transform(flat)).float().reshape(shape)
 
     dataset._is_scaled = True
 

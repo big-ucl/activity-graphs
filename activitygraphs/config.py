@@ -275,7 +275,9 @@ class AnalysisConfig:
 
     reference_model: str
     main_metric: str
+    diagnostic_metric: str
     per_user_metric: str
+    min_realised_size: int
     occupancy_thresholds: list[int]
     hop_models: list[str] | None
     run: int | None

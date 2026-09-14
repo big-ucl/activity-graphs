@@ -43,19 +43,33 @@ NUM_NODE_FEATURES = 6
 NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
 IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
+# Column of the per-user ``is_home`` indicator in the synthetic ``x``, mirroring the real dataset,
+# where the spatial block starts with ``is_home`` (see ``ActivityDataset.is_home_col_idx``).
+IS_HOME_IDX = 0
+HOME_NODE = 0
+
+
+def chain_hop_distance(num_nodes: int = 8) -> torch.Tensor:
+    """Hop distances of the chain graphs ``make_batch`` builds: nodes i and j are ``|i - j|`` hops apart."""
+    idx = torch.arange(num_nodes)
+    return (idx[:, None] - idx[None, :]).abs().float()
 
 
 def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
     """Return a synthetic PyG Batch with binary node labels, demographics, and unique user ids.
 
     Each graph carries ``graph_x`` so ``extract_features`` exercises the demographics path;
-    feature width is ``NUM_NODE_FEATURES + NUM_DEMO_FEATURES`` (== IN_CHANNELS).
+    feature width is ``NUM_NODE_FEATURES + NUM_DEMO_FEATURES`` (== IN_CHANNELS). Node ``HOME_NODE``
+    of every graph is that user's home and is labelled visited, as it always is in the real data.
     """
     rng = torch.Generator().manual_seed(seed)
     graphs = []
     for g in range(num_graphs):
         x = torch.rand(num_nodes, NUM_NODE_FEATURES, generator=rng)
         y = torch.randint(0, 2, (num_nodes, 1), generator=rng).float()
+        x[:, IS_HOME_IDX] = 0.0
+        x[HOME_NODE, IS_HOME_IDX] = 1.0
+        y[HOME_NODE] = 1.0
         # simple chain edges
         src = torch.arange(num_nodes - 1)
         dst = torch.arange(1, num_nodes)
@@ -89,14 +103,22 @@ def make_module(
         lambda_reg=lambda_reg,
         schedule_lr=schedule_lr,
         store_score_vectors=store_score_vectors,
+        is_home_idx=IS_HOME_IDX,
+        home_hop_distance=chain_hop_distance(),
     )
 
 
 def force_positive_per_graph(batch: pyg.data.Batch) -> None:
-    """Set the first node of each graph positive so ranking metrics are defined."""
+    """Set a non-home node of each graph positive so ranking metrics survive the home exclusion."""
     for i in range(batch.num_graphs):
-        idx = (batch.batch == i).nonzero(as_tuple=True)[0][0]
+        idx = (batch.batch == i).nonzero(as_tuple=True)[0][HOME_NODE + 1]
         batch.y[idx] = 1.0
+
+
+def scored_nodes(batch: pyg.data.Batch, graph: int) -> torch.Tensor:
+    """Row indices of the nodes of one graph that the ranking metrics score."""
+    rows = (batch.batch == graph).nonzero(as_tuple=True)[0]
+    return rows[rows != rows[HOME_NODE]]
 
 
 def capture_logs(module: ActivityGraphModule, monkeypatch) -> dict:
@@ -148,7 +170,13 @@ class TestTrainingStep:
         loss_low = module_low.training_step(batch, 0).item()
 
         # reuse identical weights, only the pos_weight differs
-        module_high = ActivityGraphModule(model=module_low.model, lr=1e-3, pos_weight=torch.tensor(10.0))
+        module_high = ActivityGraphModule(
+            model=module_low.model,
+            lr=1e-3,
+            pos_weight=torch.tensor(10.0),
+            is_home_idx=IS_HOME_IDX,
+            home_hop_distance=chain_hop_distance(),
+        )
         monkeypatch.setattr(module_high, "log", lambda *a, **kw: None)
         module_high.eval()
         loss_high = module_high.training_step(batch, 0).item()
@@ -187,8 +215,10 @@ class TestValidationStep:
         """torchmetrics precision/recall/ndcg must match the per-graph metrics.py functions.
 
         One graph == one user_id, so the Retrieval* grouping is per graph and the unweighted mean
-        over non-empty groups equals the old per-graph average. MRR is excluded on purpose:
-        RetrievalMRR uses first-relevant-rank, not mean-over-positives, so its value differs.
+        over non-empty groups equals the old per-graph average. The reference is computed on the
+        scored nodes only, since the home node is dropped from both the candidates and the labels.
+        MRR is excluded on purpose: RetrievalMRR uses first-relevant-rank, not mean-over-positives,
+        so its value differs.
         """
         module = make_module()
         k = module.k
@@ -198,11 +228,13 @@ class TestValidationStep:
 
         module.eval()
         with torch.no_grad():
-            out = module(extract_features(batch, module.full_info), batch.edge_index, batch.edge_attr, batch.batch)
+            out = module(
+                extract_features(batch, module.full_info, IS_HOME_IDX), batch.edge_index, batch.edge_attr, batch.batch
+            )
 
         precisions, recalls, ndcgs = [], [], []
         for i in range(batch.num_graphs):
-            mask = batch.batch == i
+            mask = scored_nodes(batch, i)
             scores = out[mask].squeeze()
             labels = batch.y[mask].squeeze()
             if labels.sum().int().item() == 0:
@@ -273,6 +305,7 @@ class TestTestStep:
             "test_true_size",
             "test_sampled_recall",
             "test_sampled_size",
+            "test_r_precision_home_incl",
         }
         assert expected.issubset(logged.keys())
 
@@ -285,7 +318,12 @@ class TestUseDemographics:
         model = NodeMLP(num_layers=2, in_channels=in_channels, hidden_channels=8, out_channels=1)
 
         return ActivityGraphModule(
-            model=model, lr=1e-3, pos_weight=torch.tensor(2.0), use_demographics=use_demographics
+            model=model,
+            lr=1e-3,
+            pos_weight=torch.tensor(2.0),
+            use_demographics=use_demographics,
+            is_home_idx=IS_HOME_IDX,
+            home_hop_distance=chain_hop_distance(),
         )
 
     def test_demographics_are_concatenated_by_default(self):
@@ -302,8 +340,8 @@ class TestUseDemographics:
     def test_the_two_arms_see_different_features(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
 
-        with_demo = extract_features(batch, full_info=False, use_demographics=True)
-        without_demo = extract_features(batch, full_info=False, use_demographics=False)
+        with_demo = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=True)
+        without_demo = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
 
         assert with_demo.shape[1] == without_demo.shape[1] + NUM_DEMO_FEATURES
 
@@ -314,6 +352,8 @@ class TestTrainRanking:
             model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
             lr=1e-3,
             pos_weight=torch.tensor(2.0),
+            is_home_idx=IS_HOME_IDX,
+            home_hop_distance=chain_hop_distance(),
             **kwargs,
         )
 
@@ -369,16 +409,167 @@ class TestScoreVectors:
         assert all(len(vector) == 8 for vector in vectors)
 
     def test_vectors_reproduce_the_reported_r_precision(self, monkeypatch):
-        """The stored scores must be the quantity actually ranked, in node order, or the health checks lie."""
+        """The stored scores must be the quantity actually ranked, in node order, or the health checks lie.
+
+        The vector covers every node, the home one included, so the reported score is recovered by
+        dropping the home node from it first - the same exclusion the module applies.
+        """
         module, batch = self._tested(monkeypatch, store_score_vectors=True)
 
         for row, user_id in enumerate(module.per_user_columns["user_id"]):
             graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
-            target = batch.y.squeeze(-1)[batch.batch == graph]
+            keep = torch.ones(batch.num_nodes // batch.num_graphs, dtype=torch.bool)
+            keep[HOME_NODE] = False
+
+            target = batch.y.squeeze(-1)[batch.batch == graph][keep]
+            scores = torch.tensor(module.per_user_score_vectors[row])[keep]
             r = int(target.sum())
 
-            top_r = torch.tensor(module.per_user_score_vectors[row]).topk(r).indices
+            top_r = scores.topk(r).indices
             assert float(target[top_r].sum() / r) == pytest.approx(module.per_user_columns["r_precision"][row])
+
+
+class TestHomeExclusion:
+    """The home node is neither a candidate nor a member of ``RG_i`` when scoring."""
+
+    def _tested(self, monkeypatch):
+        module = make_module()
+        batch = make_batch(num_graphs=3, num_nodes=8, seed=11)
+        force_positive_per_graph(batch)
+        logged = capture_logs(module, monkeypatch)
+
+        module.eval()
+        with torch.no_grad():
+            module.test_step(batch, 0)
+        module.on_test_epoch_end()
+
+        return module, batch, logged
+
+    def test_the_home_node_is_dropped_from_the_realised_set(self, monkeypatch):
+        module, batch, _ = self._tested(monkeypatch)
+
+        for row, user_id in enumerate(module.per_user_columns["user_id"]):
+            graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
+            full = int(batch.y.squeeze(-1)[batch.batch == graph].sum())
+
+            assert module.per_user_columns["n_pos_home_incl"][row] == full
+            assert module.per_user_columns["n_pos"][row] == full - 1
+
+    def test_a_model_that_only_finds_home_scores_zero(self, monkeypatch):
+        """The naive headline is ~90% home identification, so ranking home first must now buy nothing."""
+        module = make_module()
+        batch = make_batch(num_graphs=2, num_nodes=8, seed=5)
+        capture_logs(module, monkeypatch)
+
+        # Each user visits their home and exactly one other node.
+        is_home = batch.x[:, IS_HOME_IDX] > 0.0
+        batch.y = is_home.clone().float().unsqueeze(-1)
+        for i in range(batch.num_graphs):
+            batch.y[scored_nodes(batch, i)[0]] = 1.0
+
+        # Home on top, and the one visited node ranked below every unvisited one.
+        home_only = -batch.y.clone()
+        home_only[is_home] = 10.0
+        monkeypatch.setattr(module, "compute_logits", lambda _batch: home_only)
+
+        with torch.no_grad():
+            module.test_step(batch, 0)
+
+        assert module.test_metrics["test_r_precision"].compute().item() == pytest.approx(0.0)
+        assert module.test_r_precision_home_incl.compute().item() > 0.0
+
+    def test_logs_how_many_users_the_headline_covers_and_drops(self, monkeypatch):
+        """One user realises only their own home, so the exclusion leaves them nothing to rank."""
+        module = make_module()
+        batch = make_batch(num_graphs=2, num_nodes=8, seed=3)
+        force_positive_per_graph(batch)
+
+        # Strip user 1 back to a home-only realised set: their home stays positive, nothing else.
+        batch.y[scored_nodes(batch, 1)] = 0.0
+
+        logged = capture_logs(module, monkeypatch)
+        with torch.no_grad():
+            module.test_step(batch, 0)
+        module.on_test_epoch_end()
+
+        assert logged["test_n_scored_users"] == 1
+        assert logged["test_n_dropped_users"] == 1
+        # The home-included target still covers both, which is why the counts have to be recorded.
+        assert logged["test_r_precision_home_incl"] > 0.0
+
+    def test_nothing_is_dropped_when_every_user_keeps_a_non_home_node(self, monkeypatch):
+        _, _, logged = self._tested(monkeypatch)
+
+        assert logged["test_n_scored_users"] == 3
+        assert logged["test_n_dropped_users"] == 0
+
+    def test_the_counts_are_logged_on_validation_too(self, monkeypatch):
+        module = make_module()
+        batch = make_batch(num_graphs=2, num_nodes=8, seed=7)
+        force_positive_per_graph(batch)
+        logged = capture_logs(module, monkeypatch)
+
+        with torch.no_grad():
+            module.validation_step(batch, 0)
+        module.on_validation_epoch_end()
+
+        assert logged["val_n_scored_users"] == 2
+        assert logged["val_n_dropped_users"] == 0
+
+    def test_the_sampled_set_never_draws_the_home_node(self, monkeypatch):
+        """With exactly ``k`` candidates left after the exclusion, PPS must draw all of them.
+
+        A home node still in the pool could displace one of them, so a recall below 1.0 would mean
+        the sampled set had spent part of its budget on the user's own home.
+        """
+        module = make_module()
+        batch = make_batch(num_graphs=2, num_nodes=module.k + 1, seed=9)
+        force_positive_per_graph(batch)
+        capture_logs(module, monkeypatch)
+
+        # A model that would otherwise put nearly all of its sampling weight on home.
+        home_only = torch.full((batch.num_nodes, 1), -10.0)
+        home_only[batch.x[:, IS_HOME_IDX] > 0.0] = 10.0
+        monkeypatch.setattr(module, "compute_logits", lambda _batch: home_only)
+
+        with torch.no_grad():
+            module.test_step(batch, 0)
+
+        assert module.test_sampled_recall.compute().item() == pytest.approx(1.0)
+
+
+class TestRankingView:
+    """A ranking metric added later has to inherit the exclusion from the view, not re-apply a mask."""
+
+    def _step(self):
+        module = make_module()
+        batch = make_batch(num_graphs=2, num_nodes=8, seed=13)
+        force_positive_per_graph(batch)
+
+        with torch.no_grad():
+            return module._compute_evaluation_tensors(batch), batch
+
+    def test_the_ranking_view_covers_the_scored_candidates_only(self):
+        step, batch = self._step()
+        n_scored = batch.num_nodes - batch.num_graphs
+
+        for values in (step.ranking.logits, step.ranking.probs, step.ranking.target, step.ranking.users):
+            assert values.shape == (n_scored,)
+
+    def test_the_full_tensors_still_cover_every_node(self):
+        """The loss, the BCE diagnostics and the sanity metric read these on purpose."""
+        step, batch = self._step()
+
+        for values in (step.probs, step.target, step.users):
+            assert values.shape == (batch.num_nodes,)
+
+    def test_no_home_node_survives_into_the_ranking_view(self):
+        step, batch = self._step()
+        home_rows = (batch.x[:, IS_HOME_IDX] > 0.0).nonzero(as_tuple=True)[0]
+
+        assert not step.ranking.scored[home_rows].any()
+        # Every user still has candidates left, so none of them drops out of the view.
+        assert set(step.ranking.users.tolist()) == set(batch.user_id.tolist())
 
 
 class TestConfigureOptimizers:
@@ -424,9 +615,7 @@ def make_home_batch(
         graph_rows = (batch.batch == i).nonzero(as_tuple=True)[0]
         batch.x[graph_rows[h], is_home_idx] = 1.0
 
-    idx = torch.arange(num_nodes)
-    home_hop_distance = (idx[:, None] - idx[None, :]).abs().float()
-    return batch, home_hop_distance, is_home_idx
+    return batch, chain_hop_distance(num_nodes), is_home_idx
 
 
 def make_home_pe_module(
@@ -485,17 +674,11 @@ class TestHomePositionalEncoding:
     def test_extract_features_appends_pe_columns(self):
         """extract_features widens by exactly n_bins when the home PE is supplied."""
         batch, hhd, is_home_idx = make_home_batch()
-        base = extract_features(batch, full_info=False)
+        base = extract_features(batch, full_info=False, is_home_idx=is_home_idx)
         with_pe = extract_features(
             batch, full_info=False, home_hop_distance=hhd, is_home_idx=is_home_idx, home_pe_bins=8
         )
         assert with_pe.shape[1] - base.shape[1] == 8
-
-    def test_extract_features_requires_is_home_idx(self):
-        """Supplying home_hop_distance without is_home_idx is a configuration error."""
-        batch, hhd, _ = make_home_batch()
-        with pytest.raises(ValueError):
-            extract_features(batch, full_info=False, home_hop_distance=hhd, is_home_idx=None)
 
     def test_extracted_features_dim_adds_bins(self):
         """The in_channels helper accounts for the PE so model width matches extract_features output."""
@@ -503,12 +686,6 @@ class TestHomePositionalEncoding:
         base = extracted_features_dim(ds, use_home_pe=False)
         with_pe = extracted_features_dim(ds, use_home_pe=True)
         assert with_pe - base == HOME_PE_BINS
-
-    def test_module_requires_hop_distance(self):
-        """use_home_pe=True without home_hop_distance must raise, not silently no-op."""
-        model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
-        with pytest.raises(ValueError):
-            ActivityGraphModule(model=model, lr=1e-3, pos_weight=torch.tensor(2.0), use_home_pe=True)
 
     def test_training_step_is_finite(self, monkeypatch):
         """A full training_step with the PE enabled returns a finite scalar loss."""

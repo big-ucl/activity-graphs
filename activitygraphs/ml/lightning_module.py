@@ -1,6 +1,7 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Literal, cast
 
 import lightning as L
@@ -13,7 +14,7 @@ from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
-from activitygraphs.ml.dataset import ActivityDataset
+from activitygraphs.ml.dataset import ActivityDataset, is_home_node_mask
 from activitygraphs.ml.losses import BCELoss, Loss
 from activitygraphs.ml.metrics import (
     DEFAULT_HOP_BANDS,
@@ -26,14 +27,18 @@ from activitygraphs.ml.sampling import pps_sampling
 
 HOME_PE_BINS = 8
 
+# Sampling weight given to a node outside the scored candidate set: its sigmoid is zero, so PPS
+# never draws it while any scored candidate is left.
+EXCLUDED_LOGIT = -1e9
+
 
 def extract_features(
     batch: pyg.data.Batch,
     full_info: bool,
+    is_home_idx: int,
     use_demographics: bool = True,
     pop_logit: torch.Tensor | None = None,
     home_hop_distance: torch.Tensor | None = None,
-    is_home_idx: int | None = None,
     home_pe_bins: int = HOME_PE_BINS,
 ) -> torch.Tensor:
     """Return node features for a batch.
@@ -61,18 +66,11 @@ def extract_features(
         x = torch.cat([x, pop_logit_col], dim=-1)
 
     if home_hop_distance is not None:
-        if is_home_idx is None:
-            raise ValueError("``is_home_idx`` is required for the home-anchored PE")
-
         home_pe = create_home_distance_encoding(batch, home_hop_distance, is_home_idx, n_bins=home_pe_bins)
         x = torch.cat([x, home_pe], dim=-1)
 
-    if use_demographics and batch.graph_x is not None:
-        if batch.batch is not None:
-            demo = batch.graph_x[batch.batch]
-        else:
-            demo = batch.graph_x.expand(x.shape[0], -1)
-        x = torch.cat([x, demo], dim=-1)
+    if use_demographics:
+        x = torch.cat([x, batch.graph_x[batch.batch]], dim=-1)
 
     if not full_info:
         return x
@@ -117,18 +115,14 @@ def create_pop_logit_column(pop_logit: torch.Tensor, batch: pyg.data.Batch, stan
 
 def _compute_node_index_within_graph(batch: pyg.data.Batch, device: torch.device) -> torch.Tensor:
     """Index of each node within its own graph (0..N-1), aligned to batch.x row order."""
-    n = batch.num_nodes
-    if getattr(batch, "batch", None) is None:
-        return torch.arange(n, device=device)
-
-    return torch.arange(n, device=device) - batch.ptr.to(device)[batch.batch]
+    return torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
 
 
 def compute_home_hops(batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
     """Hop distance from each node to the user's home node in the graph, shape ``[num_nodes]``."""
     device = batch.x.device
     node_idx = _compute_node_index_within_graph(batch, device)
-    is_home = batch.x[:, is_home_idx] > 0.0
+    is_home = is_home_node_mask(batch.x, is_home_idx)
 
     home = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
     home[batch.batch[is_home]] = node_idx[is_home]
@@ -148,6 +142,38 @@ def create_home_distance_encoding(
     return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)  # [num_nodes, n_bins]
 
 
+@dataclass(frozen=True)
+class RankingTensors:
+    """Set of tensors read by the ranking metrics (R-Precision, Recall@K, etc). The tensors are restricted to the
+    non-excluded/scored candidates (i.e. home node is excluded)."""
+
+    logits: Tensor
+    probs: Tensor
+    target: Tensor
+    users: Tensor
+    scored: Tensor
+
+    def restrict(self, values: Tensor) -> Tensor:
+        """Restrict a tensor to the non-excluded scored nodes."""
+        return values[self.scored]
+
+
+@dataclass(frozen=True)
+class EvaluationTensors:
+    """Set of tensors computed during the validation and testing steps. Metrics are computed using these tensors.
+    All nodes are included in the tensors, whereas the ``ranking`` field contains the set of tensors with the home node
+    excluded (used for the ranking metrics)."""
+
+    logits: Tensor
+    loss: Tensor
+    bce: Tensor
+    bce_weighted: Tensor
+    probs: Tensor
+    target: Tensor
+    users: Tensor
+    ranking: RankingTensors
+
+
 class ActivityGraphModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
 
@@ -158,6 +184,7 @@ class ActivityGraphModule(L.LightningModule):
         model: Any ``nn.Module`` with the GNN forward signature.
         lr: Initial learning rate for AdamW.
         pos_weight: Scalar positive-class weight for BCE loss, computed from the train split.
+        is_home_idx: Column index of ``is_home`` in the node feature matrix.
         loss: ``Loss`` instance. Defaults to BCE if none.
         reg: Optional regularisation type; only ``"l1"`` is supported.
         lambda_reg: L1 coefficient (ignored when ``reg`` is None).
@@ -166,9 +193,8 @@ class ActivityGraphModule(L.LightningModule):
         k: Rank cutoff for precision, recall, and NDCG metrics.
         weight_decay: AdamW weight decay.
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
-        home_hop_distance: Optional ``[num_nodes, num_nodes]`` contiguity-hop distance matrix
-            enabling distance-from-home hop-band ranking metrics at test time. Requires ``is_home_idx``.
-        is_home_idx: Column index of ``is_home`` in the node feature matrix (for the hop-band metrics).
+        home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix enabling
+            distance-from-home hop-band ranking metrics at test time.
         hop_bands: Hop-distance bands for the hop-band metrics.
         pop_logit: Logits of global per-node visit frequencies.
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
@@ -182,12 +208,15 @@ class ActivityGraphModule(L.LightningModule):
     """
 
     pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
+    home_hop_distance: torch.Tensor  # registered buffer, same reason
 
     def __init__(
         self,
         model: torch.nn.Module,
         lr: float,
         pos_weight: torch.Tensor,
+        is_home_idx: int,
+        home_hop_distance: np.ndarray | torch.Tensor,
         loss: Loss | None = None,
         reg: str | None = None,
         lambda_reg: float = 0.01,
@@ -196,8 +225,6 @@ class ActivityGraphModule(L.LightningModule):
         k: int = 5,
         weight_decay: float = 1e-4,
         schedule_lr: bool = False,
-        home_hop_distance: np.ndarray | torch.Tensor | None = None,
-        is_home_idx: int | None = None,
         hop_bands: Collection[tuple[str, float, float]] = DEFAULT_HOP_BANDS,
         pop_logit: torch.Tensor | None = None,
         pop_mode: Literal["none", "offset", "feature"] = "none",
@@ -234,21 +261,18 @@ class ActivityGraphModule(L.LightningModule):
         self.log_train_ranking = log_train_ranking
         self.train_r_precision = RetrievalRPrecision() if log_train_ranking else None
 
+        self.val_r_precision_home_incl = RetrievalRPrecision()  # With home included metrics kept as sanity checks
+        self.test_r_precision_home_incl = RetrievalRPrecision()
+
         self.val_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
         self.test_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
 
-        # Metrics: Optional distance-from-home hop-band metrics (test time only).
+        # Metrics: distance-from-home hop-band metrics (test time only).
         self.is_home_idx = is_home_idx
-        if home_hop_distance is not None:
-            if is_home_idx is None:
-                raise ValueError("is_home_idx is required when home_hop_distance is provided.")
-            self.register_buffer(
-                "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
-            )
-            self.hop_band_metrics = HopBandMetrics(hop_bands, k)
-        else:
-            self.home_hop_distance = None
-            self.hop_band_metrics = None
+        self.register_buffer(
+            "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
+        )
+        self.hop_band_metrics = HopBandMetrics(hop_bands, k)
 
         # Hop-band results in long format (one row per band), populated by `on_test_epoch_end`.
         self.hop_band_rows: list[dict[str, float | str]] = []
@@ -282,9 +306,6 @@ class ActivityGraphModule(L.LightningModule):
             self.pop_logit = None
 
         # Training: Home-anchored positional encodings injection
-        if use_home_pe and home_hop_distance is None:
-            raise ValueError("`use_home_pe=True` requires `home_hop_distance` to be provided.")
-
         self.use_home_pe = use_home_pe
         self.home_pe_bins = home_pe_bins
 
@@ -322,8 +343,8 @@ class ActivityGraphModule(L.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
         if self.train_r_precision is not None:
-            users = batch.user_id[batch.batch]
-            self.train_r_precision.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
+            ranking_tensors = self._compute_ranking_tensors(batch, out)
+            self.train_r_precision.update(ranking_tensors.probs, ranking_tensors.target, indexes=ranking_tensors.users)
             self.log(
                 "train_r_precision",
                 self.train_r_precision,
@@ -334,76 +355,132 @@ class ActivityGraphModule(L.LightningModule):
 
         return loss
 
-    def _common_val_test_step(self, batch) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def _compute_ranking_tensors(self, batch: pyg.data.Batch, logits: Tensor) -> RankingTensors:
+        scored_mask = ~is_home_node_mask(batch.x, self.is_home_idx)
+        flat_logits = logits.squeeze(-1)
+
+        return RankingTensors(
+            logits=flat_logits[scored_mask],
+            probs=flat_logits.sigmoid()[scored_mask],
+            target=batch.y.squeeze(-1).long()[scored_mask],
+            users=batch.user_id[batch.batch][scored_mask],
+            scored=scored_mask,
+        )
+
+    def _compute_evaluation_tensors(self, batch) -> EvaluationTensors:
         out = self.compute_logits(batch)
 
         generator = torch.Generator(device=out.device).manual_seed(42)
         loss = self.loss.loss_fn(out, batch, generator)
-
         bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
         bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
         probs = out.squeeze(-1).sigmoid()
         target = batch.y.squeeze(-1)
         users = batch.user_id[batch.batch]
+        ranking_tensors = self._compute_ranking_tensors(batch, out)
 
-        return out, loss, bce, bce_weighted, probs, target, users
+        return EvaluationTensors(
+            logits=out,
+            loss=loss,
+            bce=bce,
+            bce_weighted=bce_weighted,
+            probs=probs,
+            target=target,
+            users=users,
+            ranking=ranking_tensors,
+        )
+
+    def _num_scored_and_dropped_users(self, stage: Literal["val", "test"]) -> dict[str, float]:
+        """Returns a dictionary of the number of scored and dropped users for a given stage. Each key is
+        ``{stage}_{name}``, with name being either "n_scored_users" or "n_dropped_users"."""
+        collection = self.val_metrics if stage == "val" else self.test_metrics
+        r_precision: RetrievalRPrecision = cast(RetrievalRPrecision, collection[f"{stage}_r_precision"])
+        user_counts = r_precision.user_counts()
+
+        return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
     def validation_step(self, batch, batch_idx: int) -> None:
-        out, loss, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
+        eval_tensors = self._compute_evaluation_tensors(batch)
+        ranking_tensors = eval_tensors.ranking
 
-        # Log losses
+        # Log loss metrics
+        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": batch.num_nodes}
         if self.loss.name != "bce":
-            self.log(f"val_{self.loss.name}", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
-        self.log("val_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
-        self.log("val_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
+            self.log(f"val_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
+        self.log("val_bce", eval_tensors.bce, **log_loss_kwargs)
+        self.log("val_bce_weighted", eval_tensors.bce_weighted, **log_loss_kwargs)
 
+        # Ranking metrics
         # torchmetrics Retrieval* treat preds as probabilities and drop preds <= 0, so feed sigmoid
         # (monotonic, preserves ranking) rather than raw logits.
-        self.val_metrics.update(out.squeeze(-1).sigmoid(), target.long(), indexes=users)
-        self.val_calibration.update(probs, target.long())
+        self.val_metrics.update(ranking_tensors.probs, ranking_tensors.target, indexes=ranking_tensors.users)
+        self.val_r_precision_home_incl.update(  # includes all nodes (home node included, sanity check)
+            eval_tensors.probs, eval_tensors.target.long(), indexes=eval_tensors.users
+        )
+
+        # Calibration metrics
+        self.val_calibration.update(eval_tensors.probs, eval_tensors.target.long())
 
     def on_validation_epoch_end(self) -> None:
         self.log_dict(self.val_metrics.compute())
+        self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
+
+        self.log("val_r_precision_home_incl", self.val_r_precision_home_incl.compute())
+        self.val_r_precision_home_incl.reset()
 
         self.log("val_calibration_l1", self.val_calibration.compute())
         self.val_calibration.reset()
 
     def test_step(self, batch, batch_idx: int) -> None:
-        out, loss, bce, bce_weighted, probs, target, users = self._common_val_test_step(batch)
+        eval_tensors = self._compute_evaluation_tensors(batch)
+        ranking = eval_tensors.ranking
 
-        # Log BCEs
+        # Log loss metrics
+        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": batch.num_nodes}
         if self.loss.name != "bce":
-            self.log(f"test_{self.loss.name}", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
-        self.log("test_bce", bce, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
-        self.log("test_bce_weighted", bce_weighted, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
+            self.log(f"test_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
+        self.log("test_bce", eval_tensors.bce, **log_loss_kwargs)
+        self.log("test_bce_weighted", eval_tensors.bce_weighted, **log_loss_kwargs)
 
-        # Update other metrics, feed sigmoid to conform to torchmetrics calling convention (see validation step)
-        self.test_metrics.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
-        self.test_per_user.update(out.squeeze(-1).sigmoid(), batch.y.squeeze(-1).long(), indexes=users)
+        # Ranking metrics
+        self.test_metrics.update(  # Feed sigmoid to conform to torchmetrics calling convention (see validation step)
+            ranking.probs, ranking.target, indexes=ranking.users
+        )
+        self.test_r_precision_home_incl.update(  # includes all nodes (home node included, sanity check)
+            eval_tensors.probs, eval_tensors.target.long(), indexes=eval_tensors.users
+        )
 
-        # Update hop-band metrics
-        if self.hop_band_metrics is not None and self.is_home_idx is not None:
-            hops = compute_home_hops(batch, self.home_hop_distance, self.is_home_idx)
-            self.hop_band_metrics.update(hops, out.squeeze(-1), batch.y.squeeze(-1).long(), batch.user_id[batch.batch])
+        # Per-user metrics
+        self.test_per_user.update(  # All nodes included, drops home node itself instead to allow full per-user comparison
+            eval_tensors.probs, eval_tensors.target.long(), indexes=eval_tensors.users, exclude=~ranking.scored
+        )
 
-        # Update BCE calibration
-        self.test_calibration.update(probs, target.long())
+        # Hop-band metrics
+        hops = ranking.restrict(compute_home_hops(batch, self.home_hop_distance, self.is_home_idx))
+        self.hop_band_metrics.update(hops, ranking.logits, ranking.target, ranking.users)
 
-        # Update true and predicted expected |RG_i| set sizes
-        for idx in torch.unique(batch.user_id):
-            m = users == idx
-            self.test_pred_size.update(probs[m].sum())
-            self.test_true_size.update(target[m].sum())
+        # Calibration metrics
+        self.test_calibration.update(eval_tensors.probs, eval_tensors.target.long())
+
+        # True and predicted expected |RG_i| set sizes
+        for idx in torch.unique(ranking.users):
+            m = ranking.users == idx
+            self.test_pred_size.update(ranking.probs[m].sum())
+            self.test_true_size.update(ranking.target[m].sum())
 
         # Update sampled set recall and size metrics
-        self._update_sampled_sets_metrics(batch, out)
+        self._update_sampled_sets_metrics(batch, eval_tensors)
 
-    def _update_sampled_sets_metrics(self, batch, out, n_draws: int = 8):
-        logits = out.squeeze(-1)
-        target = batch.y.squeeze(-1).float()
-        users = batch.user_id[batch.batch]
-        gen = torch.Generator(device=out.device).manual_seed(42)
+    def _update_sampled_sets_metrics(self, batch: pyg.data.Batch, step: EvaluationTensors, n_draws: int = 8):
+        # The one ranking read that cannot take the narrow view: ``pps_sampling`` groups by
+        # ``batch.batch``, so it needs a tensor per node. Excluded nodes are given a sampling weight
+        # of zero instead of being removed, which leaves that grouping intact.
+        excluded = ~step.ranking.scored
+        logits = step.logits.squeeze(-1).masked_fill(excluded, EXCLUDED_LOGIT)
+        target = step.target.float().masked_fill(excluded, 0.0)
+        users = step.users
+        gen = torch.Generator(device=logits.device).manual_seed(42)
 
         # pos_weight=None under plain-BCE training (the default); pass float(self.pos_weight) only
         # if the model was trained with weighted BCE.
@@ -420,6 +497,7 @@ class ActivityGraphModule(L.LightningModule):
 
     def on_test_epoch_end(self) -> None:
         self.log_dict(self.test_metrics.compute())
+        self.log_dict(self._num_scored_and_dropped_users("test"))
         self.test_metrics.reset()
 
         # Not logged: these are per-user vectors, not scalars. Persisted by `run_experiment`.
@@ -427,22 +505,26 @@ class ActivityGraphModule(L.LightningModule):
         self.per_user_score_vectors = self.test_per_user.score_vectors().cpu().tolist()
         self.test_per_user.reset()
 
-        if self.hop_band_metrics is not None:
-            self.hop_band_rows = self.hop_band_metrics.compute()
-            self.log_dict(hop_band_scalars(self.hop_band_rows))
-            self.hop_band_metrics.reset()
+        self.hop_band_rows = self.hop_band_metrics.compute()
+        self.log_dict(hop_band_scalars(self.hop_band_rows))
+        self.hop_band_metrics.reset()
+
+        self.log("test_r_precision_home_incl", self.test_r_precision_home_incl.compute())
+        self.test_r_precision_home_incl.reset()
 
         self.log("test_calibration_l1", self.test_calibration.compute())
         self.test_calibration.reset()
 
         self.log("test_pred_size", self.test_pred_size.compute())
-        self.log("test_true_size", self.test_true_size.compute())
         self.test_pred_size.reset()
+
+        self.log("test_true_size", self.test_true_size.compute())
         self.test_true_size.reset()
 
         self.log("test_sampled_recall", self.test_sampled_recall.compute())
-        self.log("test_sampled_size", self.test_sampled_size.compute())
         self.test_sampled_recall.reset()
+
+        self.log("test_sampled_size", self.test_sampled_size.compute())
         self.test_sampled_size.reset()
 
     def configure_optimizers(self):
@@ -467,10 +549,10 @@ class ActivityGraphModule(L.LightningModule):
         x = extract_features(
             batch,
             self.full_info,
+            self.is_home_idx,
             use_demographics=self.use_demographics,
             pop_logit=pop_logits,
             home_hop_distance=home_hop_distance,
-            is_home_idx=self.is_home_idx,
             home_pe_bins=self.home_pe_bins,
         )
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)

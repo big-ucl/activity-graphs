@@ -99,7 +99,9 @@ class TestAggregateFrame:
 class TestHopBandTableLogger:
     def _make_module(self, rows: list[dict]) -> ActivityGraphModule:
         model = NodeMLP(num_layers=2, in_channels=4, hidden_channels=8, out_channels=1)
-        module = ActivityGraphModule(model=model, lr=1e-3, pos_weight=torch.tensor(1.0))
+        module = ActivityGraphModule(
+            model=model, lr=1e-3, pos_weight=torch.tensor(1.0), is_home_idx=0, home_hop_distance=torch.zeros(4, 4)
+        )
         module.hop_band_rows = rows
         return module
 
@@ -122,12 +124,5 @@ class TestHopBandTableLogger:
         trainer = types.SimpleNamespace(logger=MagicMock(spec=CSVLogger))
 
         HopBandTableLogger().on_test_end(trainer, self._make_module(rows))
-
-        trainer.logger.experiment.log.assert_not_called()
-
-    def test_no_op_when_hop_bands_disabled(self):
-        trainer = types.SimpleNamespace(logger=MagicMock(spec=WandbLogger))
-
-        HopBandTableLogger().on_test_end(trainer, self._make_module([]))
 
         trainer.logger.experiment.log.assert_not_called()

@@ -54,7 +54,7 @@ COLS_EXCLUDED_FROM_FEATURES = [
 # Single source of truth for the per-user spatial feature columns, in the order they are
 # appended after the network node features in the concatenated node feature matrix `x`.
 # `is_home` must stay first so that the derived home-column index (see ActivityDataset)
-# remains valid for `extract_is_home` / the conditional baseline.
+# remains valid for `is_home_node_mask`, the conditional baseline and the home exclusion.
 SPATIAL_FEATURE_NAMES = ["is_home"]
 
 # =========================================

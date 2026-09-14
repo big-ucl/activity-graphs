@@ -9,6 +9,7 @@ import torch_geometric as pyg
 from torch_geometric.utils import to_dense_batch
 
 from activitygraphs.config import LossConfig
+from activitygraphs.ml.dataset import is_home_node_mask
 
 
 class LossFn(Protocol):
@@ -109,14 +110,14 @@ def _near_home_negative_mask(
 ) -> torch.Tensor:
     """Boolean ``[B, N]`` mask of unvisited nodes within ``hard_k`` hops of each user's home.
 
-    Built from the same home-index logic as ``_update_hop_band_metrics``. Rows whose near-home
+    Built from the same home-index logic as ``compute_home_hops``. Rows whose near-home
     pool is empty are left all-False; the caller falls back to all unvisited for those users.
     """
     device = batch.x.device
     distance_matrix = distance_matrix.to(device)
 
     node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
-    is_home = batch.x[:, is_home_idx] > 0.0
+    is_home = is_home_node_mask(batch.x, is_home_idx)
 
     home_idx_per_graph = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
     home_idx_per_graph[batch.batch[is_home]] = node_idx[is_home]

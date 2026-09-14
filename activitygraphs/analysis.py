@@ -20,10 +20,22 @@ from activitygraphs.config import AnalysisConfig
 from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
 
+# Per-user column holding |RG_i| before the home node was excluded from it.
+REALISED_SIZE_COLUMN = "n_pos_home_incl"
+
+# Aggregate column holding the home-included R-precision, kept as a sanity check beside the headline.
+DIAGNOSTIC_METRIC_COLUMN = "test_r_precision_home_incl"
+
+# Aggregate columns holding the number of users (used for average of main metric).
+SCORED_USERS_COLUMN = "test_n_scored_users"
+DROPPED_USERS_COLUMN = "test_n_dropped_users"
+
 DEFAULT_ANALYSIS = AnalysisConfig(
     reference_model="ConditionalNodeMarginal",
     main_metric="test_r_precision",
+    diagnostic_metric=DIAGNOSTIC_METRIC_COLUMN,
     per_user_metric="r_precision",
+    min_realised_size=3,
     occupancy_thresholds=[10, 25, 60],
     hop_models=None,
     run=None,
@@ -167,6 +179,80 @@ def paired_comparison(
     return pl.DataFrame(rows).sort("mean_diff", descending=True)
 
 
+def _restrict_to_realised_size(per_user_results: pl.DataFrame, min_size: int) -> pl.DataFrame:
+    """Keep only the test users whose realised set (incl. home node) has at least ``min_size`` nodes. Rows that are not
+    per-user rows (the aggregate and score-vector stages) are not affected.
+    """
+    is_aggregate_stage = pl.col("stage") != PER_USER_STAGE
+    is_realised_size_large_enough = pl.col(REALISED_SIZE_COLUMN) >= min_size
+
+    return per_user_results.filter(is_aggregate_stage | is_realised_size_large_enough)
+
+
+def _num_scored_dropped_users(aggregate_results: pl.DataFrame) -> tuple[int, int]:
+    """Number of test users that were scored and dropped."""
+    return (
+        int(aggregate_results[SCORED_USERS_COLUMN].drop_nulls().first()),
+        int(aggregate_results[DROPPED_USERS_COLUMN].drop_nulls().first()),
+    )
+
+
+def realised_size_summary(per_user_results: pl.DataFrame, n_dropped: int) -> pl.DataFrame:
+    """Summary of the distribution of realised set sizes |RG_i| by number of users.
+
+    Returns:
+        Frame of ``n_pos_home_incl, scored, n_users, share_of_users``, sorted by size.
+    """
+    user_realised_set_sizes = (
+        per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", REALISED_SIZE_COLUMN).unique()
+    )
+
+    # Frame of num_users by |RG_i|, does not include the dropped users
+    num_users_by_realised_size = (
+        user_realised_set_sizes.group_by(REALISED_SIZE_COLUMN).agg(n_users=pl.len()).with_columns(scored=pl.lit(True))
+    )
+
+    # Add the dropped users back in (only dropped when only home node was visited, so realised size is 1)
+    num_dropped_users = pl.DataFrame(
+        {REALISED_SIZE_COLUMN: [1], "n_users": [n_dropped], "scored": [False]},
+        schema_overrides={
+            REALISED_SIZE_COLUMN: num_users_by_realised_size.schema[REALISED_SIZE_COLUMN],
+            "n_users": pl.UInt32,
+        },
+    )
+
+    combined = (
+        pl.concat([num_users_by_realised_size, num_dropped_users]) if n_dropped > 0 else num_users_by_realised_size
+    )
+
+    return combined.with_columns(share_of_users=pl.col("n_users") / pl.col("n_users").sum()).sort(
+        REALISED_SIZE_COLUMN, "scored"
+    )
+
+
+def per_user_metric_summary(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
+    """Mean +- sd over training seeds of a per-user metric, one row per model (per-user counterpart of
+    ``aggregate_metrics``), for reading the headline on a subset of the test users (e.g. where``|RG_i| >= 3``).
+
+    Returns:
+        Frame of ``name, n_users, n_seeds, mean, sd``, sorted by mean (descending).
+    """
+    per_user_rows = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
+    avg_metric_by_seed = per_user_rows.group_by("name", "seed").agg(n_users=pl.len(), seed_mean=pl.col(metric).mean())
+
+    return (
+        avg_metric_by_seed
+        .group_by("name")
+        .agg(
+            n_users=pl.col("n_users").max(),
+            n_seeds=pl.len(),
+            mean=pl.col("seed_mean").mean(),
+            sd=pl.col("seed_mean").std(),
+        )
+        .sort("mean", descending=True)
+    )
+
+
 def home_coverage_summary(per_user_results: pl.DataFrame) -> pl.DataFrame:
     """Computes the proportion of test users with a home node that does not appear in the training set, one row for
     ``home_seen_in_train=0`` and one row for ``home_seen_in_train=1``."""
@@ -194,9 +280,6 @@ def paired_comparison_by_home_coverage(
     Returns:
         Frame of ``home_seen_in_train, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``.
     """
-    if "home_seen_in_train" not in per_user_results.columns:
-        raise KeyError("per-user frame has no home_seen_in_train column; re-run to regenerate it")
-
     results_by_home_seen = []
     for seen in (True, False):
         subset = per_user_results.filter(pl.col("home_seen_in_train") == seen)
@@ -371,9 +454,6 @@ def check_model_health(
         home_median_rank`` and the ``*_sd`` standard deviation columns, sorted by ``user_invariance``
         descending (so that collapsed model at top).
     """
-    if "home_node" not in per_user_results.columns:
-        raise KeyError("per-user frame has no home_node column; the home-rank check needs a run that recorded it")
-
     home_by_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", "home_node").unique()
 
     model_seeds = score_vectors.select("name", "seed").unique().sort("name", "seed")
@@ -568,24 +648,43 @@ def print_report(
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
     aggregate, per_user = load_run(report_data_path, name, run)
 
+    n_scored, n_dropped = _num_scored_dropped_users(aggregate)
+
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200, float_precision=4):
         print(f"\n=== {name} run {run} ===")
+        print(f"test users: {n_scored} scored, {n_dropped} dropped due to empty RG_i")
 
         print(f"\n-- {analysis.main_metric}, avg over seeds --")
         print(aggregate_metrics(aggregate, analysis.main_metric))
 
+        print(f"\n-- {analysis.diagnostic_metric}, avg over seeds (sanity check) --")
+        print(aggregate_metrics(aggregate, analysis.diagnostic_metric))
+
         print(f"\n-- paired per-user {analysis.per_user_metric}, vs {analysis.reference_model} (avg over seeds) --")
         print(paired_comparison(per_user, analysis.reference_model, analysis.per_user_metric))
+
+        min_size = analysis.min_realised_size
+        restricted = _restrict_to_realised_size(per_user, min_size)
+
+        print("\n-- test users by |RG_i| --")
+        print(realised_size_summary(per_user, n_dropped))
+
+        print(f"\n-- per-user {analysis.per_user_metric} where |RG_i| >= {min_size}, avg over seeds --")
+        print(per_user_metric_summary(restricted, analysis.per_user_metric))
+
+        print(
+            f"\n-- paired per-user {analysis.per_user_metric} where |RG_i| >= {min_size}, vs {analysis.reference_model} --"
+        )
+        print(paired_comparison(restricted, analysis.reference_model, analysis.per_user_metric))
 
         print("\n-- hop bands (mean +- sd over seeds) --")
         print(compute_hop_band_table(aggregate, analysis.hop_models))
 
-        if "home_seen_in_train" in per_user.columns:
-            print("\n-- home coverage of test users --")
-            print(home_coverage_summary(per_user))
+        print("\n-- home coverage of test users --")
+        print(home_coverage_summary(per_user))
 
-            print(f"\n-- paired per-user {analysis.per_user_metric}, vs {analysis.reference_model}, by home coverage -")
-            print(paired_comparison_by_home_coverage(per_user, analysis.reference_model, analysis.per_user_metric))
+        print(f"\n-- paired per-user {analysis.per_user_metric}, vs {analysis.reference_model}, by home coverage --")
+        print(paired_comparison_by_home_coverage(per_user, analysis.reference_model, analysis.per_user_metric))
 
         if (report_data_path / f"{name}-scores-{run}.parquet").exists():
             print("\n-- model health checks --")

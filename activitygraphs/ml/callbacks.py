@@ -69,7 +69,7 @@ class HopBandTableLogger(L.Callback):
 
     The band is a column rather than part of a metric name, so a W&B custom chart can query
     ``runs.summaryTable`` and group bars by band across every run in the group. Does nothing when the
-    run is not logging to W&B or when hop-band metrics are disabled.
+    run is not logging to W&B.
     """
 
     def __init__(self, key: str = "hop_bands") -> None:
@@ -80,7 +80,7 @@ class HopBandTableLogger(L.Callback):
         # are built in the LightningModule's `on_test_epoch_end`, which runs after this callback's.
         assert isinstance(pl_module, ActivityGraphModule)
 
-        if not isinstance(trainer.logger, WandbLogger) or not pl_module.hop_band_rows:
+        if not isinstance(trainer.logger, WandbLogger):
             return
 
         import wandb

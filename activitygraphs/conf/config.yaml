@@ -49,7 +49,6 @@ train:
   save_score_vectors: true
   # Log `train_r_precision` on the training batches
   log_train_ranking: true
-
   # Enable Weights and Biases logging
   wandb: true
   # Weights and Biases project to submit logs to.
@@ -75,8 +74,12 @@ analysis:
   reference_model: ConditionalNodeMarginal
   # Aggregate test metric reported as mean +- sd over the training seeds.
   main_metric: test_r_precision
+  # Test metric with the home node included, reported alongside the main metric as a sanity check.
+  diagnostic_metric: test_r_precision_home_incl
   # Per-user metric used for the paired comparison.
   per_user_metric: r_precision
+  # Minimum size `|RG_i|` for a user to be included in analysis.
+  min_realised_size: 3
   # Home-zone occupancy thresholds `t` reported as `share_users_ge_{t}`.
   occupancy_thresholds: [ 10, 25, 60 ]
   # Restrict the hop-band table to these models. null reports all models.

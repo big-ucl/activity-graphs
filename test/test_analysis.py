@@ -10,6 +10,9 @@ import pytest
 import torch
 
 from activitygraphs.analysis import (
+    DROPPED_USERS_COLUMN,
+    REALISED_SIZE_COLUMN,
+    SCORED_USERS_COLUMN,
     _average_metric_over_seeds,
     _diff_sd_per_seed,
     _extract_band_and_metric,
@@ -25,6 +28,10 @@ from activitygraphs.analysis import (
     paired_comparison,
     check_popularity_correlation,
     check_user_invariance,
+    per_user_metric_summary,
+    realised_size_summary,
+    _restrict_to_realised_size,
+    _num_scored_dropped_users,
 )
 from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
 
@@ -47,7 +54,14 @@ def make_aggregate() -> pl.DataFrame:
         "test_hop_13+_n_pos": [10.0, 10.0, 10.0, None],
     }
 
-    return pl.DataFrame(rows).with_columns(**{col: pl.Series(values) for col, values in bands.items()})
+    return pl.DataFrame(rows).with_columns(
+        **{col: pl.Series(values) for col, values in bands.items()},
+        **{SCORED_USERS_COLUMN: pl.lit(90.0), DROPPED_USERS_COLUMN: pl.lit(10.0)},
+    )
+
+
+# Home-included |RG_i| of users 1, 2 and 3: only the last two clear the `min_realised_size` of 3.
+REALISED_SIZES = {1: 2, 2: 3, 3: 4}
 
 
 def make_per_user() -> pl.DataFrame:
@@ -62,7 +76,7 @@ def make_per_user() -> pl.DataFrame:
         for user, score in zip([1, 2, 3], [0.0, 0.5, 0.5], strict=True)
     ]
 
-    return pl.DataFrame(rows)
+    return pl.DataFrame(rows).with_columns(pl.col("user_id").replace_strict(REALISED_SIZES).alias(REALISED_SIZE_COLUMN))
 
 
 @dataclass
@@ -299,12 +313,6 @@ class TestModelHealthChecks:
 
         assert by_name["NodeMarginal"]["popularity_corr"] == pytest.approx(1.0)
 
-    def test_raises_without_home_nodes(self):
-        per_user = self._per_user().drop("home_node")
-
-        with pytest.raises(KeyError, match="home_node"):
-            check_model_health(self._score_vectors(), per_user)
-
     def test_raises_when_the_popularity_reference_is_missing(self):
         scores = self._score_vectors().filter(pl.col("name") != "NodeMarginal")
 
@@ -333,6 +341,99 @@ class TestSeedSummary:
     def test_unknown_metric_raises(self):
         with pytest.raises(KeyError):
             aggregate_metrics(make_aggregate(), "test_not_a_metric")
+
+
+class TestRealisedSizeRestriction:
+    """With home out of ``RG_i``, a user below ``|RG_i| >= 3`` keeps at most one non-home node."""
+
+    def test_users_below_the_threshold_are_dropped(self):
+        restricted = _restrict_to_realised_size(make_per_user(), min_size=3)
+
+        assert sorted(restricted["user_id"].unique().to_list()) == [2, 3]
+
+    def test_non_per_user_rows_pass_through(self):
+        """Aggregate and score-vector rows have no set size of their own and must survive the filter."""
+        per_user = make_per_user()
+        other = per_user.head(1).with_columns(
+            stage=pl.lit(SCORE_VECTOR_STAGE),
+            **{REALISED_SIZE_COLUMN: pl.lit(None, dtype=pl.Int64)},
+        )
+
+        restricted = _restrict_to_realised_size(pl.concat([per_user, other]), min_size=3)
+
+        assert restricted.filter(pl.col("stage") == SCORE_VECTOR_STAGE).height == 1
+
+    def test_summary_counts_each_user_once_across_models_and_seeds(self):
+        summary = realised_size_summary(make_per_user(), n_dropped=0)
+
+        assert summary[REALISED_SIZE_COLUMN].to_list() == [2, 3, 4]
+        assert summary["n_users"].to_list() == [1, 1, 1]
+        assert summary["share_of_users"].to_list() == pytest.approx([1 / 3, 1 / 3, 1 / 3])
+
+    def test_dropped_users_enter_the_denominator(self):
+        """Users the exclusion left with nothing to rank are absent from the per-user frame."""
+        summary = realised_size_summary(make_per_user(), n_dropped=1)
+
+        assert summary["n_users"].to_list() == [1, 1, 1, 1]
+        assert summary["scored"].to_list() == [False, True, True, True]
+        # Every share is now a share of the whole test split, not of the part that survived.
+        assert summary["share_of_users"].to_list() == pytest.approx([0.25] * 4)
+
+    def test_the_dropped_row_is_reported_at_a_home_included_size_of_one(self):
+        summary = realised_size_summary(make_per_user(), n_dropped=4)
+        dropped = summary.filter(~pl.col("scored")).to_dicts()[0]
+
+        assert dropped[REALISED_SIZE_COLUMN] == 1
+        assert dropped["n_users"] == 4
+
+    def test_no_dropped_row_when_the_count_is_zero(self):
+        summary = realised_size_summary(make_per_user(), n_dropped=0)
+
+        assert summary["scored"].to_list() == [True, True, True]
+
+
+class TestUserPopulation:
+    """The headline covers fewer users than the sanity metric; the frame has to say how many fewer."""
+
+    def _aggregate(self, scored: int = 90, dropped: int = 10) -> pl.DataFrame:
+        return make_aggregate().with_columns(**{
+            SCORED_USERS_COLUMN: pl.lit(float(scored)),
+            DROPPED_USERS_COLUMN: pl.lit(float(dropped)),
+        })
+
+    def test_reads_both_counts(self):
+        assert _num_scored_dropped_users(self._aggregate()) == (90, 10)
+
+    def test_the_restriction_changes_the_paired_comparison(self):
+        per_user = make_per_user()
+
+        full = paired_comparison(per_user, "Baseline", PER_USER_METRIC, n_bootstrap=200).to_dicts()[0]
+        restricted = paired_comparison(
+            _restrict_to_realised_size(per_user, min_size=3), "Baseline", PER_USER_METRIC, n_bootstrap=200
+        ).to_dicts()[0]
+
+        assert full["n_users"] == 3
+        assert restricted["n_users"] == 2
+        # User 1 carried the largest gap (0.5 vs 0.0), so dropping it shrinks the mean difference.
+        assert restricted["mean_diff"] < full["mean_diff"]
+
+
+class TestPerUserMetricSummary:
+    def test_reports_mean_and_sd_over_seeds(self):
+        row = per_user_metric_summary(make_per_user(), PER_USER_METRIC).filter(pl.col("name") == "MLP").to_dicts()[0]
+
+        assert row["n_seeds"] == 2
+        assert row["n_users"] == 3
+        # Seed means of {0.5, 0.5, 1.0} and {0.5, 1.0, 1.0}.
+        assert row["mean"] == pytest.approx((2 / 3 + 5 / 6) / 2)
+
+    def test_deterministic_baseline_has_one_seed_and_no_sd(self):
+        row = (
+            per_user_metric_summary(make_per_user(), PER_USER_METRIC).filter(pl.col("name") == "Baseline").to_dicts()[0]
+        )
+
+        assert row["n_seeds"] == 1
+        assert row["sd"] is None
 
 
 class TestPairedComparison:

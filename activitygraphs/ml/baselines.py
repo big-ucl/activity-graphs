@@ -3,15 +3,12 @@
 import torch
 import torch_geometric as pyg
 
+from activitygraphs.ml.dataset import is_home_node_mask
+
 
 def inverse_sigmoid(prob):
     """Return logit(prob) = log(prob / (1 - prob))."""
     return torch.log(prob / (1 - prob))
-
-
-def extract_is_home(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
-    """Return a boolean mask indicating home nodes (column ``is_home_idx > 0``)."""
-    return (x[..., is_home_idx] > 0.0).bool()
 
 
 def compute_ptr_from_batch(batch: torch.Tensor):
@@ -98,7 +95,7 @@ class ConditionalNodeBaseline(torch.nn.Module):
 
         for batch in loader:
             node_indices = torch.arange(batch.num_nodes) - batch.ptr[batch.batch]
-            home_mask = extract_is_home(batch.x, self.is_home_idx)
+            home_mask = is_home_node_mask(batch.x, self.is_home_idx)
 
             for i in range(batch.num_graphs):
                 graph_mask = batch.batch == i
@@ -127,7 +124,7 @@ class ConditionalNodeBaseline(torch.nn.Module):
     def forward(self, x, edge_index, edge_attr=None, batch=None):
         ptr = compute_ptr_from_batch(batch)
         node_indices = torch.arange(x.shape[0], device=x.device) - ptr[batch]
-        home_mask = extract_is_home(x, self.is_home_idx)
+        home_mask = is_home_node_mask(x, self.is_home_idx)
         home_indices = torch.zeros(batch.max().item() + 1, dtype=torch.long, device=x.device)
 
         for i in range(batch.max().item() + 1):

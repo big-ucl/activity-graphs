@@ -132,9 +132,10 @@ class RetrievalRPrecision(Metric):
     """Per-user recall at k = number of visited nodes (R-precision).
 
     For each user, scores the top-R nodes where R is that user's realised set size |RG_i|,
-    and reports hits / R, averaged over users. The cutoff tracks each user's realised set
-    size, so it stays comparable across datasets with very different set sizes (Geneva ~2-4,
-    Toronto ~26) where a fixed @5 does not.
+    and reports hits / R, averaged over users. Users that have no visits are dropped from the average (e.g. when only
+    home node is visited and is dropped, masked out by the caller). ``n_dropped_users`` tracks the number of such users.
+
+    R-precision is comparable across dataset since it compares over the realised set size.
     """
 
     higher_is_better = True
@@ -143,6 +144,7 @@ class RetrievalRPrecision(Metric):
         super().__init__()
         self.add_state("score_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("n_users", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("n_dropped", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
         for idx in torch.unique(indexes):
@@ -150,6 +152,7 @@ class RetrievalRPrecision(Metric):
             t = target[mask]
             r = int(t.sum())
             if r == 0:
+                self.n_dropped = self.n_dropped + 1
                 continue
             top = preds[mask].topk(min(r, t.numel())).indices
             self.score_sum = self.score_sum + t[top].sum() / r
@@ -157,6 +160,11 @@ class RetrievalRPrecision(Metric):
 
     def compute(self) -> torch.Tensor:
         return self.score_sum / self.n_users.clamp(min=1)
+
+    def user_counts(self) -> dict[str, float]:
+        """Returns a dictionary with two items: the count of users that were scored and the count of users that were
+        dropped (due to RG_i too small)."""
+        return {"n_scored_users": float(self.n_users), "n_dropped_users": float(self.n_dropped)}
 
 
 class PerUserRanking(Metric):
@@ -167,17 +175,21 @@ class PerUserRanking(Metric):
     score lets two models be compared on the same users with a paired test (bootstrap or
     signed-rank), which is far more sensitive than differencing two aggregates. ``n_pos`` is
     retained alongside so comparisons can be stratified by realised set size.
+
+    ``n_pos_home_incl`` counts the positives before the excluded node is dropped, so a run can still
+    be re-read on the users whose home-included realised set reaches a given size.
     """
 
     full_state_update = False
 
     user_id: list[torch.Tensor]
     n_pos: list[torch.Tensor]
+    n_pos_home_incl: list[torch.Tensor]
     r_precision: list[torch.Tensor]
     recall: list[torch.Tensor]
     score_vector: list[torch.Tensor]
 
-    _FIELDS = ("user_id", "n_pos", "r_precision", "recall")
+    _FIELDS = ("user_id", "n_pos", "n_pos_home_incl", "r_precision", "recall")
 
     def __init__(self, k: int, store_score_vectors: bool = False) -> None:
         super().__init__()
@@ -188,26 +200,44 @@ class PerUserRanking(Metric):
 
         self.add_state("score_vector", default=[], dist_reduce_fx="cat")
 
-    def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
-        """Accumulate one row per user in the batch, skipping users with no positives."""
+    def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor, exclude: torch.Tensor) -> None:
+        """Accumulate one row per user in the batch, skipping users with no positives.
+
+        ``exclude`` marks the nodes to drop from both the candidate set and the realised set before
+        ranking, which is how the caller removes each user's own home node. Unlike the other ranking
+        metrics this one takes the full node universe and the mask rather than the restricted view,
+        because the retained score vector has to cover every node: the diagnostics read off it need
+        the excluded node's score.
+        """
         for idx in torch.unique(indexes):
             mask = indexes == idx
-            t = target[mask]
-            r = int(t.sum())
-            if r == 0:
+
+            full_target = target[mask]
+            full_scores = preds[mask]
+
+            non_excluded_nodes = ~exclude[mask]
+            scored_target = full_target[non_excluded_nodes]
+            scored_scores = full_scores[non_excluded_nodes]
+
+            num_positives = int(scored_target.sum())
+            if num_positives == 0:
                 continue
 
-            scores = preds[mask]
-            top_r = scores.topk(min(r, t.numel())).indices
-            top_k = scores.topk(min(self.k, t.numel())).indices
+            top_r = scored_scores.topk(min(num_positives, scored_target.numel())).indices
+            top_k = scored_scores.topk(min(self.k, scored_target.numel())).indices
+
+            full_num_positives = full_target.sum()
+            r_precision = scored_target[top_r].sum() / num_positives
+            recall = scored_target[top_k].sum() / num_positives
 
             self.user_id.append(idx.reshape(1).long())
-            self.n_pos.append(torch.full((1,), r, dtype=torch.long, device=scores.device))
-            self.r_precision.append((t[top_r].sum() / r).reshape(1).float())
-            self.recall.append((t[top_k].sum() / r).reshape(1).float())
+            self.n_pos.append(torch.full((1,), num_positives, dtype=torch.long, device=scored_scores.device))
+            self.n_pos_home_incl.append(full_num_positives.reshape(1).long())
+            self.r_precision.append(r_precision.reshape(1).float())
+            self.recall.append(recall.reshape(1).float())
 
             if self.store_score_vectors:
-                self.score_vector.append(scores.detach().float().reshape(1, -1).cpu())
+                self.score_vector.append(full_scores.detach().float().reshape(1, -1).cpu())
 
     def columns(self) -> dict[str, torch.Tensor]:
         """Return the retained per-user columns, each a 1-D tensor of length n_users.
@@ -224,8 +254,8 @@ class PerUserRanking(Metric):
         """Return the retained score vectors as ``[n_users, num_nodes]``, row-aligned with ``columns()``.
 
         Empty when ``store_score_vectors`` is off. The scores are the model's per-node ranking scores over
-        the whole node universe, which the summary columns reduce away. The model-health checks are computed
-        from them and cannot be recovered from the summaries afterwards.
+        the whole node universe (including the excluded home node) which the summary columns reduce away.
+        The model-health checks are computed from them and cannot be recovered from the summaries afterwards.
         """
         if not self.score_vector:
             return torch.empty(0)
