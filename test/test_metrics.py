@@ -118,13 +118,24 @@ def nothing_excluded(n: int) -> torch.Tensor:
     return torch.zeros(n, dtype=torch.bool)
 
 
+def chain_hops(num_users: int, num_nodes: int) -> torch.Tensor:
+    """Hops from home of ``num_users`` chain graphs laid end to end: node ``i`` of each is ``i`` hops away."""
+    return torch.arange(num_nodes, dtype=torch.float).repeat(num_users)
+
+
 class TestPerUserRanking:
     def _updated(self) -> PerUserRanking:
         """Two users with 2 positives each: user 0 ranks both first, user 1 ranks only one in its top 2."""
         metric = PerUserRanking(k=2)
         preds = torch.tensor([0.9, 0.8, 0.2, 0.1, 0.9, 0.2, 0.8, 0.1])
         target = torch.tensor([1, 1, 0, 0, 1, 1, 0, 0])
-        metric.update(preds, target, indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]), exclude=nothing_excluded(8))
+        metric.update(
+            preds,
+            target,
+            indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]),
+            exclude=nothing_excluded(8),
+            hops=chain_hops(2, 4),
+        )
         return metric
 
     def test_no_score_vectors_by_default(self):
@@ -134,7 +145,13 @@ class TestPerUserRanking:
         metric = PerUserRanking(k=2, store_score_vectors=True)
         preds = torch.tensor([0.9, 0.8, 0.2, 0.1, 0.9, 0.2, 0.8, 0.1])
         target = torch.tensor([1, 1, 0, 0, 1, 1, 0, 0])
-        metric.update(preds, target, indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]), exclude=nothing_excluded(8))
+        metric.update(
+            preds,
+            target,
+            indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]),
+            exclude=nothing_excluded(8),
+            hops=chain_hops(2, 4),
+        )
 
         vectors = metric.score_vectors()
 
@@ -148,7 +165,9 @@ class TestPerUserRanking:
         metric = PerUserRanking(k=2, store_score_vectors=True)
         preds = torch.tensor([0.9, 0.1, 0.5, 0.4])
         target = torch.tensor([1, 0, 0, 0])
-        metric.update(preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4))
+        metric.update(
+            preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4), hops=chain_hops(2, 2)
+        )
 
         assert metric.columns()["user_id"].tolist() == [0]
         assert metric.score_vectors().shape == (1, 2)
@@ -179,7 +198,7 @@ class TestPerUserRanking:
         preds = torch.tensor([0.9, 0.2, 0.8, 0.1])
         target = torch.tensor([1, 1, 0, 0])
         is_home = torch.tensor([True, False, False, False])
-        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home)
+        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home, hops=chain_hops(1, 4))
 
         columns = metric.columns()
 
@@ -192,12 +211,18 @@ class TestPerUserRanking:
     def test_a_home_only_user_is_dropped(self):
         """A user whose sole visit is their own home has an empty target once home is excluded."""
         metric = PerUserRanking(k=2)
-        preds = torch.tensor([0.9, 0.2, 0.8, 0.1])
-        target = torch.tensor([1, 0, 0, 0])
-        is_home = torch.tensor([True, False, False, False])
-        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home)
+        preds = torch.tensor([0.9, 0.2, 0.8, 0.1, 0.9, 0.2, 0.8, 0.1])
+        target = torch.tensor([1, 0, 0, 0, 1, 1, 0, 0])
+        is_home = torch.tensor([True, False, False, False, True, False, False, False])
+        metric.update(
+            preds,
+            target,
+            indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]),
+            exclude=is_home,
+            hops=chain_hops(2, 4),
+        )
 
-        assert metric.columns()["user_id"].numel() == 0
+        assert metric.columns()["user_id"].tolist() == [1]
 
     def test_the_retained_score_vector_still_covers_the_home_node(self):
         """The home-rank health check reads these vectors, so the excluded node's score must survive."""
@@ -205,7 +230,7 @@ class TestPerUserRanking:
         preds = torch.tensor([0.9, 0.2, 0.8, 0.1])
         target = torch.tensor([1, 1, 0, 0])
         is_home = torch.tensor([True, False, False, False])
-        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home)
+        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home, hops=chain_hops(1, 4))
 
         assert metric.score_vectors()[0].tolist() == pytest.approx([0.9, 0.2, 0.8, 0.1])
 
@@ -213,16 +238,122 @@ class TestPerUserRanking:
         metric = PerUserRanking(k=2)
         preds = torch.tensor([0.9, 0.1, 0.9, 0.1])
         target = torch.tensor([1, 0, 0, 0])  # user 1 has no positives
-        metric.update(preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4))
+        metric.update(
+            preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4), hops=chain_hops(2, 2)
+        )
 
         assert metric.columns()["user_id"].tolist() == [0]
 
     def test_accumulates_across_batches(self):
         metric = self._updated()
         preds = torch.tensor([0.9, 0.1])
-        metric.update(preds, torch.tensor([1, 0]), indexes=torch.tensor([2, 2]), exclude=nothing_excluded(2))
+        metric.update(
+            preds,
+            torch.tensor([1, 0]),
+            indexes=torch.tensor([2, 2]),
+            exclude=nothing_excluded(2),
+            hops=chain_hops(1, 2),
+        )
 
         assert metric.columns()["user_id"].tolist() == [0, 1, 2]
+
+    def test_each_positive_keeps_its_hop_distance(self):
+        metric = PerUserRanking(k=2)
+        preds = torch.tensor([0.9, 0.8, 0.2, 0.1, 0.9, 0.2, 0.8, 0.1])
+        target = torch.tensor([0, 1, 0, 1, 1, 0, 0, 1])
+        hops = torch.tensor([0.0, 4.0, 7.0, float("inf"), 1.0, 5.0, 9.0, 13.0])
+        metric.update(
+            preds, target, indexes=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]), exclude=nothing_excluded(8), hops=hops
+        )
+
+        assert metric.positive_columns()["pos_hops"] == [[4.0, float("inf")], [1.0, 13.0]]
+
+    def test_flags_mark_the_positives_ranked_inside_the_cutoffs(self):
+        positives = self._updated().positive_columns()
+
+        assert positives["pos_in_top_r"] == [[True, True], [True, False]]
+        assert positives["pos_in_top_k"] == [[True, True], [True, False]]
+
+    def test_flags_reproduce_the_per_user_scores(self):
+        """Summing a flag over a user's positives and dividing by ``n_pos`` gives back the retained score."""
+        metric = self._updated()
+        columns = metric.columns()
+        positives = metric.positive_columns()
+
+        for row, n_pos in enumerate(columns["n_pos"].tolist()):
+            assert sum(positives["pos_in_top_r"][row]) / n_pos == pytest.approx(columns["r_precision"][row].item())
+            assert sum(positives["pos_in_top_k"][row]) / n_pos == pytest.approx(columns["recall"][row].item())
+
+    def test_counts_the_candidates_scored_above_each_positive(self):
+        positives = self._updated().positive_columns()
+
+        assert positives["pos_n_scored_higher"] == [[0, 1], [0, 2]]
+        assert positives["pos_n_tied"] == [[0, 0], [0, 0]]
+
+    def test_counts_reproduce_the_flags_without_ties(self):
+        metric = self._updated()
+        n_pos = metric.columns()["n_pos"].tolist()
+        positives = metric.positive_columns()
+
+        for row, n_scored_higher in enumerate(positives["pos_n_scored_higher"]):
+            assert [n < n_pos[row] for n in n_scored_higher] == positives["pos_in_top_r"][row]
+            assert [n < metric.k for n in n_scored_higher] == positives["pos_in_top_k"][row]
+
+    def test_the_excluded_home_node_is_not_counted_above_a_positive(self):
+        """Home scores highest but is not a candidate, so only node 2 scores above the remaining positive."""
+        metric = PerUserRanking(k=2)
+        preds = torch.tensor([0.9, 0.2, 0.8, 0.1])
+        target = torch.tensor([1, 1, 0, 0])
+        is_home = torch.tensor([True, False, False, False])
+        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home, hops=chain_hops(1, 4))
+
+        assert metric.positive_columns()["pos_n_scored_higher"] == [[1]]
+
+    def test_ties_are_counted_apart_from_higher_scores(self):
+        """Node 0 scores above both positives; each positive ties with node 2 and with the other positive."""
+        metric = PerUserRanking(k=2)
+        metric.update(
+            torch.tensor([0.9, 0.5, 0.5, 0.5, 0.1]),
+            torch.tensor([0, 1, 0, 1, 0]),
+            indexes=torch.zeros(5, dtype=torch.long),
+            exclude=nothing_excluded(5),
+            hops=chain_hops(1, 5),
+        )
+
+        positives = metric.positive_columns()
+
+        assert positives["pos_n_scored_higher"] == [[1, 1]]
+        assert positives["pos_n_tied"] == [[2, 2]]
+
+    def test_the_home_node_is_not_a_retained_positive(self):
+        """Only node 1 is left as a positive: outside the top-1, inside the top-2."""
+        metric = PerUserRanking(k=2)
+        preds = torch.tensor([0.9, 0.2, 0.8, 0.1])
+        target = torch.tensor([1, 1, 0, 0])
+        is_home = torch.tensor([True, False, False, False])
+        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home, hops=chain_hops(1, 4))
+
+        positives = metric.positive_columns()
+
+        assert positives["pos_hops"] == [[1.0]]
+        assert positives["pos_in_top_r"] == [[False]]
+        assert positives["pos_in_top_k"] == [[True]]
+
+    def test_positive_columns_stay_row_aligned_across_batches(self):
+        metric = self._updated()
+        metric.update(
+            torch.tensor([0.9, 0.1, 0.5]),
+            torch.tensor([0, 1, 1]),
+            indexes=torch.tensor([2, 2, 2]),
+            exclude=nothing_excluded(3),
+            hops=torch.tensor([0.0, 1.0, 6.0]),
+        )
+
+        positives = metric.positive_columns()
+
+        assert [len(hops) for hops in positives["pos_hops"]] == metric.columns()["n_pos"].tolist()
+        assert positives["pos_hops"][2] == [1.0, 6.0]
+        assert positives["pos_n_scored_higher"][2] == [2, 1]
 
 
 class TestHopBandMetrics:
@@ -320,8 +451,20 @@ class TestHopBandMetrics:
         module.on_test_epoch_end()
 
         columns = module.per_user_columns
-        assert set(columns) == {"user_id", "n_pos", "n_pos_home_incl", "r_precision", "recall"}
+        assert set(columns) == {
+            "user_id",
+            "n_pos",
+            "n_pos_home_incl",
+            "r_precision",
+            "recall",
+            "pos_hops",
+            "pos_in_top_r",
+            "pos_in_top_k",
+            "pos_n_scored_higher",
+            "pos_n_tied",
+        }
         assert columns["user_id"] == [0]
         assert columns["n_pos"] == [1]  # two positives, one of which is the excluded home node
         assert columns["n_pos_home_incl"] == [2]
         assert 0.0 <= columns["r_precision"][0] <= 1.0
+        assert columns["pos_hops"] == [[3.0]]

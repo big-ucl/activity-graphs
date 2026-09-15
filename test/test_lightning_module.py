@@ -429,6 +429,53 @@ class TestScoreVectors:
             assert float(target[top_r].sum() / r) == pytest.approx(module.per_user_columns["r_precision"][row])
 
 
+class TestPositiveHops:
+    """Each retained positive carries its hop distance from the user's home node."""
+
+    def _tested(self, monkeypatch):
+        module = make_module()
+        batch = make_batch(num_graphs=3, num_nodes=8, seed=7)
+        force_positive_per_graph(batch)
+        capture_logs(module, monkeypatch)
+
+        module.eval()
+        with torch.no_grad():
+            module.test_step(batch, 0)
+        module.on_test_epoch_end()
+
+        return module, batch
+
+    def test_hops_follow_the_chain_distance_from_home(self, monkeypatch):
+        """On the chain graphs node ``i`` is ``i`` hops from the home node 0."""
+        module, batch = self._tested(monkeypatch)
+        columns = module.per_user_columns
+
+        for row, user_id in enumerate(columns["user_id"]):
+            graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
+            positives = batch.y.squeeze(-1)[batch.batch == graph].nonzero(as_tuple=True)[0].tolist()
+            expected = [float(node) for node in positives if node != HOME_NODE]
+
+            assert columns["pos_hops"][row] == expected
+
+    def test_flags_reproduce_the_reported_scores(self, monkeypatch):
+        module, _ = self._tested(monkeypatch)
+        columns = module.per_user_columns
+
+        for row, n_pos in enumerate(columns["n_pos"]):
+            assert sum(columns["pos_in_top_r"][row]) / n_pos == pytest.approx(columns["r_precision"][row])
+            assert sum(columns["pos_in_top_k"][row]) / n_pos == pytest.approx(columns["recall"][row])
+
+    def test_counts_reproduce_the_reported_recall(self, monkeypatch):
+        """No ties, so a positive is inside the top-k exactly when fewer than k candidates score higher."""
+        module, _ = self._tested(monkeypatch)
+        columns = module.per_user_columns
+
+        for row, n_pos in enumerate(columns["n_pos"]):
+            assert all(n_tied == 0 for n_tied in columns["pos_n_tied"][row])
+            hits = sum(n_scored_higher < module.k for n_scored_higher in columns["pos_n_scored_higher"][row])
+            assert hits / n_pos == pytest.approx(columns["recall"][row])
+
+
 class TestHomeExclusion:
     """The home node is neither a candidate nor a member of ``RG_i`` when scoring."""
 
@@ -541,30 +588,31 @@ class TestHomeExclusion:
 class TestRankingView:
     """A ranking metric added later has to inherit the exclusion from the view, not re-apply a mask."""
 
-    def _step(self):
+    def _step(self, monkeypatch):
         module = make_module()
         batch = make_batch(num_graphs=2, num_nodes=8, seed=13)
         force_positive_per_graph(batch)
+        capture_logs(module, monkeypatch)
 
         with torch.no_grad():
-            return module._compute_evaluation_tensors(batch), batch
+            return module._common_evaluation_step(batch, "test"), batch
 
-    def test_the_ranking_view_covers_the_scored_candidates_only(self):
-        step, batch = self._step()
+    def test_the_ranking_view_covers_the_scored_candidates_only(self, monkeypatch):
+        step, batch = self._step(monkeypatch)
         n_scored = batch.num_nodes - batch.num_graphs
 
         for values in (step.ranking.logits, step.ranking.probs, step.ranking.target, step.ranking.users):
             assert values.shape == (n_scored,)
 
-    def test_the_full_tensors_still_cover_every_node(self):
+    def test_the_full_tensors_still_cover_every_node(self, monkeypatch):
         """The loss, the BCE diagnostics and the sanity metric read these on purpose."""
-        step, batch = self._step()
+        step, batch = self._step(monkeypatch)
 
         for values in (step.probs, step.target, step.users):
             assert values.shape == (batch.num_nodes,)
 
-    def test_no_home_node_survives_into_the_ranking_view(self):
-        step, batch = self._step()
+    def test_no_home_node_survives_into_the_ranking_view(self, monkeypatch):
+        step, batch = self._step(monkeypatch)
         home_rows = (batch.x[:, IS_HOME_IDX] > 0.0).nonzero(as_tuple=True)[0]
 
         assert not step.ranking.scored[home_rows].any()

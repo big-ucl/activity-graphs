@@ -18,7 +18,13 @@ from activitygraphs.analysis import (
     _extract_band_and_metric,
     _latest_run,
     aggregate_metrics,
+    band_contributions,
+    band_decomposition,
     compute_hop_band_table,
+    paired_comparison_by_band,
+    paired_comparison_by_k,
+    recall_at_ks,
+    recall_curve,
     home_zone_summary,
     check_home_node_rank,
     load_run,
@@ -553,6 +559,180 @@ class TestHopBands:
     def test_models_filter_restricts_the_table(self):
         table = compute_hop_band_table(make_aggregate(), models=["Baseline"])
         assert table["name"].unique().to_list() == ["Baseline"]
+
+
+def make_positive_per_user() -> pl.DataFrame:
+    """Two users scored by a model at two seeds and by a baseline once, with each positive's hop distance and flags."""
+    user_hops = {1: [1.0, float("inf")], 2: [3.0, 5.0]}
+    top_r_flags = [
+        ("MLP", 42, {1: [True, True], 2: [False, False]}),
+        ("MLP", 43, {1: [True, False], 2: [True, False]}),
+        ("Baseline", None, {1: [True, False], 2: [False, False]}),
+    ]
+    rows = [
+        {
+            "name": name,
+            "stage": PER_USER_STAGE,
+            "seed": seed,
+            "user_id": user,
+            "n_pos": len(hops),
+            "r_precision": sum(flags[user]) / len(hops),
+            "recall": 1.0,
+            "pos_hops": hops,
+            "pos_in_top_r": flags[user],
+            "pos_in_top_k": [True] * len(hops),
+        }
+        for name, seed, flags in top_r_flags
+        for user, hops in user_hops.items()
+    ]
+
+    return pl.DataFrame(rows)
+
+
+class TestBandDecomposition:
+    def test_every_user_gets_a_row_in_every_band(self):
+        contributions = band_contributions(make_positive_per_user(), PER_USER_METRIC)
+
+        assert contributions.height == 6 * 3
+        user_2_far = contributions.filter((pl.col("user_id") == 2) & (pl.col("band") == "13+"))
+        assert user_2_far["contribution"].to_list() == [0.0, 0.0, 0.0]
+
+    def test_contributions_sum_to_the_per_user_metric(self):
+        per_user = make_positive_per_user().with_columns(pl.col("seed").fill_null(-1))
+        summed = (
+            band_contributions(per_user, PER_USER_METRIC)
+            .group_by("name", "seed", "user_id")
+            .agg(pl.col("contribution").sum())
+            .join(per_user.select("name", "seed", "user_id", "r_precision"), on=["name", "seed", "user_id"])
+        )
+
+        assert summed["contribution"].to_list() == pytest.approx(summed["r_precision"].to_list())
+
+    def test_band_means_sum_to_the_headline(self):
+        per_user = make_positive_per_user()
+        table = band_decomposition(per_user, PER_USER_METRIC).filter(pl.col("name") == "MLP")
+        headline = per_user_metric_summary(per_user, PER_USER_METRIC).filter(pl.col("name") == "MLP")["mean"][0]
+
+        means = dict(zip(table["band"], table["mean"], strict=True))
+        assert means == pytest.approx({"0-2": 0.25, "3-5": 0.125, "13+": 0.125})
+        assert sum(means.values()) == pytest.approx(headline)
+
+    def test_shares_of_the_metric_and_of_the_positives(self):
+        table = band_decomposition(make_positive_per_user(), PER_USER_METRIC).filter(pl.col("name") == "MLP")
+
+        assert dict(zip(table["band"], table["share_of_metric"], strict=True)) == pytest.approx({
+            "0-2": 0.5,
+            "3-5": 0.25,
+            "13+": 0.25,
+        })
+        assert dict(zip(table["band"], table["share_of_pos"], strict=True)) == pytest.approx({
+            "0-2": 0.25,
+            "3-5": 0.5,
+            "13+": 0.25,
+        })
+
+    def test_bands_are_ordered_by_their_lower_bound(self):
+        table = band_decomposition(make_positive_per_user(), PER_USER_METRIC).filter(pl.col("name") == "MLP")
+        assert table["band"].to_list() == ["0-2", "3-5", "13+"]
+
+    def test_recall_reads_the_top_k_flag(self):
+        table = band_decomposition(make_positive_per_user(), "recall").filter(pl.col("name") == "Baseline")
+        assert table["mean"].sum() == pytest.approx(1.0)
+
+    def test_a_metric_without_a_flag_raises(self):
+        with pytest.raises(KeyError, match="decomposable metrics"):
+            band_contributions(make_positive_per_user(), "ndcg")
+
+    def test_paired_band_differences_sum_to_the_overall_difference(self):
+        per_user = make_positive_per_user()
+        by_band = paired_comparison_by_band(per_user, "Baseline", PER_USER_METRIC, n_bootstrap=200)
+        overall = paired_comparison(per_user, "Baseline", PER_USER_METRIC, n_bootstrap=200)["mean_diff"][0]
+
+        diffs = dict(zip(by_band["band"], by_band["mean_diff"], strict=True))
+        assert diffs == pytest.approx({"0-2": 0.0, "3-5": 0.125, "13+": 0.125})
+        assert sum(diffs.values()) == pytest.approx(overall)
+        assert by_band["n_users"].to_list() == [2, 2, 2]
+
+
+def make_ranked_per_user() -> pl.DataFrame:
+    """A tie-free model at two seeds and a fully tied baseline over ten scored candidates per user."""
+    scored_higher = [
+        ("MLP", 42, {1: [0, 3], 2: [1]}),
+        ("MLP", 43, {1: [1, 4], 2: [0]}),
+    ]
+    rows = [
+        {
+            "name": name,
+            "stage": PER_USER_STAGE,
+            "seed": seed,
+            "user_id": user,
+            "pos_n_scored_higher": counts,
+            "pos_n_tied": [0] * len(counts),
+        }
+        for name, seed, users in scored_higher
+        for user, counts in users.items()
+    ]
+    rows += [
+        {
+            "name": "Uniform",
+            "stage": PER_USER_STAGE,
+            "seed": None,
+            "user_id": user,
+            "pos_n_scored_higher": [0] * n_pos,
+            "pos_n_tied": [9] * n_pos,
+        }
+        for user, n_pos in [(1, 2), (2, 1)]
+    ]
+
+    return pl.DataFrame(rows)
+
+
+class TestRecallCurve:
+    def test_one_row_per_user_and_cutoff(self):
+        recalls = recall_at_ks(make_ranked_per_user(), [1, 2, 5])
+        assert recalls.height == 6 * 3
+
+    def test_without_ties_a_positive_counts_when_fewer_than_k_score_above(self):
+        recalls = recall_at_ks(make_ranked_per_user(), [1, 2, 5]).filter(
+            (pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_id") == 1)
+        )
+        assert recalls["recall_at_k"].to_list() == pytest.approx([0.5, 0.5, 1.0])
+
+    def test_a_fully_tied_model_gets_k_over_the_candidate_count(self):
+        recalls = recall_at_ks(make_ranked_per_user(), [1, 2, 20]).filter(
+            (pl.col("name") == "Uniform") & (pl.col("user_id") == 1)
+        )
+        assert recalls["recall_at_k"].to_list() == pytest.approx([0.1, 0.2, 1.0])
+
+    def test_a_partial_tie_spreads_the_positive_over_its_tied_positions(self):
+        """Two candidates above and three tied: the positive sits at position 3, 4, 5 or 6 with equal chance."""
+        per_user = pl.DataFrame({
+            "name": ["MLP"],
+            "stage": [PER_USER_STAGE],
+            "seed": [42],
+            "user_id": [1],
+            "pos_n_scored_higher": [[2]],
+            "pos_n_tied": [[3]],
+        })
+        recalls = recall_at_ks(per_user, [2, 3, 4, 6])
+        assert recalls["recall_at_k"].to_list() == pytest.approx([0.0, 0.25, 0.5, 1.0])
+
+    def test_curve_reports_mean_and_sd_over_seeds(self):
+        row = recall_curve(make_ranked_per_user(), [1]).filter(pl.col("name") == "MLP").to_dicts()[0]
+
+        assert row["n_seeds"] == 2
+        assert row["mean"] == pytest.approx(0.375)
+        assert row["sd"] == pytest.approx(pl.Series([0.25, 0.5]).std())
+
+    def test_curve_is_ordered_by_cutoff(self):
+        curve = recall_curve(make_ranked_per_user(), [5, 1, 2]).filter(pl.col("name") == "MLP")
+        assert curve["k"].to_list() == [1, 2, 5]
+
+    def test_paired_comparison_at_each_cutoff(self):
+        paired = paired_comparison_by_k(make_ranked_per_user(), "Uniform", [1, 2], n_bootstrap=200)
+
+        assert paired.columns[0] == "k"
+        assert dict(zip(paired["k"], paired["mean_diff"], strict=True)) == pytest.approx({1: 0.275, 2: 0.55})
 
 
 class TestHomeZones:

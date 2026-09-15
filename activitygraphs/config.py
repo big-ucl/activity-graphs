@@ -279,6 +279,7 @@ class AnalysisConfig:
     per_user_metric: str
     min_realised_size: int
     occupancy_thresholds: list[int]
+    recall_curve_ks: list[int]
     hop_models: list[str] | None
     run: int | None
 

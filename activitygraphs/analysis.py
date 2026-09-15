@@ -18,17 +18,28 @@ from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.config import AnalysisConfig
 from activitygraphs.ml.dataset import ActivityDataset
+from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
 
-# Per-user column holding |RG_i| before the home node was excluded from it.
-REALISED_SIZE_COLUMN = "n_pos_home_incl"
 
-# Aggregate column holding the home-included R-precision, kept as a sanity check beside the headline.
+# Aggregate column containing the home-included R-precision, kept as a sanity check beside the headline.
 DIAGNOSTIC_METRIC_COLUMN = "test_r_precision_home_incl"
 
-# Aggregate columns holding the number of users (used for average of main metric).
+# Aggregate columns containing the number of users (used for average of main metric).
 SCORED_USERS_COLUMN = "test_n_scored_users"
 DROPPED_USERS_COLUMN = "test_n_dropped_users"
+
+# Per-user column containing |RG_i| before exclusion of the home node.
+REALISED_SIZE_COLUMN = "n_pos_home_incl"
+
+# Per-user list column containing the hop distance of each positive, and the per-positive flag behind each per-user metric.
+POSITIVE_HOPS_COLUMN = "pos_hops"
+POSITIVE_FLAG_COLUMNS = {"r_precision": "pos_in_top_r", "recall": "pos_in_top_k"}
+
+# Per-user list columns containing, for each positive, the number of scored candidates that scored higher than the
+# positive and the number that tied with it.
+N_SCORED_HIGHER_COLUMN = "pos_n_scored_higher"
+N_TIED_COLUMN = "pos_n_tied"
 
 DEFAULT_ANALYSIS = AnalysisConfig(
     reference_model="ConditionalNodeMarginal",
@@ -37,6 +48,7 @@ DEFAULT_ANALYSIS = AnalysisConfig(
     per_user_metric="r_precision",
     min_realised_size=3,
     occupancy_thresholds=[10, 25, 60],
+    recall_curve_ks=[1, 2, 5, 10, 20],
     hop_models=None,
     run=None,
 )
@@ -578,8 +590,189 @@ def _extract_band_and_metric(col_name: str) -> tuple[str, str, int, str]:
     """Split ``test_hop_{band}_{metric}`` into ``(column, band, band lower bound, metric)``,
     e.g. ``("test_hop_3-5_recall@2", "3-5", 3, "recall@2")``."""
     band, _, metric = col_name.removeprefix("test_hop_").partition("_")
-    lower_band_bound = int(band.partition("-")[0].partition("+")[0])
-    return col_name, band, lower_band_bound, metric
+    return col_name, band, _extract_band_lower_bound(band), metric
+
+
+def _extract_band_lower_bound(band: str) -> int:
+    """Return the lower hop bound of a band label, e.g. ``3`` for ``"3-5"`` and ``13`` for ``"13+"``."""
+    return int(band.partition("-")[0].partition("+")[0])
+
+
+def _hop_band(hops: pl.Expr) -> pl.Expr:
+    """Return the label of the ``DEFAULT_HOP_BANDS`` band each hop distance falls in."""
+    return pl.coalesce([
+        pl.when(hops.is_between(low, high)).then(pl.lit(label)) for label, low, high in DEFAULT_HOP_BANDS
+    ])
+
+
+def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
+    """Split each user's per-user ``metric`` into the contributions of the positives in each hop band.
+
+    Returns:
+        Frame of ``name, stage, seed, user_id, band, contribution, n_band_pos``, one row per model, seed, user and band.
+        ``contribution`` is the number of the band's positives ranked inside the metric's cutoff divided by the user's
+        ``n_pos``, zero where the user has no positive in the band.
+
+    Raises:
+        KeyError: If ``metric`` has no per-positive flag column.
+    """
+    if metric not in POSITIVE_FLAG_COLUMNS:
+        raise KeyError(f"no per-positive flag for {metric!r}; decomposable metrics are {sorted(POSITIVE_FLAG_COLUMNS)}")
+
+    flag = POSITIVE_FLAG_COLUMNS[metric]
+    rows = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).with_row_index("row")
+
+    per_band = (
+        rows
+        .select("row", POSITIVE_HOPS_COLUMN, flag)
+        .explode(POSITIVE_HOPS_COLUMN, flag)
+        .with_columns(band=_hop_band(pl.col(POSITIVE_HOPS_COLUMN)))
+        .group_by("row", "band")
+        .agg(hits=pl.col(flag).sum(), n_band_pos=pl.len())
+    )
+
+    return (
+        rows
+        .select("row", "name", "stage", "seed", "user_id", "n_pos")
+        .join(per_band.select("band").unique(), how="cross")
+        .join(per_band, on=["row", "band"], how="left")
+        .with_columns(
+            contribution=pl.col("hits").fill_null(0) / pl.col("n_pos"),
+            n_band_pos=pl.col("n_band_pos").fill_null(0),
+        )
+        .select("name", "stage", "seed", "user_id", "band", "contribution", "n_band_pos")
+    )
+
+
+def band_decomposition(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
+    """Per-user ``metric`` split by the hop band of each positive, mean +- sd over training seeds.
+
+    Returns:
+        Frame of ``name, band, n_seeds, mean, sd, n_pos, share_of_metric, share_of_pos``, ordered by band then mean
+        (descending). ``share_of_metric`` is the band's fraction of the model's summed band means, ``share_of_pos`` its
+        fraction of the positives.
+    """
+    seed_means = (
+        band_contributions(per_user_results, metric)
+        .group_by("name", "seed", "band")
+        .agg(seed_mean=pl.col("contribution").mean(), n_pos=pl.col("n_band_pos").sum())
+    )
+    band_to_ordinal = {band: _extract_band_lower_bound(band) for band in seed_means["band"].unique()}
+
+    return (
+        seed_means
+        .group_by("name", "band")
+        .agg(
+            n_seeds=pl.len(),
+            mean=pl.col("seed_mean").mean(),
+            sd=pl.col("seed_mean").std(),
+            n_pos=pl.col("n_pos").mean(),
+        )
+        .with_columns(
+            share_of_metric=pl.col("mean") / pl.col("mean").sum().over("name"),
+            share_of_pos=pl.col("n_pos") / pl.col("n_pos").sum().over("name"),
+        )
+        .sort(pl.col("band").replace_strict(band_to_ordinal), "mean", descending=[False, True])
+    )
+
+
+def paired_comparison_by_band(
+    per_user_results: pl.DataFrame,
+    reference_model: str,
+    metric: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` run on each hop band's contribution to the per-user ``metric``.
+
+    Returns:
+        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
+        ``mean_diff`` (descending).
+    """
+    contributions = band_contributions(per_user_results, metric)
+    bands = sorted(contributions["band"].unique(), key=_extract_band_lower_bound)
+
+    comparisons = [
+        paired_comparison(
+            contributions.filter(pl.col("band") == band), reference_model, "contribution", n_bootstrap, seed
+        ).with_columns(band=pl.lit(band))
+        for band in bands
+    ]
+
+    return pl.concat(comparisons).select("band", pl.all().exclude("band"))
+
+
+# =========================================
+# Recall@k curve
+# =========================================
+
+
+def recall_at_ks(per_user_results: pl.DataFrame, ks: Sequence[int]) -> pl.DataFrame:
+    """Per-user recall@k for each value of k ``ks``.
+
+    If a positive is tied to enter the top-k, it is resolved as follows: instead of adding 1 to the count of hits,
+    add ``# remaining empty top-k "slots" / # entries in tie``, the expected value of the hit count.
+
+    Returns:
+        Frame of ``name, stage, seed, user_id, k, recall_at_k``, one row per model, seed, user and cutoff.
+    """
+    rows = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).with_row_index("row")
+    cutoffs = pl.DataFrame({"k": list(ks)}, schema={"k": pl.Int64})
+
+    return (
+        rows
+        .select("row", "name", "stage", "seed", "user_id", N_SCORED_HIGHER_COLUMN, N_TIED_COLUMN)
+        .explode(N_SCORED_HIGHER_COLUMN, N_TIED_COLUMN)
+        .join(cutoffs, how="cross")
+        .with_columns(
+            p_in_top_k=((pl.col("k") - pl.col(N_SCORED_HIGHER_COLUMN)) / (pl.col(N_TIED_COLUMN) + 1)).clip(0.0, 1.0)
+        )
+        .group_by("row", "name", "stage", "seed", "user_id", "k")
+        .agg(recall_at_k=pl.col("p_in_top_k").mean())
+        .sort("row", "k")
+        .select("name", "stage", "seed", "user_id", "k", "recall_at_k")
+    )
+
+
+def recall_curve(per_user_results: pl.DataFrame, ks: Sequence[int]) -> pl.DataFrame:
+    """Per-user recall@k at each k cutoff in ``ks``, mean +- sd over training seeds.
+
+    Returns:
+        Frame of ``name, k, n_seeds, mean, sd``, ordered by k then mean (descending).
+    """
+    return (
+        recall_at_ks(per_user_results, ks)
+        .group_by("name", "seed", "k")
+        .agg(seed_mean=pl.col("recall_at_k").mean())
+        .group_by("name", "k")
+        .agg(n_seeds=pl.len(), mean=pl.col("seed_mean").mean(), sd=pl.col("seed_mean").std())
+        .sort("k", "mean", descending=[False, True])
+    )
+
+
+def paired_comparison_by_k(
+    per_user_results: pl.DataFrame,
+    reference_model: str,
+    ks: Sequence[int],
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` of the per-user recall@k at each cutoff in ``ks``.
+
+    Returns:
+        Frame of ``k, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by k then
+        ``mean_diff`` (descending).
+    """
+    recalls = recall_at_ks(per_user_results, ks)
+
+    comparisons = [
+        paired_comparison(
+            recalls.filter(pl.col("k") == k), reference_model, "recall_at_k", n_bootstrap, seed
+        ).with_columns(k=pl.lit(k, dtype=pl.Int64))
+        for k in ks
+    ]
+
+    return pl.concat(comparisons).select("k", pl.all().exclude("k"))
 
 
 # =========================================
@@ -679,6 +872,21 @@ def print_report(
 
         print("\n-- hop bands (mean +- sd over seeds) --")
         print(compute_hop_band_table(aggregate, analysis.hop_models))
+
+        print(f"\n-- per-user {analysis.per_user_metric} by hop band of each positive, avg over seeds --")
+        print(band_decomposition(per_user, analysis.per_user_metric))
+
+        print(
+            f"\n-- paired per-user {analysis.per_user_metric} by hop band of each positive, vs {analysis.reference_model} --"
+        )
+        print(paired_comparison_by_band(per_user, analysis.reference_model, analysis.per_user_metric))
+
+        ks = analysis.recall_curve_ks
+        print(f"\n-- per-user recall@k at k = {ks}, avg over seeds --")
+        print(recall_curve(per_user, ks))
+
+        print(f"\n-- paired per-user recall@k at k = {ks}, vs {analysis.reference_model} --")
+        print(paired_comparison_by_k(per_user, analysis.reference_model, ks))
 
         print("\n-- home coverage of test users --")
         print(home_coverage_summary(per_user))

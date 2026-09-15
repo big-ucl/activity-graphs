@@ -82,6 +82,8 @@ analysis:
   min_realised_size: 3
   # Home-zone occupancy thresholds `t` reported as `share_users_ge_{t}`.
   occupancy_thresholds: [ 10, 25, 60 ]
+  # List of points k at which to evaluate the recall@k
+  recall_curve_ks: [ 1, 2, 5, 10, 20 ]
   # Restrict the hop-band table to these models. null reports all models.
   hop_models: null
   # Run number `n` of `{dataset}-results-{n}.parquet`. null reads the latest.

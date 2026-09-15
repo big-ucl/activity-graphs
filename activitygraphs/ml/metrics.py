@@ -19,7 +19,9 @@ from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalRecall
 from torchmetrics.utilities.data import dim_zero_cat
 
 # Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
-DEFAULT_HOP_BANDS: tuple[tuple[str, float, float], ...] = (
+HopBands = Collection[tuple[str, float, float]]
+
+DEFAULT_HOP_BANDS: HopBands = (
     ("0-2", 0, 2),
     ("3-5", 3, 5),
     ("6-8", 6, 8),
@@ -49,7 +51,7 @@ class HopBandMetrics(torch.nn.Module):
     both the scalar logging keys and the W&B ``hop_bands`` table are derived from.
     """
 
-    def __init__(self, hop_bands: Collection[tuple[str, float, float]], k: int) -> None:
+    def __init__(self, hop_bands: HopBands, k: int) -> None:
         super().__init__()
         self.hop_bands = tuple(hop_bands)
         self.k = k
@@ -168,16 +170,22 @@ class RetrievalRPrecision(Metric):
 
 
 class PerUserRanking(Metric):
-    """Per-user test-time ranking scores, retained rather than averaged.
+    """Ranking scores for each test user, disaggregate.
 
-    An aggregate ranking metric collapses the test split to a single number, which cannot
-    separate a real difference between two models from run-to-run noise. Keeping the per-user
-    score lets two models be compared on the same users with a paired test (bootstrap or
-    signed-rank), which is far more sensitive than differencing two aggregates. ``n_pos`` is
-    retained alongside so comparisons can be stratified by realised set size.
+    Keeps the ranking scores and positive counts of each test user for futher analyses, as a struct of lists, indexed
+    by users:
+        - n_pos: number of positives for that user
+        - n_pos_home_incl: number of positives for that user, including the home node
+        - r_precision: R-precision for this user
+        - recall: recall@k for this user
 
-    ``n_pos_home_incl`` counts the positives before the excluded node is dropped, so a run can still
-    be re-read on the users whose home-included realised set reaches a given size.
+    Also keeps info about each of the users' positives (i.e. visited nodes, R = |RG_i|), NOT indexed by user, but by
+    ``sum(num_pos_u, u in users)`` (i.e. each index is a visited node), struct of flattened lists:
+        - pos_hops: number of hops from home to the positive node
+        - pos_in_top_r: did this positive node make it into the top R (= |RG_i|) nodes, ties broken arbitrarily
+        - pos_in_top_k: did this positive node make it into the top k nodes, ties broken arbitrarily
+        - pos_n_scored_higher: number of nodes ranked higher than the positive node
+        - pos_n_tied: number of nodes that tied with the positive node
     """
 
     full_state_update = False
@@ -187,27 +195,45 @@ class PerUserRanking(Metric):
     n_pos_home_incl: list[torch.Tensor]
     r_precision: list[torch.Tensor]
     recall: list[torch.Tensor]
+
+    pos_hops: list[torch.Tensor]
+    pos_in_top_r: list[torch.Tensor]
+    pos_in_top_k: list[torch.Tensor]
+    pos_n_scored_higher: list[torch.Tensor]
+    pos_n_tied: list[torch.Tensor]
+
     score_vector: list[torch.Tensor]
 
     _FIELDS = ("user_id", "n_pos", "n_pos_home_incl", "r_precision", "recall")
+    _POSITIVE_FIELDS = ("pos_hops", "pos_in_top_r", "pos_in_top_k", "pos_n_scored_higher", "pos_n_tied")
 
     def __init__(self, k: int, store_score_vectors: bool = False) -> None:
         super().__init__()
         self.k = k
         self.store_score_vectors = store_score_vectors
-        for field in self._FIELDS:
+        for field in self._FIELDS + self._POSITIVE_FIELDS:
             self.add_state(field, default=[], dist_reduce_fx="cat")
 
         self.add_state("score_vector", default=[], dist_reduce_fx="cat")
 
-    def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor, exclude: torch.Tensor) -> None:
-        """Accumulate one row per user in the batch, skipping users with no positives.
+    def update(
+        self,
+        preds: torch.Tensor,
+        target: torch.Tensor,
+        indexes: torch.Tensor,
+        exclude: torch.Tensor,
+        hops: torch.Tensor,
+    ) -> None:
+        """Update the per-user and per-positive tensors with the results from the current batch. Skips users with no
+        positives.
 
-        ``exclude`` marks the nodes to drop from both the candidate set and the realised set before
-        ranking, which is how the caller removes each user's own home node. Unlike the other ranking
-        metrics this one takes the full node universe and the mask rather than the restricted view,
-        because the retained score vector has to cover every node: the diagnostics read off it need
-        the excluded node's score.
+        Args:
+            preds: flat tensor of predicted scores, [n_users * n_nodes]
+            target: tensor of binary visit labels, aligned with ``preds``, [n_users * n_nodes]
+            indexes: tensor of user ids of each row, [n_users * n_nodes]
+            exclude: boolean mask of the rows to be excluded from ranking (e.g. ``is_home`` flag), , aligned with
+                ``preds``, [n_users * n_nodes]
+            hops: tensor of hop distances for each node, aligned with ``preds``, [n_users * n_nodes]
         """
         for idx in torch.unique(indexes):
             mask = indexes == idx
@@ -218,6 +244,7 @@ class PerUserRanking(Metric):
             non_excluded_nodes = ~exclude[mask]
             scored_target = full_target[non_excluded_nodes]
             scored_scores = full_scores[non_excluded_nodes]
+            scored_hops = hops[mask][non_excluded_nodes]
 
             num_positives = int(scored_target.sum())
             if num_positives == 0:
@@ -230,33 +257,59 @@ class PerUserRanking(Metric):
             r_precision = scored_target[top_r].sum() / num_positives
             recall = scored_target[top_k].sum() / num_positives
 
+            is_positive = scored_target.bool()
+            in_top_r = torch.zeros_like(is_positive)
+            in_top_r[top_r] = True
+            in_top_k = torch.zeros_like(is_positive)
+            in_top_k[top_k] = True
+
+            positive_scores = scored_scores[is_positive].unsqueeze(1)
+            n_scored_higher = (scored_scores.unsqueeze(0) > positive_scores).sum(dim=1)
+            n_tied = (scored_scores.unsqueeze(0) == positive_scores).sum(dim=1) - 1
+
             self.user_id.append(idx.reshape(1).long())
             self.n_pos.append(torch.full((1,), num_positives, dtype=torch.long, device=scored_scores.device))
             self.n_pos_home_incl.append(full_num_positives.reshape(1).long())
             self.r_precision.append(r_precision.reshape(1).float())
             self.recall.append(recall.reshape(1).float())
 
+            self.pos_hops.append(scored_hops[is_positive].float())
+            self.pos_in_top_r.append(in_top_r[is_positive])
+            self.pos_in_top_k.append(in_top_k[is_positive])
+            self.pos_n_scored_higher.append(n_scored_higher.long())
+            self.pos_n_tied.append(n_tied.long())
+
             if self.store_score_vectors:
                 self.score_vector.append(full_scores.detach().float().reshape(1, -1).cpu())
 
     def columns(self) -> dict[str, torch.Tensor]:
-        """Return the retained per-user columns, each a 1-D tensor of length n_users.
+        """Return the per-user columns as a mapping (col_name -> tensor of values), values are indexed by users.  See
+        class docstring for description of columns.
 
         Use this rather than ``compute``: the torchmetrics wrapper around ``compute`` squeezes
         single-element outputs to 0-dim, which would turn a one-user split into a scalar.
         """
-        if not self.user_id:
-            return {field: torch.empty(0) for field in self._FIELDS}
-
         return {field: dim_zero_cat(getattr(self, field)) for field in self._FIELDS}
 
-    def score_vectors(self) -> torch.Tensor:
-        """Return the retained score vectors as ``[n_users, num_nodes]``, row-aligned with ``columns()``.
-
-        Empty when ``store_score_vectors`` is off. The scores are the model's per-node ranking scores over
-        the whole node universe (including the excluded home node) which the summary columns reduce away.
-        The model-health checks are computed from them and cannot be recovered from the summaries afterwards.
+    def positive_columns(self) -> dict[str, list[list]]:
+        """Return the positive (visited nodes) columns as a mapping (col_name -> tensor of values), values are indexed
+        by positives (i.e. ``sum(num_pos_u for u in users)``). See class docstring for description of columns.
         """
+        values = {pos_field: dim_zero_cat(getattr(self, pos_field)).tolist() for pos_field in self._POSITIVE_FIELDS}
+        positives: dict[str, list[list]] = {pos_field: [] for pos_field in self._POSITIVE_FIELDS}
+
+        start = 0
+        for count in dim_zero_cat(self.n_pos).tolist():
+            end = start + count
+            for pos_field in self._POSITIVE_FIELDS:
+                positives[pos_field].append(values[pos_field][start:end])
+            start = end
+
+        return positives
+
+    def score_vectors(self) -> torch.Tensor:
+        """Return the tensor of model score vectors, row-aligned with ``columns()``, ``[n_users, num_nodes]``. Empty
+        when ``store_score_vectors`` is off."""
         if not self.score_vector:
             return torch.empty(0)
 

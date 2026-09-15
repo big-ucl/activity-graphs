@@ -58,7 +58,7 @@ def _():
 def _(cfg, load_run, project_root):
     reports_data_path = project_root / cfg.paths.reports_data
 
-    full_run = 3
+    full_run = 7
     demographics_run = 4
     overfit_run = 5
 
@@ -115,7 +115,7 @@ def _(aggregate_results, analysis):
 
     aggregate_table = aggregate_metrics(aggregate_results, analysis.main_metric)
     aggregate_table
-    return (aggregate_table,)
+    return aggregate_metrics, aggregate_table
 
 
 @app.cell(hide_code=True)
@@ -199,6 +199,21 @@ def _(
         height=alt.Step(22),
         title=f"{analysis.main_metric} by model, mean +- 1 sd over seeds",
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(analysis, mo):
+    mo.md(f"""
+    Sanity check: _{analysis.diagnostic_metric}_, the same metric with each user's home node kept as a candidate and in
+    the realised set. It should sit near the pre-exclusion headline and is not comparable to _{analysis.main_metric}_.
+    """)
+    return
+
+
+@app.cell
+def _(aggregate_metrics, aggregate_results, analysis):
+    aggregate_metrics(aggregate_results, analysis.diagnostic_metric)
     return
 
 
@@ -301,6 +316,90 @@ def _(analysis, paired_comparison, per_user_results):
 @app.cell
 def _(analysis, paired_metrics_mlp, plot_paired_comparison):
     plot_paired_comparison(paired_metrics_mlp, analysis.per_user_metric, "MLP-dist")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Realised set size
+    Test users by home-included `|RG_i|`. A user whose only visit is their own home has nothing left to rank once home
+    is excluded, so they are dropped from the per-user metrics.
+    """)
+    return
+
+
+@app.cell
+def _(aggregate_results, per_user_results):
+    from activitygraphs.analysis import _num_scored_dropped_users, realised_size_summary
+
+    _, _n_dropped = _num_scored_dropped_users(aggregate_results)
+
+    realised_sizes = realised_size_summary(per_user_results, _n_dropped)
+    realised_sizes
+    return (realised_sizes,)
+
+
+@app.cell(hide_code=True)
+def _(BASELINE_HUE, LEARNED_HUE, alt, json_safe, pl, realised_sizes):
+    _statuses = ["scored", "dropped (home only)"]
+    _sizes = json_safe(
+        realised_sizes.with_columns(
+            status=pl.when("scored").then(pl.lit(_statuses[0])).otherwise(pl.lit(_statuses[1])),
+            label=(100 * pl.col("share_of_users")).round(1).cast(pl.Utf8) + pl.lit("%"),
+        )
+    )
+
+    _size_bar = (
+        alt
+        .Chart(_sizes)
+        .mark_bar(cornerRadiusEnd=3)
+        .encode(
+            x=alt.X("n_pos_home_incl:O", title="|RG_i| including home", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("share_of_users:Q", title="share of test users", axis=alt.Axis(format="%")),
+            color=alt.Color(
+                "status:N",
+                scale=alt.Scale(domain=_statuses, range=[LEARNED_HUE, BASELINE_HUE]),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=["n_pos_home_incl", "status", "n_users", "share_of_users"],
+        )
+    )
+    _size_labels = _size_bar.mark_text(dy=-6).encode(text="label:N", color=alt.value("#52514e"))
+
+    alt.layer(_size_bar, _size_labels).properties(width=540, height=200, title="Test users by realised set size")
+    return
+
+
+@app.cell(hide_code=True)
+def _(analysis, mo):
+    mo.md(f"""
+    Per-user _{analysis.per_user_metric}_ restricted to the users with home-included `|RG_i| >= {analysis.min_realised_size}`,
+    and the paired comparison against _{analysis.reference_model}_ on the same users.
+    """)
+    return
+
+
+@app.cell
+def _(analysis, paired_comparison, per_user_results):
+    from activitygraphs.analysis import _restrict_to_realised_size, per_user_metric_summary
+
+    _restricted = _restrict_to_realised_size(per_user_results, analysis.min_realised_size)
+    paired_metrics_restricted = paired_comparison(_restricted, analysis.reference_model, analysis.per_user_metric)
+
+    per_user_metric_summary(_restricted, analysis.per_user_metric)
+    return (paired_metrics_restricted,)
+
+
+@app.cell
+def _(paired_metrics_restricted):
+    paired_metrics_restricted
+    return
+
+
+@app.cell
+def _(analysis, paired_metrics_restricted, plot_paired_comparison):
+    plot_paired_comparison(paired_metrics_restricted, analysis.per_user_metric, analysis.reference_model)
     return
 
 
@@ -549,6 +648,309 @@ def _(
             title=f"{hop_metric_select.value} by distance from home, mean +- 1 sd over seeds",
         ),
         alt.layer(_positives_bar, _positives_labels).properties(width=540, height=110, title="Where the positives are"),
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(analysis, mo):
+    mo.md(f"""
+    ### Decomposition by hop band of each positive
+    The hop-band table above ranks only the nodes inside each band. Here every positive is ranked against the full
+    candidate set and credited to the band it sits in, so a model's band contributions sum to its per-user
+    _{analysis.per_user_metric}_.
+
+    - `share_of_metric`: fraction of the model's _{analysis.per_user_metric}_ delivered by the band
+    - `share_of_pos`: fraction of the positives that sit in the band
+    """)
+    return
+
+
+@app.cell
+def _(analysis, per_user_results):
+    from activitygraphs.analysis import band_decomposition
+
+    band_decomposition_table = band_decomposition(per_user_results, analysis.per_user_metric)
+    band_decomposition_table
+    return (band_decomposition_table,)
+
+
+@app.cell(hide_code=True)
+def _(SERIES_HUES, alt, analysis, band_decomposition_table, json_safe, pl):
+    _band_order = band_decomposition_table["band"].unique(maintain_order=True).to_list()
+    _models = (
+        band_decomposition_table
+        .group_by("name")
+        .agg(pl.col("mean").sum())
+        .sort("mean", descending=True)["name"]
+        .to_list()
+    )
+    _contributions = json_safe(
+        band_decomposition_table.with_columns(
+            band_rank=pl.col("band").replace_strict({band: i for i, band in enumerate(_band_order)}, return_dtype=pl.Int64)
+        )
+    )
+
+    (
+        alt
+        .Chart(_contributions)
+        .mark_bar()
+        .encode(
+            y=alt.Y("name:N", sort=_models, title=None),
+            x=alt.X("mean:Q", stack="zero", title=f"{analysis.per_user_metric}, mean over seeds"),
+            color=alt.Color(
+                "band:N",
+                scale=alt.Scale(domain=_band_order, range=SERIES_HUES[: len(_band_order)]),
+                legend=alt.Legend(title="hops from home", orient="top"),
+            ),
+            order=alt.Order("band_rank:Q"),
+            tooltip=["name", "band", "mean", "sd", "share_of_metric", "share_of_pos"],
+        )
+        .properties(
+            width=540,
+            height=alt.Step(22),
+            title=f"{analysis.per_user_metric} split by the hop band of each positive (bars sum to the headline)",
+        )
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(analysis, mo):
+    mo.md(f"""
+    Paired per-user difference in each band's contribution against _{analysis.reference_model}_. A model's band
+    differences sum to its overall paired difference, so this locates the distance rings in which it gains or loses.
+    """)
+    return
+
+
+@app.cell
+def _(analysis, per_user_results):
+    from activitygraphs.analysis import paired_comparison_by_band
+
+    paired_metrics_by_band = paired_comparison_by_band(
+        per_user_results, analysis.reference_model, analysis.per_user_metric
+    )
+    paired_metrics_by_band
+    return (paired_metrics_by_band,)
+
+
+@app.cell(hide_code=True)
+def _(
+    AHEAD_HUE,
+    BEHIND_HUE,
+    GRID_HUE,
+    alt,
+    analysis,
+    json_safe,
+    paired_metrics,
+    paired_metrics_by_band,
+    pl,
+):
+    _band_order = paired_metrics_by_band["band"].unique(maintain_order=True).to_list()
+    _by_band = json_safe(
+        paired_metrics_by_band.with_columns(
+            direction=pl
+            .when(pl.col("mean_diff") >= 0)
+            .then(pl.lit("ahead of reference"))
+            .otherwise(pl.lit("behind reference"))
+        )
+    )
+    _y = alt.Y("name:N", sort=paired_metrics["name"].to_list(), title=None)
+    _colour = alt.Color(
+        "direction:N",
+        scale=alt.Scale(domain=["ahead of reference", "behind reference"], range=[AHEAD_HUE, BEHIND_HUE]),
+        legend=alt.Legend(title=None, orient="top"),
+    )
+    _x_title = "paired difference"
+
+    _zero_rule_chart = alt.Chart().mark_rule(color=GRID_HUE, strokeDash=[4, 4]).encode(x=alt.datum(0))
+    _interval_chart = (
+        alt
+        .Chart()
+        .mark_rule(strokeWidth=2, opacity=0.45)
+        .encode(y=_y, x=alt.X("ci_lo:Q", title=_x_title), x2="ci_hi:Q", color=_colour)
+    )
+    _point_chart = (
+        alt
+        .Chart()
+        .mark_point(filled=True, size=70, opacity=1.0)
+        .encode(
+            y=_y,
+            x=alt.X("mean_diff:Q", title=_x_title),
+            color=_colour,
+            tooltip=["band", "name", "n_users", "mean_diff", "ci_lo", "ci_hi", "wilcoxon_p", "per_seed_sd"],
+        )
+    )
+
+    (
+        alt
+        .layer(_zero_rule_chart, _interval_chart, _point_chart, data=_by_band)
+        .properties(width=150, height=alt.Step(18))
+        .facet(column=alt.Column("band:N", sort=_band_order, title="hops from home"))
+        .properties(
+            title=f"Paired difference in each band's contribution vs {analysis.reference_model}, "
+            "95% bootstrap interval over users"
+        )
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(analysis, mo):
+    mo.md(f"""
+    ## Recall@k curve
+    Per-user recall at each cutoff k in `analysis.recall_curve_ks` = {list(analysis.recall_curve_ks)}, read from the
+    number of candidates scored above and tied with each positive. A tied positive counts as a fractional hit: the share
+    of its tied positions that fall inside the top-k. A model that scores every candidate alike therefore gets
+    k / n_candidates rather than a perfect score.
+    """)
+    return
+
+
+@app.cell
+def _(analysis, per_user_results):
+    from activitygraphs.analysis import recall_curve
+
+    recall_curve_table = recall_curve(per_user_results, analysis.recall_curve_ks)
+    recall_curve_table
+    return (recall_curve_table,)
+
+
+@app.cell(hide_code=True)
+def _(SERIES_HUES, aggregate_table, analysis, mo, recall_curve_table):
+    _models = recall_curve_table["name"].unique(maintain_order=True).to_list()
+
+    _ranked = [name for name in aggregate_table["name"] if name in _models]
+    _defaults = [name for name in [*_ranked[:2], analysis.reference_model] if name in _models]
+
+    recall_model_select = mo.ui.multiselect(
+        options=_models,
+        value=list(dict.fromkeys(_defaults)),
+        label="models",
+        max_selections=len(SERIES_HUES),
+    )
+
+    recall_model_select
+    return (recall_model_select,)
+
+
+@app.cell(hide_code=True)
+def _(
+    SERIES_HUES,
+    alt,
+    analysis,
+    json_safe,
+    pl,
+    recall_curve_table,
+    recall_model_select,
+):
+    _shown = [model for model in recall_curve_table["name"].unique(maintain_order=True) if model in recall_model_select.value]
+    _selected = json_safe(
+        recall_curve_table.filter(pl.col("name").is_in(_shown)).with_columns(
+            lo=pl.col("mean") - pl.col("sd").fill_null(0.0), hi=pl.col("mean") + pl.col("sd").fill_null(0.0)
+        )
+    )
+
+    _ks = list(analysis.recall_curve_ks)
+    _x = alt.X(
+        "k:Q",
+        title="k (choice-set size)",
+        scale=alt.Scale(type="log", base=2, domain=[min(_ks), max(_ks)], nice=False, padding=12),
+        axis=alt.Axis(values=_ks, format="d"),
+    )
+    _colour = alt.Color(
+        "name:N",
+        scale=alt.Scale(domain=_shown, range=SERIES_HUES[: len(_shown)]),
+        legend=alt.Legend(title=None, orient="top", columns=2),
+    )
+
+    _interval = alt.Chart(_selected).mark_rule(strokeWidth=2, opacity=0.35).encode(x=_x, y="lo:Q", y2="hi:Q", color=_colour)
+    _line = (
+        alt
+        .Chart(_selected)
+        .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=60, filled=True))
+        .encode(
+            x=_x,
+            y=alt.Y("mean:Q", title="recall@k", scale=alt.Scale(domain=[0, 1])),
+            color=_colour,
+            tooltip=["name", "k", "n_seeds", "mean", "sd"],
+        )
+    )
+
+    alt.layer(_interval, _line).properties(width=540, height=300, title="Per-user recall@k, mean +- 1 sd over seeds")
+    return
+
+
+@app.cell(hide_code=True)
+def _(analysis, mo):
+    mo.md(f"""
+    Paired per-user recall@k against _{analysis.reference_model}_ at each cutoff, for the models selected above.
+    """)
+    return
+
+
+@app.cell
+def _(analysis, per_user_results):
+    from activitygraphs.analysis import paired_comparison_by_k
+
+    paired_metrics_by_k = paired_comparison_by_k(per_user_results, analysis.reference_model, analysis.recall_curve_ks)
+    paired_metrics_by_k
+    return (paired_metrics_by_k,)
+
+
+@app.cell(hide_code=True)
+def _(
+    GRID_HUE,
+    SERIES_HUES,
+    alt,
+    analysis,
+    json_safe,
+    paired_metrics_by_k,
+    pl,
+    recall_curve_table,
+    recall_model_select,
+):
+    # Colour domain matches the recall@k chart above, so a model keeps its hue across both.
+    _shown = [model for model in recall_curve_table["name"].unique(maintain_order=True) if model in recall_model_select.value]
+    _selected = json_safe(paired_metrics_by_k.filter(pl.col("name").is_in(_shown)))
+
+    _ks = list(analysis.recall_curve_ks)
+    _x = alt.X(
+        "k:Q",
+        title="k (choice-set size)",
+        scale=alt.Scale(type="log", base=2, domain=[min(_ks), max(_ks)], nice=False, padding=12),
+        axis=alt.Axis(values=_ks, format="d"),
+    )
+    _colour = alt.Color(
+        "name:N",
+        scale=alt.Scale(domain=_shown, range=SERIES_HUES[: len(_shown)]),
+        legend=alt.Legend(
+            title=None,
+            orient="top",
+            columns=2,
+            values=[model for model in _shown if model != analysis.reference_model],
+        ),
+    )
+
+    _zero_rule_chart = alt.Chart(_selected).mark_rule(color=GRID_HUE, strokeDash=[4, 4]).encode(y=alt.datum(0))
+    _interval_chart = alt.Chart(_selected).mark_area(opacity=0.18).encode(x=_x, y="ci_lo:Q", y2="ci_hi:Q", color=_colour)
+    _line_chart = (
+        alt
+        .Chart(_selected)
+        .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=60, filled=True))
+        .encode(
+            x=_x,
+            y=alt.Y("mean_diff:Q", title=f"paired difference in recall@k vs {analysis.reference_model}"),
+            color=_colour,
+            tooltip=["name", "k", "n_users", "mean_diff", "ci_lo", "ci_hi", "wilcoxon_p", "per_seed_sd"],
+        )
+    )
+
+    alt.layer(_zero_rule_chart, _interval_chart, _line_chart).properties(
+        width=540,
+        height=260,
+        title="Paired per-user recall@k difference, 95% bootstrap interval over users",
     )
     return
 

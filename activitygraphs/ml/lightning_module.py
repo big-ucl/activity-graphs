@@ -1,6 +1,5 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
-from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -22,6 +21,7 @@ from activitygraphs.ml.metrics import (
     PerUserRanking,
     RetrievalRPrecision,
     hop_band_scalars,
+    HopBands,
 )
 from activitygraphs.ml.sampling import pps_sampling
 
@@ -225,7 +225,7 @@ class ActivityGraphModule(L.LightningModule):
         k: int = 5,
         weight_decay: float = 1e-4,
         schedule_lr: bool = False,
-        hop_bands: Collection[tuple[str, float, float]] = DEFAULT_HOP_BANDS,
+        hop_bands: HopBands = DEFAULT_HOP_BANDS,
         pop_logit: torch.Tensor | None = None,
         pop_mode: Literal["none", "offset", "feature"] = "none",
         use_home_pe: bool = False,
@@ -280,7 +280,7 @@ class ActivityGraphModule(L.LightningModule):
         # Metrics: per-user test scores retained for paired model comparison, in column format
         # (one entry per test user), populated by `on_test_epoch_end`.
         self.test_per_user = PerUserRanking(k, store_score_vectors=store_score_vectors)
-        self.per_user_columns: dict[str, list[float]] = {}
+        self.per_user_columns: dict[str, list] = {}
 
         # Full per-node score vector of each test user, kept only when `store_score_vectors` is set.
         self.per_user_score_vectors: list[list[float]] = []
@@ -367,7 +367,7 @@ class ActivityGraphModule(L.LightningModule):
             scored=scored_mask,
         )
 
-    def _compute_evaluation_tensors(self, batch) -> EvaluationTensors:
+    def _common_evaluation_step(self, batch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
         out = self.compute_logits(batch)
 
         generator = torch.Generator(device=out.device).manual_seed(42)
@@ -379,7 +379,7 @@ class ActivityGraphModule(L.LightningModule):
         users = batch.user_id[batch.batch]
         ranking_tensors = self._compute_ranking_tensors(batch, out)
 
-        return EvaluationTensors(
+        eval_tensors = EvaluationTensors(
             logits=out,
             loss=loss,
             bce=bce,
@@ -389,6 +389,16 @@ class ActivityGraphModule(L.LightningModule):
             users=users,
             ranking=ranking_tensors,
         )
+
+        # Log loss metrics
+        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": batch.num_nodes}
+        if self.loss.name != "bce":
+            self.log(f"{step_prefix}_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
+
+        self.log(f"{step_prefix}_bce", eval_tensors.bce, **log_loss_kwargs)
+        self.log(f"{step_prefix}_bce_weighted", eval_tensors.bce_weighted, **log_loss_kwargs)
+
+        return eval_tensors
 
     def _num_scored_and_dropped_users(self, stage: Literal["val", "test"]) -> dict[str, float]:
         """Returns a dictionary of the number of scored and dropped users for a given stage. Each key is
@@ -400,15 +410,8 @@ class ActivityGraphModule(L.LightningModule):
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
     def validation_step(self, batch, batch_idx: int) -> None:
-        eval_tensors = self._compute_evaluation_tensors(batch)
+        eval_tensors = self._common_evaluation_step(batch, "val")
         ranking_tensors = eval_tensors.ranking
-
-        # Log loss metrics
-        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": batch.num_nodes}
-        if self.loss.name != "bce":
-            self.log(f"val_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
-        self.log("val_bce", eval_tensors.bce, **log_loss_kwargs)
-        self.log("val_bce_weighted", eval_tensors.bce_weighted, **log_loss_kwargs)
 
         # Ranking metrics
         # torchmetrics Retrieval* treat preds as probabilities and drop preds <= 0, so feed sigmoid
@@ -433,15 +436,10 @@ class ActivityGraphModule(L.LightningModule):
         self.val_calibration.reset()
 
     def test_step(self, batch, batch_idx: int) -> None:
-        eval_tensors = self._compute_evaluation_tensors(batch)
+        eval_tensors = self._common_evaluation_step(batch, "test")
         ranking = eval_tensors.ranking
 
-        # Log loss metrics
-        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": batch.num_nodes}
-        if self.loss.name != "bce":
-            self.log(f"test_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
-        self.log("test_bce", eval_tensors.bce, **log_loss_kwargs)
-        self.log("test_bce_weighted", eval_tensors.bce_weighted, **log_loss_kwargs)
+        node_home_hops = compute_home_hops(batch, self.home_hop_distance, self.is_home_idx)
 
         # Ranking metrics
         self.test_metrics.update(  # Feed sigmoid to conform to torchmetrics calling convention (see validation step)
@@ -453,12 +451,16 @@ class ActivityGraphModule(L.LightningModule):
 
         # Per-user metrics
         self.test_per_user.update(  # All nodes included, drops home node itself instead to allow full per-user comparison
-            eval_tensors.probs, eval_tensors.target.long(), indexes=eval_tensors.users, exclude=~ranking.scored
+            eval_tensors.probs,
+            eval_tensors.target.long(),
+            indexes=eval_tensors.users,
+            exclude=~ranking.scored,
+            hops=node_home_hops,
         )
 
         # Hop-band metrics
-        hops = ranking.restrict(compute_home_hops(batch, self.home_hop_distance, self.is_home_idx))
-        self.hop_band_metrics.update(hops, ranking.logits, ranking.target, ranking.users)
+        ranking_node_home_hops = ranking.restrict(node_home_hops)
+        self.hop_band_metrics.update(ranking_node_home_hops, ranking.logits, ranking.target, ranking.users)
 
         # Calibration metrics
         self.test_calibration.update(eval_tensors.probs, eval_tensors.target.long())
@@ -502,6 +504,7 @@ class ActivityGraphModule(L.LightningModule):
 
         # Not logged: these are per-user vectors, not scalars. Persisted by `run_experiment`.
         self.per_user_columns = {name: value.cpu().tolist() for name, value in self.test_per_user.columns().items()}
+        self.per_user_columns = self.per_user_columns | self.test_per_user.positive_columns()
         self.per_user_score_vectors = self.test_per_user.score_vectors().cpu().tolist()
         self.test_per_user.reset()
 
