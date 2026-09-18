@@ -1,24 +1,75 @@
+from pathlib import Path
+
 import marimo
+
+from activitygraphs.analysis import load_score_vectors
 
 __generated_with = "0.23.8"
 app = marimo.App(width="medium")
 
 
-@app.cell
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Activity graphs - results and analysis
+    """)
+    return
+
+
+@app.cell(hide_code=True)
 def _():
     import marimo as mo
 
+    return (mo,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Dataset selection
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    dataset_dropdown = mo.ui.dropdown(["cmap", "geneva"], value="cmap", label="Dataset:")
+    dataset_dropdown
+    return (dataset_dropdown,)
+
+
+@app.cell
+def _(dataset_dropdown):
+    dataset_str = dataset_dropdown.value
+    full_run = 7
+    demographics_run = 4
+    overfit_run = 5
+    latest = None
+
+    run = latest
+    extra_runs = []
+    return dataset_str, extra_runs, overfit_run, run
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Imports, config, and loading
+    """)
+    return
+
+
+@app.cell
+def _(dataset_str, mo):
     import altair as alt
-    import torch
-    import torch_geometric as pyg
     import polars as pl
 
     from activitygraphs.config import load_config
     from pathlib import Path
 
     project_root = Path(mo.notebook_dir().parent)
-    cfg = load_config(project_root, data="cmap")
-    return alt, cfg, mo, pl, project_root
+    cfg = load_config(project_root, data=dataset_str)
+    return alt, cfg, pl, project_root
 
 
 @app.cell
@@ -49,28 +100,27 @@ def _(pl):
 
 @app.cell
 def _():
-    from activitygraphs.analysis import load_run
+    from activitygraphs.analysis import POPULARITY_MODEL, R_PRECISION_COLUMN, load_report_run, load_run
+    from activitygraphs.analysis import _latest_run as latest_run
 
-    return (load_run,)
+    return POPULARITY_MODEL, R_PRECISION_COLUMN, latest_run, load_report_run, load_run
 
 
 @app.cell
-def _(cfg, load_run, project_root):
+def _(cfg, extra_runs, latest_run, load_report_run, project_root, run):
     reports_data_path = project_root / cfg.paths.reports_data
+    ranking_budget = cfg.train.largest_size_recall_at_k
+    report_run = latest_run(reports_data_path, cfg.data.name) if run is None else run
 
-    full_run = 7
-    demographics_run = 4
-    overfit_run = 5
-
-    run = full_run
-
-    aggregate_results, per_user_results = load_run(reports_data_path, cfg.data.name, run=run)
+    aggregate_results, per_user_results = load_report_run(
+        reports_data_path, cfg.data.name, report_run, extra_runs, ranking_budget
+    )
     return (
         aggregate_results,
-        overfit_run,
         per_user_results,
+        ranking_budget,
+        report_run,
         reports_data_path,
-        run,
     )
 
 
@@ -101,27 +151,40 @@ def _(mo):
     return
 
 
+@app.cell
+def _(analysis, ranking_budget):
+    headline = f"{analysis.per_user_metric}@{ranking_budget}"
+    return (headline,)
+
+
 @app.cell(hide_code=True)
-def _(analysis, mo):
+def _(headline, mo):
     mo.md(f"""
-    Metric: _{analysis.main_metric}_, averaged over seeds
+    Metric: _{headline}_, the per-user mean recall@k over k = 1..K, averaged over users and then over seeds. It is
+    derived from the stored per-positive ranks, so runs recorded before it was logged read on it too.
     """)
     return
 
 
 @app.cell
-def _(aggregate_results, analysis):
-    from activitygraphs.analysis import aggregate_metrics
+def _(analysis, per_user_results, pl):
+    from activitygraphs.analysis import PER_USER_STAGE, aggregate_metrics, per_user_metric_summary
 
-    aggregate_table = aggregate_metrics(aggregate_results, analysis.main_metric)
+    aggregate_table = per_user_metric_summary(per_user_results, analysis.per_user_metric)
+    headline_per_seed = (
+        per_user_results
+        .filter(pl.col("stage") == PER_USER_STAGE)
+        .group_by("name", "seed")
+        .agg(value=pl.col(analysis.per_user_metric).mean())
+    )
     aggregate_table
-    return aggregate_metrics, aggregate_table
+    return aggregate_metrics, aggregate_table, headline_per_seed
 
 
 @app.cell(hide_code=True)
-def _(analysis, mo):
+def _(analysis, headline, mo):
     mo.md(f"""
-    Comparison chart between all models (learned and baselines) on _{analysis.main_metric}_. 
+    Comparison chart between all models (learned and baselines) on _{headline}_. 
 
     - Each seed (model run) is a hollow circle.
     - The mean score is the filled circle, along with a +- 1 sd interval
@@ -136,20 +199,16 @@ def _(
     BASELINE_HUE,
     GRID_HUE,
     LEARNED_HUE,
-    aggregate_results,
     aggregate_table,
     alt,
     analysis,
+    headline,
+    headline_per_seed,
     json_safe,
     model_kinds,
     pl,
 ):
-    _scores_per_seed = json_safe(
-        aggregate_results
-        .filter(pl.col("stage") == "test")
-        .select("name", "seed", value=analysis.main_metric)
-        .join(model_kinds, on="name")
-    )
+    _scores_per_seed = json_safe(headline_per_seed.join(model_kinds, on="name"))
     _score_spread = json_safe(
         aggregate_table.join(model_kinds, on="name").with_columns(
             lo=pl.col("mean") - pl.col("sd").fill_null(0.0),
@@ -174,7 +233,7 @@ def _(
         alt
         .Chart(_score_spread)
         .mark_rule(strokeWidth=2, opacity=0.45)
-        .encode(y=_y, x=alt.X("lo:Q", title=analysis.main_metric), x2="hi:Q", color=_colour)
+        .encode(y=_y, x=alt.X("lo:Q", title=headline), x2="hi:Q", color=_colour)
     )
     _score_mean_chart = (
         alt
@@ -182,9 +241,9 @@ def _(
         .mark_point(filled=True, size=90, opacity=1.0)
         .encode(
             y=_y,
-            x=alt.X("mean:Q", title=analysis.main_metric, scale=alt.Scale(zero=True)),
+            x=alt.X("mean:Q", title=headline, scale=alt.Scale(zero=True)),
             color=_colour,
-            tooltip=["name", "n_seeds", "mean", "sd", "min", "max"],
+            tooltip=["name", "n_users", "n_seeds", "mean", "sd"],
         )
     )
     _reference_model_rule = (
@@ -197,23 +256,22 @@ def _(
     alt.layer(_reference_model_rule, _score_interval_chart, _score_points_chart, _score_mean_chart).properties(
         width=540,
         height=alt.Step(22),
-        title=f"{analysis.main_metric} by model, mean +- 1 sd over seeds",
+        title=f"{headline} by model, mean +- 1 sd over seeds",
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(analysis, mo):
+def _(R_PRECISION_COLUMN, mo):
     mo.md(f"""
-    Sanity check: _{analysis.diagnostic_metric}_, the same metric with each user's home node kept as a candidate and in
-    the realised set. It should sit near the pre-exclusion headline and is not comparable to _{analysis.main_metric}_.
+    Diagnostic: _{R_PRECISION_COLUMN}_, how often the top-|RG_i| picks are right, as logged at test time.
     """)
     return
 
 
 @app.cell
-def _(aggregate_metrics, aggregate_results, analysis):
-    aggregate_metrics(aggregate_results, analysis.diagnostic_metric)
+def _(R_PRECISION_COLUMN, aggregate_metrics, aggregate_results):
+    aggregate_metrics(aggregate_results, R_PRECISION_COLUMN)
     return
 
 
@@ -381,8 +439,8 @@ def _(analysis, mo):
 
 
 @app.cell
-def _(analysis, paired_comparison, per_user_results):
-    from activitygraphs.analysis import _restrict_to_realised_size, per_user_metric_summary
+def _(analysis, paired_comparison, per_user_metric_summary, per_user_results):
+    from activitygraphs.analysis import _restrict_to_realised_size
 
     _restricted = _restrict_to_realised_size(per_user_results, analysis.min_realised_size)
     paired_metrics_restricted = paired_comparison(_restricted, analysis.reference_model, analysis.per_user_metric)
@@ -550,115 +608,12 @@ def _(mo):
     return
 
 
-@app.cell
-def _(aggregate_results):
-    from activitygraphs.analysis import compute_hop_band_table
-
-    hop_bands = compute_hop_band_table(aggregate_results)
-    hop_bands
-    return (hop_bands,)
-
-
-@app.cell(hide_code=True)
-def _(SERIES_HUES, aggregate_table, analysis, hop_bands, mo):
-    _models = hop_bands["name"].unique(maintain_order=True).to_list()
-    _metrics = hop_bands["metric"].unique(maintain_order=True).to_list()
-
-    _ranked = [name for name in aggregate_table["name"] if name in _models]
-    _defaults = [name for name in [*_ranked[:2], analysis.reference_model] if name in _models]
-
-    hop_metric_select = mo.ui.dropdown(
-        options=_metrics, value="recall@2" if "recall@2" in _metrics else _metrics[0], label="metric"
-    )
-    hop_model_select = mo.ui.multiselect(
-        options=_models,
-        value=list(dict.fromkeys(_defaults)),
-        label="models",
-        max_selections=len(SERIES_HUES),
-    )
-
-    mo.hstack([hop_metric_select, hop_model_select], justify="start", gap=1)
-    return hop_metric_select, hop_model_select
-
-
-@app.cell(hide_code=True)
-def _(
-    BASELINE_HUE,
-    SERIES_HUES,
-    alt,
-    hop_bands,
-    hop_metric_select,
-    hop_model_select,
-    json_safe,
-    pl,
-):
-    _band_order = hop_bands["band"].unique(maintain_order=True).to_list()
-    _selected = json_safe(
-        hop_bands.filter(
-            (pl.col("metric") == hop_metric_select.value) & pl.col("name").is_in(hop_model_select.value)
-        ).with_columns(lo=pl.col("mean") - pl.col("sd").fill_null(0.0), hi=pl.col("mean") + pl.col("sd").fill_null(0.0))
-    )
-
-    # Hues are handed out in slot order to the models on screen, so no two lines share one; the
-    # selector is capped at the number of slots for the same reason.
-    _shown = [model for model in hop_bands["name"].unique(maintain_order=True) if model in hop_model_select.value]
-
-    _x = alt.X("band:N", sort=_band_order, title=None, axis=alt.Axis(labelAngle=0))
-    _colour = alt.Color(
-        "name:N",
-        scale=alt.Scale(domain=_shown, range=SERIES_HUES[: len(_shown)]),
-        legend=alt.Legend(title=None, orient="top", columns=2),
-    )
-
-    _interval = alt.Chart(_selected).mark_rule(strokeWidth=2, opacity=0.35).encode(x=_x, y="lo:Q", y2="hi:Q", color=_colour)
-    _line = (
-        alt
-        .Chart(_selected)
-        .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=60, filled=True))
-        .encode(
-            x=_x,
-            y=alt.Y("mean:Q", title=hop_metric_select.value),
-            color=_colour,
-            tooltip=["name", "band", "mean", "sd", "n_pos"],
-        )
-    )
-
-    _positives = json_safe(
-        hop_bands
-        .group_by("band")
-        .agg(share_of_pos=pl.col("share_of_pos").mean())
-        .with_columns(label=(100 * pl.col("share_of_pos")).round(1).cast(pl.Utf8) + pl.lit("%"))
-    )
-    _positives_bar = (
-        alt
-        .Chart(_positives)
-        .mark_bar(color=BASELINE_HUE, opacity=0.55, cornerRadiusEnd=3)
-        .encode(
-            x=alt.X("band:N", sort=_band_order, title="hops from home", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("share_of_pos:Q", title="share of positives", axis=alt.Axis(format="%")),
-            tooltip=["band", "share_of_pos"],
-        )
-    )
-    _positives_labels = _positives_bar.mark_text(dy=-6, color="#52514e").encode(text="label:N")
-
-    alt.vconcat(
-        alt.layer(_interval, _line).properties(
-            width=540,
-            height=260,
-            title=f"{hop_metric_select.value} by distance from home, mean +- 1 sd over seeds",
-        ),
-        alt.layer(_positives_bar, _positives_labels).properties(width=540, height=110, title="Where the positives are"),
-    )
-    return
-
-
 @app.cell(hide_code=True)
 def _(analysis, mo):
     mo.md(f"""
     ### Decomposition by hop band of each positive
-    The hop-band table above ranks only the nodes inside each band. Here every positive is ranked against the full
-    candidate set and credited to the band it sits in, so a model's band contributions sum to its per-user
-    _{analysis.per_user_metric}_.
+    Every positive is ranked against the full candidate set and credited to the band it sits in, so a model's band
+    contributions sum to its per-user _{analysis.per_user_metric}_.
 
     - `share_of_metric`: fraction of the model's _{analysis.per_user_metric}_ delivered by the band
     - `share_of_pos`: fraction of the positives that sit in the band
@@ -679,11 +634,7 @@ def _(analysis, per_user_results):
 def _(SERIES_HUES, alt, analysis, band_decomposition_table, json_safe, pl):
     _band_order = band_decomposition_table["band"].unique(maintain_order=True).to_list()
     _models = (
-        band_decomposition_table
-        .group_by("name")
-        .agg(pl.col("mean").sum())
-        .sort("mean", descending=True)["name"]
-        .to_list()
+        band_decomposition_table.group_by("name").agg(pl.col("mean").sum()).sort("mean", descending=True)["name"].to_list()
     )
     _contributions = json_safe(
         band_decomposition_table.with_columns(
@@ -712,6 +663,31 @@ def _(SERIES_HUES, alt, analysis, band_decomposition_table, json_safe, pl):
             title=f"{analysis.per_user_metric} split by the hop band of each positive (bars sum to the headline)",
         )
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(BASELINE_HUE, alt, band_decomposition_table, json_safe, pl):
+    _band_order = band_decomposition_table["band"].unique(maintain_order=True).to_list()
+    _positives = json_safe(
+        band_decomposition_table
+        .group_by("band")
+        .agg(share_of_pos=pl.col("share_of_pos").mean())
+        .with_columns(label=(100 * pl.col("share_of_pos")).round(1).cast(pl.Utf8) + pl.lit("%"))
+    )
+    _positives_bar = (
+        alt
+        .Chart(_positives)
+        .mark_bar(color=BASELINE_HUE, opacity=0.55, cornerRadiusEnd=3)
+        .encode(
+            x=alt.X("band:N", sort=_band_order, title="hops from home", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("share_of_pos:Q", title="share of positives", axis=alt.Axis(format="%")),
+            tooltip=["band", "share_of_pos"],
+        )
+    )
+    _positives_labels = _positives_bar.mark_text(dy=-6, color="#52514e").encode(text="label:N")
+
+    alt.layer(_positives_bar, _positives_labels).properties(width=540, height=110, title="Where the positives are")
     return
 
 
@@ -808,11 +784,20 @@ def _(analysis, mo):
     return
 
 
-@app.cell
-def _(analysis, per_user_results):
-    from activitygraphs.analysis import recall_curve
+@app.cell(hide_code=True)
+def _(POPULARITY_MODEL, mo):
+    mo.md(f"""
+    `lift` is each model's mean recall@k over that of _{POPULARITY_MODEL}_ at the same k, which is what compares across
+    datasets: a fixed k covers a different share of each graph.
+    """)
+    return
 
-    recall_curve_table = recall_curve(per_user_results, analysis.recall_curve_ks)
+
+@app.cell
+def _(POPULARITY_MODEL, analysis, per_user_results):
+    from activitygraphs.analysis import lift_over_reference
+
+    recall_curve_table = lift_over_reference(per_user_results, POPULARITY_MODEL, analysis.recall_curve_ks)
     recall_curve_table
     return (recall_curve_table,)
 
@@ -845,7 +830,9 @@ def _(
     recall_curve_table,
     recall_model_select,
 ):
-    _shown = [model for model in recall_curve_table["name"].unique(maintain_order=True) if model in recall_model_select.value]
+    _shown = [
+        model for model in recall_curve_table["name"].unique(maintain_order=True) if model in recall_model_select.value
+    ]
     _selected = json_safe(
         recall_curve_table.filter(pl.col("name").is_in(_shown)).with_columns(
             lo=pl.col("mean") - pl.col("sd").fill_null(0.0), hi=pl.col("mean") + pl.col("sd").fill_null(0.0)
@@ -874,7 +861,7 @@ def _(
             x=_x,
             y=alt.Y("mean:Q", title="recall@k", scale=alt.Scale(domain=[0, 1])),
             color=_colour,
-            tooltip=["name", "k", "n_seeds", "mean", "sd"],
+            tooltip=["name", "k", "n_seeds", "mean", "sd", "lift"],
         )
     )
 
@@ -912,7 +899,9 @@ def _(
     recall_model_select,
 ):
     # Colour domain matches the recall@k chart above, so a model keeps its hue across both.
-    _shown = [model for model in recall_curve_table["name"].unique(maintain_order=True) if model in recall_model_select.value]
+    _shown = [
+        model for model in recall_curve_table["name"].unique(maintain_order=True) if model in recall_model_select.value
+    ]
     _selected = json_safe(paired_metrics_by_k.filter(pl.col("name").is_in(_shown)))
 
     _ks = list(analysis.recall_curve_ks)
@@ -970,19 +959,19 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, reports_data_path, run):
-    from activitygraphs.analysis import load_score_vectors
-
-    score_vectors = load_score_vectors(reports_data_path, cfg.data.name, run=run)
+def _(cfg, extra_runs, report_run, reports_data_path):
+    path = Path(reports_data_path)
+    scores = load_score_vectors(path, cfg.data.name, report_run)
+    score_vectors = scores
     score_vectors
     return (score_vectors,)
 
 
 @app.cell
-def _(per_user_results, score_vectors):
+def _(POPULARITY_MODEL, per_user_results, score_vectors):
     from activitygraphs.analysis import check_model_health
 
-    model_health = check_model_health(score_vectors, per_user_results)
+    model_health = check_model_health(score_vectors, per_user_results, POPULARITY_MODEL)
     model_health
     return (model_health,)
 
@@ -991,7 +980,7 @@ def _(per_user_results, score_vectors):
 def _(mo):
     mo.md(r"""
     ### Overfit health
-    Best `train_r_precision` reached on the training batches. On a run made with
+    Best `train_avg_recall@K` reached on the training batches. On a run made with
     `train.overfit_batches > 0` this asks whether a model can fit a batch it is allowed to memorise;
     on a normal run it is the train side of the train/val ranking gap. Needs
     `train.log_train_ranking=true`.
@@ -1000,12 +989,12 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, load_run, overfit_run, reports_data_path):
+def _(cfg, load_run, overfit_run, ranking_budget, reports_data_path):
     from activitygraphs.analysis import check_overfit_health
 
     _aggregate_results, _ = load_run(reports_data_path, cfg.data.name, run=overfit_run)
 
-    overfit_health = check_overfit_health(_aggregate_results)
+    overfit_health = check_overfit_health(_aggregate_results, ranking_budget)
     overfit_health
     return
 
@@ -1071,18 +1060,18 @@ def _(
     BASELINE_HUE,
     LEARNED_HUE,
     alt,
-    analysis,
+    headline,
     json_safe,
     model_kinds,
     pl,
     summary,
 ):
-    _measures = [analysis.main_metric, "paired difference", "user_invariance", "popularity_corr", "home_is_top1"]
+    _measures = [headline, "paired difference", "user_invariance", "popularity_corr", "home_is_top1"]
     _long = json_safe(
         summary
         .select(
             "name",
-            pl.col("mean").alias(analysis.main_metric),
+            pl.col("mean").alias(headline),
             pl.col("mean_diff").alias("paired difference"),
             "user_invariance",
             "popularity_corr",

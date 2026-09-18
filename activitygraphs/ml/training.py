@@ -1,5 +1,6 @@
 """Training orchestration: run_experiment, evaluate_baseline, and shared feature/weight helpers."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -10,7 +11,7 @@ import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
-from activitygraphs.ml.callbacks import EpochMetricsCollector, HopBandTableLogger, OverfitDebugCallback
+from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.losses import Loss
@@ -95,25 +96,31 @@ def evaluate_baseline(
     datamodule: ActivityDataModule,
     loss: Loss,
     name: str,
-    k: int = 5,
+    max_recall_k: int,
+    recall_ks: Sequence[int],
     wandb_params: WandBParams | None = None,
     store_score_vectors: bool = False,
+    full_info: bool = False,
 ) -> pl.DataFrame:
     """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
 
     Returns two stage-tagged rows (one ``stage="fit"`` with the ``val_*`` metrics, one
     ``stage="test"`` with the ``test_*`` metrics) so baseline frames align with the
     ``run_experiment`` output.
+
+    Args:
+        full_info: Append each node's distance from home as the last feature column, for the distance baselines.
     """
     baseline_module = ActivityGraphModule(
         model=baseline,
         lr=0.0,
-        pos_weight=datamodule.pos_weight,
         loss=loss,
-        k=k,
+        max_recall_k=max_recall_k,
+        recall_ks=recall_ks,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
         store_score_vectors=store_score_vectors,
+        full_info=full_info,
     )
 
     if wandb_params and wandb_params.use_wandb:
@@ -134,7 +141,7 @@ def evaluate_baseline(
     else:
         logger = False
 
-    trainer = L.Trainer(logger=logger, callbacks=[HopBandTableLogger()], enable_progress_bar=False)
+    trainer = L.Trainer(logger=logger, enable_progress_bar=False)
 
     try:
         (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
@@ -159,6 +166,8 @@ def train_and_evaluate_model(
     model: torch.nn.Module,
     datamodule: ActivityDataModule,
     loss: Loss,
+    max_recall_k: int,
+    recall_ks: Sequence[int],
     num_epochs: int = 10,
     verbose: int = 1,
     name: str | None = None,
@@ -189,6 +198,8 @@ def train_and_evaluate_model(
         model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
         datamodule: ``ActivityDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
+        max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
+        recall_ks: Rank cutoffs of the logged ``recall@k``.
         num_epochs: Number of training epochs.
         verbose: Non-zero enables the Lightning progress bar.
         name: Experiment name used for logging and checkpoint filename.
@@ -216,9 +227,9 @@ def train_and_evaluate_model(
         Long-format DataFrame tagged by ``stage``: one ``stage="fit"`` row per epoch carrying
         ``train_loss`` and the ``val_*`` metrics, plus (when a test run executed) one
         ``stage="test"`` row carrying the ``test_*`` metrics and one ``stage="test_user"`` row per
-        test user carrying that user's ``r_precision`` and ``recall``. Columns: ``name``, ``stage``,
-        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_id``, ``n_pos``, ``r_precision``,
-        ``recall``; cells absent for a row's stage are null. Empty when ``fast_dev_run`` is True.
+        test user carrying that user's ``r_precision``. Columns: ``name``, ``stage``,
+        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_id``, ``n_pos``, ``r_precision``;
+        cells absent for a row's stage are null. Empty when ``fast_dev_run`` is True.
     """
     name = name or model.__class__.__name__
     run_name = name if run_tag is None else f"{name}-{run_tag}"
@@ -230,12 +241,12 @@ def train_and_evaluate_model(
     lit_model = ActivityGraphModule(
         model=model,
         lr=lr,
-        pos_weight=datamodule.pos_weight,
         loss=loss,
         reg=reg,
         full_info=full_info,
         use_demographics=use_demographics,
-        k=datamodule.train_dataset.median_realised_size,
+        max_recall_k=max_recall_k,
+        recall_ks=recall_ks,
         weight_decay=weight_decay,
         schedule_lr=schedule_lr,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
@@ -251,7 +262,7 @@ def train_and_evaluate_model(
     # Build the callbacks
 
     collector = EpochMetricsCollector()
-    callbacks: list[L.Callback] = [collector, HopBandTableLogger(), LearningRateMonitor(logging_interval="epoch")]
+    callbacks: list[L.Callback] = [collector, LearningRateMonitor(logging_interval="epoch")]
 
     if model_save_dir is not None:
         callbacks.append(

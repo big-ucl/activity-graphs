@@ -1,22 +1,16 @@
-"""Diagnostic metrics: contiguity-hop distance and distance-from-home hop-band ranking metrics.
+"""Ranking metrics (average recall, R-precision, per-user ranking) and the contiguity-hop distance."""
 
-Aggregate ranking metrics are dominated by near-home positives. To detect whether a model
-loses predictive power beyond its message-passing receptive field, ``ActivityGraphModule``
-groups each node by its spatial adjacency-hop distance from the user's home node into hop bands.
-It reports recall@k / ndcg@k within each band, using the per-hop-band torchmetrics collections
-built here. Regular per-step ranking metrics use ``torchmetrics`` directly in the Lightning module.
-"""
-
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import shortest_path
-from torchmetrics import MeanMetric, Metric, MetricCollection, SumMetric
-from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalRecall
+from torch_geometric.utils import to_dense_batch
+from torchmetrics import Metric
 from torchmetrics.utilities.data import dim_zero_cat
+
+from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
 HopBands = Collection[tuple[str, float, float]]
@@ -42,92 +36,90 @@ def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.nd
     return shortest_path(adjacency, method="D", unweighted=True, directed=False)
 
 
-class HopBandMetrics(torch.nn.Module):
-    """Ranking, NLL and positive-count metrics computed separately within each hop band.
+@torch.no_grad()
+def per_user_recall(
+    preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor, budget: int, ks: Sequence[int]
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Compute each user's ``avg_recall@budget`` and tie-aware ``recall@k``, over the users in a flat batch.
 
-    Ranking is restricted to the nodes inside a band, so each band answers "within this distance
-    ring, does the model separate visited from unvisited nodes" - the distance decay a model gets
-    for free from home is factored out. ``compute`` returns one row per band in long format, which
-    both the scalar logging keys and the W&B ``hop_bands`` table are derived from.
+    Args:
+        preds: Candidate scores, ``[n_rows]``.
+        target: Binary labels aligned with ``preds``, ``[n_rows]``.
+        indexes: User id of each row, ``[n_rows]``.
+        budget: Largest rank cutoff ``K`` of ``avg_recall@K``.
+        ks: Rank cutoffs of the returned ``recall@k``.
+
+    Returns:
+        ``(avg_recall, recall_at_ks, n_dropped)``: ``[n_scored_users]`` and ``[n_scored_users, len(ks)]`` for the
+        users with at least one positive, and the number of users without one.
+    """
+    _, user_row = torch.unique(indexes, return_inverse=True)
+    order = torch.argsort(user_row, stable=True)
+
+    scores, valid = to_dense_batch(preds[order], user_row[order])
+    labels, _ = to_dense_batch(target[order].bool(), user_row[order], fill_value=False)
+    n_pos = (labels & valid).sum(dim=1)
+
+    n_higher, n_tied = positive_rank_stats(scores, labels, valid)
+    positive_row = torch.repeat_interleave(torch.arange(len(n_pos), device=preds.device), n_pos)
+    cutoffs = torch.as_tensor(list(ks), device=preds.device)
+
+    avg_recall_sum = torch.zeros(len(n_pos), device=preds.device).index_add_(
+        0, positive_row, average_recall(n_higher, n_tied, budget).float()
+    )
+    recall_sum = torch.zeros(len(n_pos), len(cutoffs), device=preds.device).index_add_(
+        0, positive_row, expected_recall_at_k(n_higher[:, None], n_tied[:, None], cutoffs[None, :]).float()
+    )
+
+    scored = n_pos > 0
+    denominator = n_pos[scored].float()
+
+    return avg_recall_sum[scored] / denominator, recall_sum[scored] / denominator[:, None], int((~scored).sum())
+
+
+class RetrievalAverageRecall(Metric):
+    """Per-user mean recall@k over ``k = 1..budget``, plus the tie-aware recall@k at ``ks``, averaged over users.
+
+    Users without a positive are dropped from the average and counted in ``n_dropped``.
+
+    Args:
+        budget: Largest rank cutoff ``K`` of ``avg_recall@K``.
+        ks: Rank cutoffs of the reported ``recall@k``.
     """
 
-    def __init__(self, hop_bands: HopBands, k: int) -> None:
+    higher_is_better = True
+    full_state_update = False
+
+    def __init__(self, budget: int, ks: Sequence[int]) -> None:
         super().__init__()
-        self.hop_bands = tuple(hop_bands)
-        self.k = k
-        self.ranking = torch.nn.ModuleDict({
-            label: MetricCollection({
-                "recall": RetrievalRecall(top_k=k, empty_target_action="skip"),
-                "ndcg": RetrievalNormalizedDCG(top_k=k, empty_target_action="skip"),
-            })
-            for label, _, _ in self.hop_bands
-        })
-        self.nll = torch.nn.ModuleDict({label: MeanMetric() for label, _, _ in self.hop_bands})
-        self.n_pos = torch.nn.ModuleDict({label: SumMetric() for label, _, _ in self.hop_bands})
-        self._seen: set[str] = set()
+        self.budget = budget
+        self.ks = list(ks)
+        self.add_state("avg_recall_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("recall_sum", default=torch.zeros(len(self.ks)), dist_reduce_fx="sum")
+        self.add_state("n_users", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("n_dropped", default=torch.tensor(0), dist_reduce_fx="sum")
 
-    def update(self, hops: torch.Tensor, logits: torch.Tensor, target: torch.Tensor, user_ids: torch.Tensor) -> None:
-        """Accumulate one batch, given each node's hop distance from its user's home node."""
-        scores = logits.sigmoid()
+    def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
+        avg_recall, recall_at_ks, n_dropped = per_user_recall(preds, target, indexes, self.budget, self.ks)
 
-        for label, low, high in self.hop_bands:
-            mask = (hops >= low) & (hops <= high)
-            if not mask.any():
-                continue
+        self.avg_recall_sum = self.avg_recall_sum + avg_recall.sum()
+        self.recall_sum = self.recall_sum + recall_at_ks.sum(dim=0)
+        self.n_users = self.n_users + len(avg_recall)
+        self.n_dropped = self.n_dropped + n_dropped
 
-            band_target = target[mask]
-            self.ranking[label].update(scores[mask], band_target, indexes=user_ids[mask])
-            self.nll[label].update(
-                F.binary_cross_entropy_with_logits(logits[mask], band_target.float(), reduction="none")
-            )
-            self.n_pos[label].update(band_target.sum())
+    def compute(self) -> dict[str, torch.Tensor]:
+        """Returns ``avg_recall@{budget}`` and ``recall@{k}`` for each ``k`` in ``ks``."""
+        n_users = self.n_users.clamp(min=1)
+        recall_at_ks = self.recall_sum / n_users
 
-            if band_target.sum() > 0:
-                self._seen.add(label)
+        return {
+            f"avg_recall@{self.budget}": self.avg_recall_sum / n_users,
+            **{f"recall@{k}": recall_at_ks[i] for i, k in enumerate(self.ks)},
+        }
 
-    def compute(self) -> list[dict[str, float | str]]:
-        """Return one row per band, in band order, skipping bands that saw no positives.
-
-        Bands with no positives are skipped. The lower bound of the hop band, ``hop_low``, is
-        included as a numeric sort key.
-        """
-        rows: list[dict[str, float | str]] = []
-
-        for label, low, _ in self.hop_bands:
-            if label not in self._seen:
-                continue
-
-            row: dict[str, float | str] = {"hop_band": label, "hop_low": low, "k": self.k}
-            row |= {name: value.item() for name, value in self.ranking[label].compute().items()}
-            row |= {"nll": self.nll[label].compute().item(), "n_pos": self.n_pos[label].compute().item()}
-            rows.append(row)
-
-        return rows
-
-    def reset(self) -> None:
-        for label, _, _ in self.hop_bands:
-            self.ranking[label].reset()
-            self.nll[label].reset()
-            self.n_pos[label].reset()
-        self._seen.clear()
-
-
-def hop_band_scalars(rows: Collection[dict[str, float | str]]) -> dict[str, float]:
-    """Flatten hop-band rows into ``test_hop_<label>_<metric>`` scalar logging keys.
-
-    Ranking metrics keep their ``@k`` suffix (e.g. ``test_hop_3-5_recall@25``); ``nll`` and
-    ``n_pos`` do not, since they are not cutoff-dependent.
-    """
-    scalars = {}
-
-    for row in rows:
-        prefix = f"test_hop_{row['hop_band']}_"
-        for name in ("recall", "ndcg"):
-            scalars[f"{prefix}{name}@{row['k']}"] = float(row[name])
-        for name in ("nll", "n_pos"):
-            scalars[f"{prefix}{name}"] = float(row[name])
-
-    return scalars
+    def user_counts(self) -> dict[str, float]:
+        """Returns the count of users that were scored and the count of users that were dropped (empty ``RG_i``)."""
+        return {"n_scored_users": float(self.n_users), "n_dropped_users": float(self.n_dropped)}
 
 
 class RetrievalRPrecision(Metric):
@@ -163,11 +155,6 @@ class RetrievalRPrecision(Metric):
     def compute(self) -> torch.Tensor:
         return self.score_sum / self.n_users.clamp(min=1)
 
-    def user_counts(self) -> dict[str, float]:
-        """Returns a dictionary with two items: the count of users that were scored and the count of users that were
-        dropped (due to RG_i too small)."""
-        return {"n_scored_users": float(self.n_users), "n_dropped_users": float(self.n_dropped)}
-
 
 class PerUserRanking(Metric):
     """Ranking scores for each test user, disaggregate.
@@ -177,13 +164,11 @@ class PerUserRanking(Metric):
         - n_pos: number of positives for that user
         - n_pos_home_incl: number of positives for that user, including the home node
         - r_precision: R-precision for this user
-        - recall: recall@k for this user
 
     Also keeps info about each of the users' positives (i.e. visited nodes, R = |RG_i|), NOT indexed by user, but by
     ``sum(num_pos_u, u in users)`` (i.e. each index is a visited node), struct of flattened lists:
         - pos_hops: number of hops from home to the positive node
         - pos_in_top_r: did this positive node make it into the top R (= |RG_i|) nodes, ties broken arbitrarily
-        - pos_in_top_k: did this positive node make it into the top k nodes, ties broken arbitrarily
         - pos_n_scored_higher: number of nodes ranked higher than the positive node
         - pos_n_tied: number of nodes that tied with the positive node
     """
@@ -194,22 +179,19 @@ class PerUserRanking(Metric):
     n_pos: list[torch.Tensor]
     n_pos_home_incl: list[torch.Tensor]
     r_precision: list[torch.Tensor]
-    recall: list[torch.Tensor]
 
     pos_hops: list[torch.Tensor]
     pos_in_top_r: list[torch.Tensor]
-    pos_in_top_k: list[torch.Tensor]
     pos_n_scored_higher: list[torch.Tensor]
     pos_n_tied: list[torch.Tensor]
 
     score_vector: list[torch.Tensor]
 
-    _FIELDS = ("user_id", "n_pos", "n_pos_home_incl", "r_precision", "recall")
-    _POSITIVE_FIELDS = ("pos_hops", "pos_in_top_r", "pos_in_top_k", "pos_n_scored_higher", "pos_n_tied")
+    _FIELDS = ("user_id", "n_pos", "n_pos_home_incl", "r_precision")
+    _POSITIVE_FIELDS = ("pos_hops", "pos_in_top_r", "pos_n_scored_higher", "pos_n_tied")
 
-    def __init__(self, k: int, store_score_vectors: bool = False) -> None:
+    def __init__(self, store_score_vectors: bool = False) -> None:
         super().__init__()
-        self.k = k
         self.store_score_vectors = store_score_vectors
         for field in self._FIELDS + self._POSITIVE_FIELDS:
             self.add_state(field, default=[], dist_reduce_fx="cat")
@@ -251,31 +233,23 @@ class PerUserRanking(Metric):
                 continue
 
             top_r = scored_scores.topk(min(num_positives, scored_target.numel())).indices
-            top_k = scored_scores.topk(min(self.k, scored_target.numel())).indices
 
             full_num_positives = full_target.sum()
             r_precision = scored_target[top_r].sum() / num_positives
-            recall = scored_target[top_k].sum() / num_positives
 
             is_positive = scored_target.bool()
             in_top_r = torch.zeros_like(is_positive)
             in_top_r[top_r] = True
-            in_top_k = torch.zeros_like(is_positive)
-            in_top_k[top_k] = True
 
-            positive_scores = scored_scores[is_positive].unsqueeze(1)
-            n_scored_higher = (scored_scores.unsqueeze(0) > positive_scores).sum(dim=1)
-            n_tied = (scored_scores.unsqueeze(0) == positive_scores).sum(dim=1) - 1
+            n_scored_higher, n_tied = positive_rank_stats(scored_scores, scored_target)
 
             self.user_id.append(idx.reshape(1).long())
             self.n_pos.append(torch.full((1,), num_positives, dtype=torch.long, device=scored_scores.device))
             self.n_pos_home_incl.append(full_num_positives.reshape(1).long())
             self.r_precision.append(r_precision.reshape(1).float())
-            self.recall.append(recall.reshape(1).float())
 
             self.pos_hops.append(scored_hops[is_positive].float())
             self.pos_in_top_r.append(in_top_r[is_positive])
-            self.pos_in_top_k.append(in_top_k[is_positive])
             self.pos_n_scored_higher.append(n_scored_higher.long())
             self.pos_n_tied.append(n_tied.long())
 

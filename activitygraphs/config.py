@@ -245,7 +245,7 @@ class TrainConfig:
     split_seed: int
     train_seeds: list[int]
 
-    experiment: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health"]
+    experiment: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
     depths: list[int]
 
     batch_size: int
@@ -261,6 +261,7 @@ class TrainConfig:
     debug: bool
     save_score_vectors: bool
     log_train_ranking: bool
+    max_recall_k: int
 
     wandb: bool
     wandb_project: str
@@ -275,12 +276,10 @@ class AnalysisConfig:
 
     reference_model: str
     main_metric: str
-    diagnostic_metric: str
     per_user_metric: str
     min_realised_size: int
     occupancy_thresholds: list[int]
     recall_curve_ks: list[int]
-    hop_models: list[str] | None
     run: int | None
 
 

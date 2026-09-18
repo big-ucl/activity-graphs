@@ -6,6 +6,7 @@ from hydra.core.config_store import ConfigStore
 from activitygraphs.analysis import print_report
 from activitygraphs.config import Config
 from activitygraphs.experiments import (
+    baselines_experiment,
     comparison_experiment,
     demographics_ablation_experiment,
     depth_sweep_experiment,
@@ -20,6 +21,7 @@ EXPERIMENTS = {
     "depth_sweep": depth_sweep_experiment,
     "demographics_ablation": demographics_ablation_experiment,
     "overfit_health": overfit_health_experiment,
+    "baselines": baselines_experiment,
 }
 
 
@@ -34,7 +36,7 @@ def main(cfg: Config):
 
 @hydra.main(version_base=None, config_path="conf", config_name="report")
 def report_results(cfg: Config):
-    print_report(cfg.paths.reports_data, cfg.data.name, cfg.analysis.run, cfg.analysis)
+    print_report(cfg.paths.reports_data, cfg.data.name, cfg.train.max_recall_k, cfg.analysis.run, cfg.analysis)
 
 
 if __name__ == "__main__":

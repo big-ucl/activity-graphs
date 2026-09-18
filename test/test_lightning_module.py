@@ -15,28 +15,14 @@ from activitygraphs.ml.lightning_module import (
 )
 from activitygraphs.ml.models import NodeMLP
 
-
-# Local reference implementations used only to cross-check the torchmetrics Retrieval* output.
-# The project itself computes ranking metrics via torchmetrics, not these.
-def precision_at_k(scores, labels, k):
-    top_k = scores.topk(k).indices
-    return labels[top_k].sum().item() / k
+RANKING_BUDGET = 50
+RECALL_KS = [1, 3, 5]
 
 
 def recall_at_k(scores, labels, k):
-    top_k = scores.topk(k).indices
-    num_pos = labels.sum().int().item()
-    return labels[top_k].sum().item() / num_pos if num_pos else 0.0
-
-
-def ndcg_at_k(scores, labels, k):
-    order = scores.argsort(descending=True)[:k]
-    discounts = 1.0 / torch.log2(torch.arange(2, k + 2, dtype=torch.float))
-    dcg = (labels[order].float() * discounts).sum().item()
-    ideal = torch.zeros(k)
-    ideal[: min(int(labels.sum().item()), k)] = 1.0
-    idcg = (ideal * discounts).sum().item()
-    return dcg / idcg if idcg else 0.0
+    """Reference recall@k of one tie-free user, from an explicit top-k."""
+    top_k = scores.topk(min(k, scores.numel())).indices
+    return labels[top_k].sum().item() / labels.sum().item()
 
 
 NUM_NODE_FEATURES = 6
@@ -90,7 +76,6 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
 def make_module(
     reg: str | None = None,
     lambda_reg: float = 0.01,
-    pos_weight: float = 2.0,
     schedule_lr: bool = False,
     store_score_vectors: bool = False,
 ) -> ActivityGraphModule:
@@ -98,13 +83,14 @@ def make_module(
     return ActivityGraphModule(
         model=model,
         lr=1e-3,
-        pos_weight=torch.tensor(pos_weight),
         reg=reg,
         lambda_reg=lambda_reg,
         schedule_lr=schedule_lr,
         store_score_vectors=store_score_vectors,
         is_home_idx=IS_HOME_IDX,
         home_hop_distance=chain_hop_distance(),
+        max_recall_k=RANKING_BUDGET,
+        recall_ks=RECALL_KS,
     )
 
 
@@ -159,30 +145,6 @@ class TestTrainingStep:
 
         assert loss_l1 > loss_base
 
-    def test_pos_weight_does_not_affect_training_loss(self, monkeypatch):
-        """Training uses plain (unweighted) BCE, so pos_weight must not change the training loss."""
-        batch = make_batch(seed=2)
-        batch.y[0] = 1.0  # ensure at least one positive label
-
-        module_low = make_module(pos_weight=1.0)
-        monkeypatch.setattr(module_low, "log", lambda *a, **kw: None)
-        module_low.eval()  # disable dropout so the forward pass is deterministic
-        loss_low = module_low.training_step(batch, 0).item()
-
-        # reuse identical weights, only the pos_weight differs
-        module_high = ActivityGraphModule(
-            model=module_low.model,
-            lr=1e-3,
-            pos_weight=torch.tensor(10.0),
-            is_home_idx=IS_HOME_IDX,
-            home_hop_distance=chain_hop_distance(),
-        )
-        monkeypatch.setattr(module_high, "log", lambda *a, **kw: None)
-        module_high.eval()
-        loss_high = module_high.training_step(batch, 0).item()
-
-        assert loss_high == loss_low
-
 
 class TestValidationStep:
     def test_val_metric_keys_logged(self, monkeypatch):
@@ -198,30 +160,23 @@ class TestValidationStep:
             module.validation_step(batch, 0)
         module.on_validation_epoch_end()
 
-        k = module.k
         expected = {
             "val_bce",
-            "val_bce_weighted",
             "val_r_precision",
-            f"val_recall@{k}",
-            f"val_ndcg@{k}",
-            f"val_precision@{k}",
+            f"val_avg_recall@{RANKING_BUDGET}",
+            *(f"val_recall@{k}" for k in RECALL_KS),
             "val_calibration_l1",
         }
         assert expected.issubset(logged.keys())
         assert all(torch.as_tensor(logged[key]).isfinite() for key in expected)
 
     def test_ranking_metrics_match_reference(self, monkeypatch):
-        """torchmetrics precision/recall/ndcg must match the per-graph metrics.py functions.
+        """The logged average recall and recall@k must match an explicit top-k over each user's scored nodes.
 
-        One graph == one user_id, so the Retrieval* grouping is per graph and the unweighted mean
-        over non-empty groups equals the old per-graph average. The reference is computed on the
-        scored nodes only, since the home node is dropped from both the candidates and the labels.
-        MRR is excluded on purpose: RetrievalMRR uses first-relevant-rank, not mean-over-positives,
-        so its value differs.
+        The reference is computed on the scored nodes only, since the home node is dropped from both the candidates
+        and the labels.
         """
         module = make_module()
-        k = module.k
         batch = make_batch(num_graphs=4, num_nodes=8, seed=7)
         force_positive_per_graph(batch)
         capture_logs(module, monkeypatch)
@@ -232,22 +187,18 @@ class TestValidationStep:
                 extract_features(batch, module.full_info, IS_HOME_IDX), batch.edge_index, batch.edge_attr, batch.batch
             )
 
-        precisions, recalls, ndcgs = [], [], []
+        per_user = []
         for i in range(batch.num_graphs):
             mask = scored_nodes(batch, i)
-            scores = out[mask].squeeze()
+            scores = out[mask].squeeze().sigmoid()
             labels = batch.y[mask].squeeze()
-            if labels.sum().int().item() == 0:
-                continue
-            precisions.append(float(precision_at_k(scores, labels, k)))
-            recalls.append(float(recall_at_k(scores, labels, k)))
-            ndcgs.append(float(ndcg_at_k(scores, labels, k)))
+            recall_curve = [recall_at_k(scores, labels, k) for k in range(1, RANKING_BUDGET + 1)]
+            per_user.append({
+                f"val_avg_recall@{RANKING_BUDGET}": sum(recall_curve) / RANKING_BUDGET,
+                **{f"val_recall@{k}": recall_curve[k - 1] for k in RECALL_KS},
+            })
 
-        ref = {
-            f"val_precision@{k}": sum(precisions) / len(precisions),
-            f"val_recall@{k}": sum(recalls) / len(recalls),
-            f"val_ndcg@{k}": sum(ndcgs) / len(ndcgs),
-        }
+        ref = {key: sum(user[key] for user in per_user) / len(per_user) for key in per_user[0]}
 
         with torch.no_grad():
             module.validation_step(batch, 0)
@@ -280,7 +231,7 @@ class TestValidationStep:
 
 class TestTestStep:
     def test_test_metric_keys_logged(self, monkeypatch):
-        """test_step + on_test_epoch_end must populate the BCE, ranking, calibration, size, and sampled-set keys."""
+        """test_step + on_test_epoch_end must populate exactly the BCE, ranking, user-count and calibration keys."""
         module = make_module()
         batch = make_batch(num_graphs=3, num_nodes=8)
         force_positive_per_graph(batch)
@@ -292,22 +243,16 @@ class TestTestStep:
             module.test_step(batch, 0)
         module.on_test_epoch_end()
 
-        k = module.k
         expected = {
             "test_bce",
-            "test_bce_weighted",
             "test_r_precision",
-            f"test_recall@{k}",
-            f"test_ndcg@{k}",
-            f"test_precision@{k}",
+            f"test_avg_recall@{RANKING_BUDGET}",
+            *(f"test_recall@{k}" for k in RECALL_KS),
+            "test_n_scored_users",
+            "test_n_dropped_users",
             "test_calibration_l1",
-            "test_pred_size",
-            "test_true_size",
-            "test_sampled_recall",
-            "test_sampled_size",
-            "test_r_precision_home_incl",
         }
-        assert expected.issubset(logged.keys())
+        assert set(logged.keys()) == expected
 
 
 class TestUseDemographics:
@@ -320,10 +265,11 @@ class TestUseDemographics:
         return ActivityGraphModule(
             model=model,
             lr=1e-3,
-            pos_weight=torch.tensor(2.0),
             use_demographics=use_demographics,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
+            max_recall_k=RANKING_BUDGET,
+            recall_ks=RECALL_KS,
         )
 
     def test_demographics_are_concatenated_by_default(self):
@@ -351,14 +297,15 @@ class TestTrainRanking:
         return ActivityGraphModule(
             model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
             lr=1e-3,
-            pos_weight=torch.tensor(2.0),
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
+            max_recall_k=RANKING_BUDGET,
+            recall_ks=RECALL_KS,
             **kwargs,
         )
 
-    def test_logs_r_precision_on_the_training_batch_by_default(self, monkeypatch):
-        """Paired with `val_r_precision` this is the train/val ranking gap, which the BPR loss cannot give."""
+    def test_logs_average_recall_on_the_training_batch_by_default(self, monkeypatch):
+        """Paired with `val_avg_recall@K` this is the train/val ranking gap, which the BPR loss cannot give."""
         module = self._module()
         batch = make_batch(num_graphs=2, num_nodes=8)
         force_positive_per_graph(batch)
@@ -366,7 +313,7 @@ class TestTrainRanking:
 
         module.training_step(batch, 0)
 
-        assert "train_r_precision" in logged
+        assert f"train_avg_recall@{RANKING_BUDGET}" in logged
         assert "train_loss" in logged
 
     def test_can_be_switched_off(self, monkeypatch):
@@ -378,8 +325,8 @@ class TestTrainRanking:
 
         module.training_step(batch, 0)
 
-        assert module.train_r_precision is None
-        assert "train_r_precision" not in logged
+        assert module.train_avg_recall is None
+        assert f"train_avg_recall@{RANKING_BUDGET}" not in logged
         assert "train_loss" in logged
 
 
@@ -463,17 +410,6 @@ class TestPositiveHops:
 
         for row, n_pos in enumerate(columns["n_pos"]):
             assert sum(columns["pos_in_top_r"][row]) / n_pos == pytest.approx(columns["r_precision"][row])
-            assert sum(columns["pos_in_top_k"][row]) / n_pos == pytest.approx(columns["recall"][row])
-
-    def test_counts_reproduce_the_reported_recall(self, monkeypatch):
-        """No ties, so a positive is inside the top-k exactly when fewer than k candidates score higher."""
-        module, _ = self._tested(monkeypatch)
-        columns = module.per_user_columns
-
-        for row, n_pos in enumerate(columns["n_pos"]):
-            assert all(n_tied == 0 for n_tied in columns["pos_n_tied"][row])
-            hits = sum(n_scored_higher < module.k for n_scored_higher in columns["pos_n_scored_higher"][row])
-            assert hits / n_pos == pytest.approx(columns["recall"][row])
 
 
 class TestHomeExclusion:
@@ -523,7 +459,6 @@ class TestHomeExclusion:
             module.test_step(batch, 0)
 
         assert module.test_metrics["test_r_precision"].compute().item() == pytest.approx(0.0)
-        assert module.test_r_precision_home_incl.compute().item() > 0.0
 
     def test_logs_how_many_users_the_headline_covers_and_drops(self, monkeypatch):
         """One user realises only their own home, so the exclusion leaves them nothing to rank."""
@@ -541,8 +476,6 @@ class TestHomeExclusion:
 
         assert logged["test_n_scored_users"] == 1
         assert logged["test_n_dropped_users"] == 1
-        # The home-included target still covers both, which is why the counts have to be recorded.
-        assert logged["test_r_precision_home_incl"] > 0.0
 
     def test_nothing_is_dropped_when_every_user_keeps_a_non_home_node(self, monkeypatch):
         _, _, logged = self._tested(monkeypatch)
@@ -562,27 +495,6 @@ class TestHomeExclusion:
 
         assert logged["val_n_scored_users"] == 2
         assert logged["val_n_dropped_users"] == 0
-
-    def test_the_sampled_set_never_draws_the_home_node(self, monkeypatch):
-        """With exactly ``k`` candidates left after the exclusion, PPS must draw all of them.
-
-        A home node still in the pool could displace one of them, so a recall below 1.0 would mean
-        the sampled set had spent part of its budget on the user's own home.
-        """
-        module = make_module()
-        batch = make_batch(num_graphs=2, num_nodes=module.k + 1, seed=9)
-        force_positive_per_graph(batch)
-        capture_logs(module, monkeypatch)
-
-        # A model that would otherwise put nearly all of its sampling weight on home.
-        home_only = torch.full((batch.num_nodes, 1), -10.0)
-        home_only[batch.x[:, IS_HOME_IDX] > 0.0] = 10.0
-        monkeypatch.setattr(module, "compute_logits", lambda _batch: home_only)
-
-        with torch.no_grad():
-            module.test_step(batch, 0)
-
-        assert module.test_sampled_recall.compute().item() == pytest.approx(1.0)
 
 
 class TestRankingView:
@@ -674,9 +586,10 @@ def make_home_pe_module(
     return ActivityGraphModule(
         model=model,
         lr=1e-3,
-        pos_weight=torch.tensor(2.0),
         home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
+        max_recall_k=RANKING_BUDGET,
+        recall_ks=RECALL_KS,
         use_home_pe=True,
         home_pe_bins=n_bins,
     )

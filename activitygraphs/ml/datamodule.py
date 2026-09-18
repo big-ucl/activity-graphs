@@ -9,28 +9,21 @@ import torch_geometric as pyg
 
 from activitygraphs.config import Config
 from activitygraphs.ml.dataset import ActivityDataset, FittedScalers, load_dataset
-
-
-def _compute_training_weights(train_dataset: ActivityDataset) -> torch.Tensor:
-    """Compute BCE positive-class weight as sqrt(neg_count / pos_count) over the training dataset."""
-    idx = train_dataset.indices()
-    y = train_dataset.spatial_labels[idx]
-    num_pos = y.sum()
-    return torch.sqrt((y.numel() - num_pos) / num_pos)
+from activitygraphs.ml.popularity import popularity_logit
 
 
 def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tensor:
     """Compute the per-node visit popularity logit over the training dataset. logit(p_n), where p_n is the
-    train visit rate of node n. Shape [num_nodes].
+    home-excluded train visit rate of node n. Shape [num_nodes].
 
-    Same per-node rate as NodeBaseline, injected into the ML model outputs to see if they learn anything beyond the
-    "general" popularity signal."""
+    Same per-node rate as VisitFrequencyBaseline, injected into the ML model outputs to see if they learn anything
+    beyond the "general" popularity signal."""
 
-    idx = train_dataset.indices()
-    y = train_dataset.spatial_labels[idx].float()
-    p = y.mean(dim=0).squeeze(-1).clamp(1e-6, 1 - 1e-6)
+    idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
+    labels = train_dataset.spatial_labels[idx].squeeze(-1)
+    home_idx = train_dataset.spatial_features[idx, :, train_dataset.is_home_spatial_idx].argmax(dim=1)
 
-    return torch.log(p / (1 - p))
+    return popularity_logit(labels, home_idx)
 
 
 def _compute_home_coverage(train_dataset: ActivityDataset, test_dataset: ActivityDataset) -> pl.DataFrame:
@@ -54,7 +47,7 @@ class ActivityDataModule(L.LightningDataModule):
     """LightningDataModule wrapping ``load_dataset`` for activity graph prediction.
 
     Calls ``load_dataset`` on first ``setup()``, builds PyG DataLoaders, and exposes the
-    computed positive-class weight needed to initialise ``ActivityGraphModule``.
+    train-split popularity logits and the home coverage of the test users.
 
     Args:
         cfg: Hydra config containing dataset paths.
@@ -86,7 +79,6 @@ class ActivityDataModule(L.LightningDataModule):
         self._val_dataset: ActivityDataset | None = None
         self._test_dataset: ActivityDataset | None = None
         self._scalers: FittedScalers | None = None
-        self._pos_weight: torch.Tensor | None = None
         self._pop_logit: torch.Tensor | None = None
         self._home_coverage: pl.DataFrame | None = None
 
@@ -101,7 +93,6 @@ class ActivityDataModule(L.LightningDataModule):
         assert self._train_dataset is not None
         assert self._test_dataset is not None
 
-        self._pos_weight = _compute_training_weights(self._train_dataset)
         self._pop_logit = _compute_node_popularity_logit(self._train_dataset)
         self._home_coverage = _compute_home_coverage(self._train_dataset, self._test_dataset)
 
@@ -140,12 +131,6 @@ class ActivityDataModule(L.LightningDataModule):
         if self._scalers is None:
             raise RuntimeError("Call setup() before accessing scalers.")
         return self._scalers
-
-    @property
-    def pos_weight(self) -> torch.Tensor:
-        if self._pos_weight is None:
-            raise RuntimeError("Call setup() before accessing pos_weight.")
-        return self._pos_weight
 
     @property
     def pop_logit(self) -> torch.Tensor:

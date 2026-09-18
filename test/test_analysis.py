@@ -2,12 +2,14 @@
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 import polars as pl
 import pytest
 import torch
+import torch_geometric as pyg
 
 from activitygraphs.analysis import (
     DROPPED_USERS_COLUMN,
@@ -15,17 +17,18 @@ from activitygraphs.analysis import (
     SCORED_USERS_COLUMN,
     _average_metric_over_seeds,
     _diff_sd_per_seed,
-    _extract_band_and_metric,
     _latest_run,
     aggregate_metrics,
+    append_baselines,
     band_contributions,
     band_decomposition,
-    compute_hop_band_table,
     paired_comparison_by_band,
     paired_comparison_by_k,
     recall_at_ks,
     recall_curve,
     home_zone_summary,
+    lift_over_reference,
+    with_ranking_metrics,
     check_home_node_rank,
     load_run,
     load_score_vectors,
@@ -39,31 +42,25 @@ from activitygraphs.analysis import (
     _restrict_to_realised_size,
     _num_scored_dropped_users,
 )
+from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.models import NodeMLP
 from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"
+BUDGET = 50
 
 
 def make_aggregate() -> pl.DataFrame:
-    """Two seeds of one model plus a deterministic baseline, with two hop bands populated."""
+    """Two seeds of one model plus a deterministic baseline."""
     rows = [
         {"name": "MLP", "stage": "test", "seed": 42, "test_r_precision": 0.40},
         {"name": "MLP", "stage": "test", "seed": 43, "test_r_precision": 0.50},
         {"name": "Baseline", "stage": "test", "seed": None, "test_r_precision": 0.30},
         {"name": "MLP", "stage": "fit", "seed": 42, "test_r_precision": None},
     ]
-    bands = {
-        "test_hop_0-2_recall@2": [0.9, 1.0, 0.5, None],
-        "test_hop_0-2_n_pos": [30.0, 30.0, 30.0, None],
-        "test_hop_13+_recall@2": [0.1, 0.2, 0.05, None],
-        "test_hop_13+_n_pos": [10.0, 10.0, 10.0, None],
-    }
 
-    return pl.DataFrame(rows).with_columns(
-        **{col: pl.Series(values) for col, values in bands.items()},
-        **{SCORED_USERS_COLUMN: pl.lit(90.0), DROPPED_USERS_COLUMN: pl.lit(10.0)},
-    )
+    return pl.DataFrame(rows).with_columns(**{SCORED_USERS_COLUMN: pl.lit(90.0), DROPPED_USERS_COLUMN: pl.lit(10.0)})
 
 
 # Home-included |RG_i| of users 1, 2 and 3: only the last two clear the `min_realised_size` of 3.
@@ -237,23 +234,23 @@ class TestHomeNodeRank:
 class TestOverfitHealth:
     def _fit_rows(self) -> pl.DataFrame:
         return pl.DataFrame([
-            {"name": "MLP-dist", "stage": "fit", "epoch": 0, "train_r_precision": 0.3},
-            {"name": "MLP-dist", "stage": "fit", "epoch": 1, "train_r_precision": 0.99},
-            {"name": "MLP-dist", "stage": "fit", "epoch": 2, "train_r_precision": 0.97},
-            {"name": "GATSkip", "stage": "fit", "epoch": 0, "train_r_precision": 0.2},
-            {"name": "GATSkip", "stage": "fit", "epoch": 1, "train_r_precision": 0.25},
+            {"name": "MLP-dist", "stage": "fit", "epoch": 0, "train_avg_recall@50": 0.3},
+            {"name": "MLP-dist", "stage": "fit", "epoch": 1, "train_avg_recall@50": 0.99},
+            {"name": "MLP-dist", "stage": "fit", "epoch": 2, "train_avg_recall@50": 0.97},
+            {"name": "GATSkip", "stage": "fit", "epoch": 0, "train_avg_recall@50": 0.2},
+            {"name": "GATSkip", "stage": "fit", "epoch": 1, "train_avg_recall@50": 0.25},
         ])
 
     def test_reports_best_and_final_per_model(self):
-        health = self._fit_rows().pipe(check_overfit_health)
+        health = check_overfit_health(self._fit_rows(), BUDGET)
 
         assert health["name"].to_list() == ["GATSkip", "MLP-dist"]  # worst first
-        assert health["best_train_r_precision"].to_list() == pytest.approx([0.25, 0.99])
-        assert health["final_train_r_precision"].to_list() == pytest.approx([0.25, 0.97])
+        assert health["best_train_avg_recall"].to_list() == pytest.approx([0.25, 0.99])
+        assert health["final_train_avg_recall"].to_list() == pytest.approx([0.25, 0.97])
 
     def test_raises_without_a_train_ranking_column(self):
         with pytest.raises(KeyError, match="log_train_ranking"):
-            check_overfit_health(make_aggregate())
+            check_overfit_health(make_aggregate(), BUDGET)
 
 
 class TestModelHealthChecks:
@@ -273,7 +270,7 @@ class TestModelHealthChecks:
                 rows.append({"name": "HomeAware", "seed": seed, "user_id": user_id, "scores": home_aware})
 
         for user_id in self.HOMES:
-            rows.append({"name": "NodeMarginal", "seed": None, "user_id": user_id, "scores": list(self.POPULARITY)})
+            rows.append({"name": "VisitFrequency", "seed": None, "user_id": user_id, "scores": list(self.POPULARITY)})
 
         return pl.DataFrame(rows, schema_overrides={"seed": pl.Int64})
 
@@ -285,7 +282,7 @@ class TestModelHealthChecks:
         })
 
     def test_separates_a_collapsed_model_from_a_home_aware_one(self):
-        health = check_model_health(self._score_vectors(), self._per_user())
+        health = check_model_health(self._score_vectors(), self._per_user(), "VisitFrequency")
         by_name = {row["name"]: row for row in health.to_dicts()}
 
         # The collapsed model ranks every user identically and is exactly the popularity ordering.
@@ -299,31 +296,31 @@ class TestModelHealthChecks:
         assert by_name["HomeAware"]["user_invariance"] < 1.0
 
     def test_averages_over_seeds_and_counts_them(self):
-        health = check_model_health(self._score_vectors(), self._per_user())
+        health = check_model_health(self._score_vectors(), self._per_user(), "VisitFrequency")
         by_name = {row["name"]: row for row in health.to_dicts()}
 
         assert by_name["HomeAware"]["n_seeds"] == 2
-        assert by_name["NodeMarginal"]["n_seeds"] == 1  # deterministic, no seed
+        assert by_name["VisitFrequency"]["n_seeds"] == 1  # deterministic, no seed
         assert by_name["HomeAware"]["home_is_top1_sd"] == pytest.approx(0.0)
 
     def test_the_collapsed_models_sort_above_the_home_aware_one(self):
-        """`NodeMarginal` is collapsed by construction, so it ties `Collapsed` at the top."""
-        health = check_model_health(self._score_vectors(), self._per_user())
+        """`VisitFrequency` is collapsed by construction, so it ties `Collapsed` at the top."""
+        health = check_model_health(self._score_vectors(), self._per_user(), "VisitFrequency")
 
-        assert health["name"].to_list() == ["Collapsed", "NodeMarginal", "HomeAware"]
+        assert health["name"].to_list() == ["Collapsed", "VisitFrequency", "HomeAware"]
 
     def test_baseline_reproduces_the_popularity_ordering(self):
-        """NodeMarginal is the popularity reference, so it must score 1.0 against itself - a control on the check."""
-        health = check_model_health(self._score_vectors(), self._per_user())
+        """VisitFrequency is the popularity reference, so it must score 1.0 against itself - a control on the check."""
+        health = check_model_health(self._score_vectors(), self._per_user(), "VisitFrequency")
         by_name = {row["name"]: row for row in health.to_dicts()}
 
-        assert by_name["NodeMarginal"]["popularity_corr"] == pytest.approx(1.0)
+        assert by_name["VisitFrequency"]["popularity_corr"] == pytest.approx(1.0)
 
     def test_raises_when_the_popularity_reference_is_missing(self):
-        scores = self._score_vectors().filter(pl.col("name") != "NodeMarginal")
+        scores = self._score_vectors().filter(pl.col("name") != "VisitFrequency")
 
-        with pytest.raises(KeyError, match="NodeMarginal"):
-            check_model_health(scores, self._per_user())
+        with pytest.raises(KeyError, match="VisitFrequency"):
+            check_model_health(scores, self._per_user(), "VisitFrequency")
 
 
 class TestSeedSummary:
@@ -531,36 +528,6 @@ class TestDiffSdPerSeed:
         )
 
 
-class TestHopBands:
-    def test_splits_metric_names_containing_underscores(self):
-        assert _extract_band_and_metric("test_hop_3-5_recall@2") == ("test_hop_3-5_recall@2", "3-5", 3, "recall@2")
-        assert _extract_band_and_metric("test_hop_13+_n_pos") == ("test_hop_13+_n_pos", "13+", 13, "n_pos")
-
-    def test_share_of_positives_uses_the_band_counts(self):
-        table = compute_hop_band_table(make_aggregate(), models=["MLP"])
-        shares = dict(zip(table["band"], table["share_of_pos"], strict=True))
-        assert shares["0-2"] == 0.75  # 30 of 40 positives
-        assert shares["13+"] == 0.25
-
-    def test_reports_mean_and_sd_within_a_band(self):
-        table = compute_hop_band_table(make_aggregate(), models=["MLP"])
-        row = table.filter((pl.col("band") == "0-2") & (pl.col("metric") == "recall@2")).to_dicts()[0]
-        assert abs(row["mean"] - 0.95) < 1e-9
-        assert abs(row["sd"] - 0.0707106) < 1e-6
-
-    def test_n_pos_is_a_column_not_a_metric_row(self):
-        table = compute_hop_band_table(make_aggregate())
-        assert "n_pos" not in table["metric"].to_list()
-
-    def test_bands_are_ordered_by_their_lower_bound(self):
-        table = compute_hop_band_table(make_aggregate(), models=["MLP"])
-        assert table["band"].to_list() == ["0-2", "13+"]  # not lexicographic, which puts "13+" first
-
-    def test_models_filter_restricts_the_table(self):
-        table = compute_hop_band_table(make_aggregate(), models=["Baseline"])
-        assert table["name"].unique().to_list() == ["Baseline"]
-
-
 def make_positive_per_user() -> pl.DataFrame:
     """Two users scored by a model at two seeds and by a baseline once, with each positive's hop distance and flags."""
     user_hops = {1: [1.0, float("inf")], 2: [3.0, 5.0]}
@@ -569,6 +536,7 @@ def make_positive_per_user() -> pl.DataFrame:
         ("MLP", 43, {1: [True, False], 2: [True, False]}),
         ("Baseline", None, {1: [True, False], 2: [False, False]}),
     ]
+    scored_higher = {"MLP": {1: [0, 1], 2: [2, 3]}, "Baseline": {1: [0, 10], 2: [60, 49]}}
     rows = [
         {
             "name": name,
@@ -577,10 +545,10 @@ def make_positive_per_user() -> pl.DataFrame:
             "user_id": user,
             "n_pos": len(hops),
             "r_precision": sum(flags[user]) / len(hops),
-            "recall": 1.0,
             "pos_hops": hops,
             "pos_in_top_r": flags[user],
-            "pos_in_top_k": [True] * len(hops),
+            "pos_n_scored_higher": scored_higher[name][user],
+            "pos_n_tied": [0] * len(hops),
         }
         for name, seed, flags in top_r_flags
         for user, hops in user_hops.items()
@@ -635,13 +603,31 @@ class TestBandDecomposition:
         table = band_decomposition(make_positive_per_user(), PER_USER_METRIC).filter(pl.col("name") == "MLP")
         assert table["band"].to_list() == ["0-2", "3-5", "13+"]
 
-    def test_recall_reads_the_top_k_flag(self):
-        table = band_decomposition(make_positive_per_user(), "recall").filter(pl.col("name") == "Baseline")
-        assert table["mean"].sum() == pytest.approx(1.0)
-
-    def test_a_metric_without_a_flag_raises(self):
+    def test_a_metric_without_a_per_positive_value_raises(self):
         with pytest.raises(KeyError, match="decomposable metrics"):
             band_contributions(make_positive_per_user(), "ndcg")
+
+    def test_average_recall_contributions_sum_to_the_derived_per_user_value(self):
+        per_user = with_ranking_metrics(make_positive_per_user(), BUDGET).with_columns(pl.col("seed").fill_null(-1))
+        summed = (
+            band_contributions(per_user, "avg_recall")
+            .group_by("name", "seed", "user_id")
+            .agg(pl.col("contribution").sum())
+            .join(per_user.select("name", "seed", "user_id", "avg_recall"), on=["name", "seed", "user_id"])
+        )
+
+        assert summed.height == 6
+        assert summed["contribution"].to_list() == pytest.approx(summed["avg_recall"].to_list())
+
+    def test_average_recall_band_split_is_hand_computed(self):
+        """Baseline user 1: the hop-1 positive at rank 1 gives 1/2, the unreachable one at rank 11 gives 0.8 / 2."""
+        per_user = with_ranking_metrics(make_positive_per_user(), BUDGET)
+        contributions = band_contributions(per_user, "avg_recall").filter(
+            (pl.col("name") == "Baseline") & (pl.col("user_id") == 1)
+        )
+
+        by_band = dict(zip(contributions["band"], contributions["contribution"], strict=True))
+        assert by_band == pytest.approx({"0-2": 0.5, "3-5": 0.0, "13+": 0.4})
 
     def test_paired_band_differences_sum_to_the_overall_difference(self):
         per_user = make_positive_per_user()
@@ -733,6 +719,158 @@ class TestRecallCurve:
 
         assert paired.columns[0] == "k"
         assert dict(zip(paired["k"], paired["mean_diff"], strict=True)) == pytest.approx({1: 0.275, 2: 0.55})
+
+
+class TestWithRankingMetrics:
+    def test_derives_the_per_user_mean_of_the_positive_contributions(self):
+        """User 1 at seed 42 has positives at ranks 1 and 4: (50/50 + 47/50) / 2."""
+        per_user = with_ranking_metrics(make_ranked_per_user(), BUDGET)
+        row = per_user.filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_id") == 1))
+
+        assert row["avg_recall"].to_list() == pytest.approx([(1.0 + 0.94) / 2])
+        assert row["pos_avg_recall"].to_list() == [pytest.approx([1.0, 0.94])]
+
+    def test_keeps_the_rows_in_order(self):
+        per_user = make_ranked_per_user()
+
+        derived = with_ranking_metrics(per_user, BUDGET)
+
+        assert derived.drop("avg_recall", "pos_avg_recall").equals(per_user)
+
+    def test_a_fully_tied_user_gets_the_mean_over_its_tied_ranks(self):
+        """Ten tied candidates and K = 50: the positive is surely in the top k for k >= 10."""
+        per_user = with_ranking_metrics(make_ranked_per_user(), BUDGET).filter(pl.col("name") == "Uniform")
+
+        expected = (sum(k / 10 for k in range(1, 10)) + 41) / 50
+        assert per_user["avg_recall"].to_list() == pytest.approx([expected, expected])
+
+
+def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) -> tuple[dict, pl.DataFrame]:
+    """Test an untrained module on graphs with coarse scores, returning its logged metrics and per-user rows."""
+    generator = torch.Generator().manual_seed(0)
+    graphs = []
+    for user in range(num_graphs):
+        x = torch.rand(num_nodes, 2, generator=generator)
+        x[:, 0] = 0.0
+        x[0, 0] = 1.0
+        y = (torch.rand(num_nodes, 1, generator=generator) < 0.2).float()
+        y[0] = 1.0
+        graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
+        graph.graph_x = torch.zeros(1, 1)
+        graph.user_id = torch.tensor([user])
+        graphs.append(graph)
+
+    idx = torch.arange(num_nodes)
+    module = ActivityGraphModule(
+        model=NodeMLP(num_layers=2, in_channels=3, hidden_channels=8, out_channels=1),
+        lr=1e-3,
+        is_home_idx=0,
+        home_hop_distance=(idx[:, None] - idx[None, :]).abs().float(),
+        max_recall_k=budget,
+        recall_ks=[1, 5],
+    )
+    coarse_logits = (torch.rand(num_graphs * num_nodes, 1, generator=generator) * 4).round()
+    module.compute_logits = lambda _batch: coarse_logits
+
+    logged: dict = {}
+    module.log = lambda key, val, **kw: logged.__setitem__(key, val)
+    module.log_dict = lambda mapping, **kw: logged.update(mapping)
+
+    with torch.no_grad():
+        module.test_step(pyg.data.Batch.from_data_list(graphs), 0)
+    module.on_test_epoch_end()
+
+    per_user = pl.DataFrame(module.per_user_columns).with_columns(stage=pl.lit(PER_USER_STAGE))
+    return {key: float(value) for key, value in logged.items()}, per_user
+
+
+class TestPostHocMatchesLogged:
+    def test_average_recall(self):
+        """The coarse scores tie, so this also checks that both paths resolve ties the same way."""
+        logged, per_user = synthetic_test_run(budget=10)
+
+        derived = with_ranking_metrics(per_user, 10)
+
+        assert (per_user["pos_n_tied"].list.max() > 0).any()
+        assert derived["avg_recall"].mean() == pytest.approx(logged["test_avg_recall@10"], abs=1e-6)
+
+    def test_recall_at_k(self):
+        logged, per_user = synthetic_test_run(budget=10)
+
+        recalls = recall_at_ks(per_user.with_columns(name=pl.lit("MLP"), seed=pl.lit(42)), [1, 5])
+
+        for k in (1, 5):
+            post_hoc = recalls.filter(pl.col("k") == k)["recall_at_k"].mean()
+            assert post_hoc == pytest.approx(logged[f"test_recall@{k}"], abs=1e-6)
+
+
+class TestAppendBaselines:
+    def _extra_run(self) -> pl.DataFrame:
+        """A later run holding a new baseline and a learned model trained there."""
+        return pl.DataFrame({
+            "name": ["Gravity", "Gravity", "MLP-new", "MLP-new"],
+            "stage": [PER_USER_STAGE] * 4,
+            "user_id": [1, 2, 1, 2],
+            "seed": [None, None, 42, 42],
+            "r_precision": [0.25, 0.75, 1.0, 1.0],
+        })
+
+    def test_appends_only_the_seedless_rows(self):
+        combined = append_baselines(make_per_user(), self._extra_run())
+
+        assert combined.filter(pl.col("name") == "Gravity").height == 2
+        assert combined.filter(pl.col("name") == "MLP-new").is_empty()
+
+    def test_the_appended_baseline_pairs_by_user(self):
+        combined = append_baselines(make_per_user(), self._extra_run())
+
+        compared = paired_comparison(combined, "Gravity", PER_USER_METRIC, n_bootstrap=200)
+
+        assert compared.filter(pl.col("name") == "MLP")["n_users"].item() == 2
+
+    def test_a_name_in_both_runs_raises(self):
+        extra = self._extra_run().with_columns(name=pl.lit("Baseline"))
+
+        with pytest.raises(ValueError, match="Baseline"):
+            append_baselines(make_per_user(), extra)
+
+
+class TestLoadReportRun:
+    def _write_runs(self, path) -> None:
+        per_user = make_ranked_per_user().filter(pl.col("name") == "MLP")
+        extra = make_ranked_per_user().filter(pl.col("name") == "Uniform")
+        aggregate = pl.DataFrame({"name": ["MLP"], "stage": ["test"], "seed": [42], "test_r_precision": [0.5]})
+        extra_aggregate = pl.DataFrame(
+            {"name": ["Uniform"], "stage": ["test"], "seed": [None], "test_r_precision": [0.1]},
+            schema_overrides={"seed": pl.Int64},
+        )
+        for run, aggregate_frame, per_user_frame in [(1, aggregate, per_user), (2, extra_aggregate, extra)]:
+            aggregate_frame.write_parquet(path / f"GenevaTPG-results-{run}.parquet")
+            per_user_frame.write_parquet(path / f"GenevaTPG-per-user-{run}.parquet")
+
+        make_score_vectors([[0.1, 0.9]]).write_parquet(path / "GenevaTPG-scores-1.parquet")
+
+    def test_extra_runs_without_score_vectors_are_skipped(self, tmp_path):
+        self._write_runs(tmp_path)
+
+        path = Path(tmp_path)
+        scores1 = load_score_vectors(path, "GenevaTPG", 1)
+        scores = scores1
+
+        assert scores["name"].unique().to_list() == ["MLP-dist"]
+
+
+class TestLiftOverReference:
+    def test_divides_by_the_reference_mean_at_the_same_k(self):
+        lifted = lift_over_reference(make_ranked_per_user(), "Uniform", [1, 2])
+        mlp = lifted.filter(pl.col("name") == "MLP")
+
+        assert dict(zip(mlp["k"], mlp["lift"], strict=True)) == pytest.approx({1: 0.375 / 0.1, 2: 0.75 / 0.2})
+        assert lifted.filter(pl.col("name") == "Uniform")["lift"].to_list() == pytest.approx([1.0, 1.0])
+
+    def test_missing_reference_raises(self):
+        with pytest.raises(KeyError):
+            lift_over_reference(make_ranked_per_user(), "NotAModel", [1])
 
 
 class TestHomeZones:

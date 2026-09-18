@@ -1,5 +1,6 @@
 """ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -11,25 +12,12 @@ import torch_geometric as pyg
 from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
-from torchmetrics.retrieval import RetrievalNormalizedDCG, RetrievalPrecision, RetrievalRecall
 
 from activitygraphs.ml.dataset import ActivityDataset, is_home_node_mask
 from activitygraphs.ml.losses import BCELoss, Loss
-from activitygraphs.ml.metrics import (
-    DEFAULT_HOP_BANDS,
-    HopBandMetrics,
-    PerUserRanking,
-    RetrievalRPrecision,
-    hop_band_scalars,
-    HopBands,
-)
-from activitygraphs.ml.sampling import pps_sampling
+from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
 HOME_PE_BINS = 8
-
-# Sampling weight given to a node outside the scored candidate set: its sigmoid is zero, so PPS
-# never draws it while any scored candidate is left.
-EXCLUDED_LOGIT = -1e9
 
 
 def extract_features(
@@ -46,7 +34,7 @@ def extract_features(
     Starts with ``batch.x`` (which already contains the network features and the per-user
     ``is_home`` indicator).
 
-     If ``pop_logit`` is provided, the ``NodeBaseline`` popularity logits for each node are appended
+     If ``pop_logit`` is provided, the ``VisitFrequencyBaseline`` popularity logits for each node are appended
     (``1`` column) is appended.
 
      If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
@@ -153,10 +141,6 @@ class RankingTensors:
     users: Tensor
     scored: Tensor
 
-    def restrict(self, values: Tensor) -> Tensor:
-        """Restrict a tensor to the non-excluded scored nodes."""
-        return values[self.scored]
-
 
 @dataclass(frozen=True)
 class EvaluationTensors:
@@ -167,7 +151,6 @@ class EvaluationTensors:
     logits: Tensor
     loss: Tensor
     bce: Tensor
-    bce_weighted: Tensor
     probs: Tensor
     target: Tensor
     users: Tensor
@@ -177,25 +160,24 @@ class EvaluationTensors:
 class ActivityGraphModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
 
-    Handles weighted BCE training, optional L1 regularisation, and per-epoch ranking metrics.
+    Handles BCE or BPR training, optional L1 regularisation, and per-epoch ranking metrics.
     Models must implement ``forward(x, edge_index, edge_attr, batch) -> logits``.
 
     Args:
         model: Any ``nn.Module`` with the GNN forward signature.
         lr: Initial learning rate for AdamW.
-        pos_weight: Scalar positive-class weight for BCE loss, computed from the train split.
         is_home_idx: Column index of ``is_home`` in the node feature matrix.
         loss: ``Loss`` instance. Defaults to BCE if none.
         reg: Optional regularisation type; only ``"l1"`` is supported.
         lambda_reg: L1 coefficient (ignored when ``reg`` is None).
         full_info: If True, augment node features with home indicator and distances.
         use_demographics: concatenate the per-user demographics onto the node features.
-        k: Rank cutoff for precision, recall, and NDCG metrics.
+        max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
+        recall_ks: Rank cutoffs of the logged ``recall@k``.
         weight_decay: AdamW weight decay.
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
-        home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix enabling
-            distance-from-home hop-band ranking metrics at test time.
-        hop_bands: Hop-distance bands for the hop-band metrics.
+        home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix, read for the per-positive hop
+            distances and the home-anchored positional encodings.
         pop_logit: Logits of global per-node visit frequencies.
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
             features to the model.
@@ -203,29 +185,27 @@ class ActivityGraphModule(L.LightningModule):
         home_pe_bins: number of bins for the RBF expansion of the home PEs, default ``HOME_PE_BINS``.
         compile_model: torch.compile the inner NN, default False.
         store_score_vectors: retain each test user's full per-node score vector.
-        log_train_ranking: log ``train_r_precision`` on the training batches, default True. Turn it off when per-user
+        log_train_ranking: log ``train_avg_recall@K`` on the training batches, default True. Turn it off when per-user
             computation becomes expensive.
     """
 
-    pos_weight: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
-    home_hop_distance: torch.Tensor  # registered buffer, same reason
+    home_hop_distance: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
 
     def __init__(
         self,
         model: torch.nn.Module,
         lr: float,
-        pos_weight: torch.Tensor,
         is_home_idx: int,
         home_hop_distance: np.ndarray | torch.Tensor,
+        max_recall_k: int,
+        recall_ks: Sequence[int],
         loss: Loss | None = None,
         reg: str | None = None,
         lambda_reg: float = 0.01,
         full_info: bool = False,
         use_demographics: bool = True,
-        k: int = 5,
         weight_decay: float = 1e-4,
         schedule_lr: bool = False,
-        hop_bands: HopBands = DEFAULT_HOP_BANDS,
         pop_logit: torch.Tensor | None = None,
         pop_mode: Literal["none", "offset", "feature"] = "none",
         use_home_pe: bool = False,
@@ -238,60 +218,41 @@ class ActivityGraphModule(L.LightningModule):
         self.model = model
         self.lr = lr
         self.loss = loss if loss is not None else BCELoss
-        self.register_buffer("pos_weight", pos_weight)
         self.reg = reg
         self.lambda_reg = lambda_reg
         self.full_info = full_info
         self.use_demographics = use_demographics
-        self.k = k
+        self.max_recall_k = max_recall_k
         self.weight_decay = weight_decay
         self.schedule_lr = schedule_lr
 
         # Metrics: General setup
         metrics = MetricCollection({
+            "avg_recall": RetrievalAverageRecall(max_recall_k, recall_ks),
             "r_precision": RetrievalRPrecision(),
-            f"recall@{k}": RetrievalRecall(top_k=k, empty_target_action="skip"),
-            f"ndcg@{k}": RetrievalNormalizedDCG(top_k=k, empty_target_action="skip"),
-            f"precision@{k}": RetrievalPrecision(top_k=k, empty_target_action="skip"),
         })
 
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
 
         self.log_train_ranking = log_train_ranking
-        self.train_r_precision = RetrievalRPrecision() if log_train_ranking else None
-
-        self.val_r_precision_home_incl = RetrievalRPrecision()  # With home included metrics kept as sanity checks
-        self.test_r_precision_home_incl = RetrievalRPrecision()
+        self.train_avg_recall = MeanMetric() if log_train_ranking else None
 
         self.val_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
         self.test_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
 
-        # Metrics: distance-from-home hop-band metrics (test time only).
         self.is_home_idx = is_home_idx
         self.register_buffer(
             "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
         )
-        self.hop_band_metrics = HopBandMetrics(hop_bands, k)
-
-        # Hop-band results in long format (one row per band), populated by `on_test_epoch_end`.
-        self.hop_band_rows: list[dict[str, float | str]] = []
 
         # Metrics: per-user test scores retained for paired model comparison, in column format
         # (one entry per test user), populated by `on_test_epoch_end`.
-        self.test_per_user = PerUserRanking(k, store_score_vectors=store_score_vectors)
+        self.test_per_user = PerUserRanking(store_score_vectors=store_score_vectors)
         self.per_user_columns: dict[str, list] = {}
 
         # Full per-node score vector of each test user, kept only when `store_score_vectors` is set.
         self.per_user_score_vectors: list[list[float]] = []
-
-        # Metrics: Capture predicted and true expected |RG_i| sizes
-        self.test_pred_size = MeanMetric()
-        self.test_true_size = MeanMetric()
-
-        # Metrics: evaluate actual Poisson-sampled sets
-        self.test_sampled_recall = MeanMetric()
-        self.test_sampled_size = MeanMetric()
 
         # Training: Population logits injection
         if pop_mode not in ("none", "offset", "feature"):
@@ -342,12 +303,15 @@ class ActivityGraphModule(L.LightningModule):
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
-        if self.train_r_precision is not None:
+        if self.train_avg_recall is not None:
             ranking_tensors = self._compute_ranking_tensors(batch, out)
-            self.train_r_precision.update(ranking_tensors.probs, ranking_tensors.target, indexes=ranking_tensors.users)
+            avg_recall, _, _ = per_user_recall(
+                ranking_tensors.probs, ranking_tensors.target, ranking_tensors.users, self.max_recall_k, ()
+            )
+            self.train_avg_recall.update(avg_recall)
             self.log(
-                "train_r_precision",
-                self.train_r_precision,
+                f"train_avg_recall@{self.max_recall_k}",
+                self.train_avg_recall,
                 on_step=False,
                 on_epoch=True,
                 batch_size=batch.num_nodes,
@@ -373,7 +337,6 @@ class ActivityGraphModule(L.LightningModule):
         generator = torch.Generator(device=out.device).manual_seed(42)
         loss = self.loss.loss_fn(out, batch, generator)
         bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
-        bce_weighted = F.binary_cross_entropy_with_logits(out, batch.y.float(), pos_weight=self.pos_weight)
         probs = out.squeeze(-1).sigmoid()
         target = batch.y.squeeze(-1)
         users = batch.user_id[batch.batch]
@@ -383,7 +346,6 @@ class ActivityGraphModule(L.LightningModule):
             logits=out,
             loss=loss,
             bce=bce,
-            bce_weighted=bce_weighted,
             probs=probs,
             target=target,
             users=users,
@@ -396,7 +358,6 @@ class ActivityGraphModule(L.LightningModule):
             self.log(f"{step_prefix}_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
 
         self.log(f"{step_prefix}_bce", eval_tensors.bce, **log_loss_kwargs)
-        self.log(f"{step_prefix}_bce_weighted", eval_tensors.bce_weighted, **log_loss_kwargs)
 
         return eval_tensors
 
@@ -404,8 +365,8 @@ class ActivityGraphModule(L.LightningModule):
         """Returns a dictionary of the number of scored and dropped users for a given stage. Each key is
         ``{stage}_{name}``, with name being either "n_scored_users" or "n_dropped_users"."""
         collection = self.val_metrics if stage == "val" else self.test_metrics
-        r_precision: RetrievalRPrecision = cast(RetrievalRPrecision, collection[f"{stage}_r_precision"])
-        user_counts = r_precision.user_counts()
+        avg_recall = cast(RetrievalAverageRecall, collection[f"{stage}_avg_recall"])
+        user_counts = avg_recall.user_counts()
 
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
@@ -414,12 +375,8 @@ class ActivityGraphModule(L.LightningModule):
         ranking_tensors = eval_tensors.ranking
 
         # Ranking metrics
-        # torchmetrics Retrieval* treat preds as probabilities and drop preds <= 0, so feed sigmoid
-        # (monotonic, preserves ranking) rather than raw logits.
+        # Feed sigmoid (monotonic, preserves ranking), the same scores the per-user ranking and score vectors hold.
         self.val_metrics.update(ranking_tensors.probs, ranking_tensors.target, indexes=ranking_tensors.users)
-        self.val_r_precision_home_incl.update(  # includes all nodes (home node included, sanity check)
-            eval_tensors.probs, eval_tensors.target.long(), indexes=eval_tensors.users
-        )
 
         # Calibration metrics
         self.val_calibration.update(eval_tensors.probs, eval_tensors.target.long())
@@ -428,9 +385,6 @@ class ActivityGraphModule(L.LightningModule):
         self.log_dict(self.val_metrics.compute())
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
-
-        self.log("val_r_precision_home_incl", self.val_r_precision_home_incl.compute())
-        self.val_r_precision_home_incl.reset()
 
         self.log("val_calibration_l1", self.val_calibration.compute())
         self.val_calibration.reset()
@@ -442,11 +396,8 @@ class ActivityGraphModule(L.LightningModule):
         node_home_hops = compute_home_hops(batch, self.home_hop_distance, self.is_home_idx)
 
         # Ranking metrics
-        self.test_metrics.update(  # Feed sigmoid to conform to torchmetrics calling convention (see validation step)
+        self.test_metrics.update(  # Feed sigmoid (see validation step)
             ranking.probs, ranking.target, indexes=ranking.users
-        )
-        self.test_r_precision_home_incl.update(  # includes all nodes (home node included, sanity check)
-            eval_tensors.probs, eval_tensors.target.long(), indexes=eval_tensors.users
         )
 
         # Per-user metrics
@@ -458,44 +409,8 @@ class ActivityGraphModule(L.LightningModule):
             hops=node_home_hops,
         )
 
-        # Hop-band metrics
-        ranking_node_home_hops = ranking.restrict(node_home_hops)
-        self.hop_band_metrics.update(ranking_node_home_hops, ranking.logits, ranking.target, ranking.users)
-
         # Calibration metrics
         self.test_calibration.update(eval_tensors.probs, eval_tensors.target.long())
-
-        # True and predicted expected |RG_i| set sizes
-        for idx in torch.unique(ranking.users):
-            m = ranking.users == idx
-            self.test_pred_size.update(ranking.probs[m].sum())
-            self.test_true_size.update(ranking.target[m].sum())
-
-        # Update sampled set recall and size metrics
-        self._update_sampled_sets_metrics(batch, eval_tensors)
-
-    def _update_sampled_sets_metrics(self, batch: pyg.data.Batch, step: EvaluationTensors, n_draws: int = 8):
-        # The one ranking read that cannot take the narrow view: ``pps_sampling`` groups by
-        # ``batch.batch``, so it needs a tensor per node. Excluded nodes are given a sampling weight
-        # of zero instead of being removed, which leaves that grouping intact.
-        excluded = ~step.ranking.scored
-        logits = step.logits.squeeze(-1).masked_fill(excluded, EXCLUDED_LOGIT)
-        target = step.target.float().masked_fill(excluded, 0.0)
-        users = step.users
-        gen = torch.Generator(device=logits.device).manual_seed(42)
-
-        # pos_weight=None under plain-BCE training (the default); pass float(self.pos_weight) only
-        # if the model was trained with weighted BCE.
-        for _ in range(n_draws):
-            chosen = pps_sampling(self.k, logits, batch.batch, gen).squeeze(-1)
-            for idx in torch.unique(users):
-                m = users == idx
-                r = target[m].sum()
-                if r == 0:
-                    continue
-                hits = (chosen[m] * target[m]).sum()
-                self.test_sampled_recall.update(hits / r)
-                self.test_sampled_size.update(chosen[m].sum())
 
     def on_test_epoch_end(self) -> None:
         self.log_dict(self.test_metrics.compute())
@@ -508,27 +423,8 @@ class ActivityGraphModule(L.LightningModule):
         self.per_user_score_vectors = self.test_per_user.score_vectors().cpu().tolist()
         self.test_per_user.reset()
 
-        self.hop_band_rows = self.hop_band_metrics.compute()
-        self.log_dict(hop_band_scalars(self.hop_band_rows))
-        self.hop_band_metrics.reset()
-
-        self.log("test_r_precision_home_incl", self.test_r_precision_home_incl.compute())
-        self.test_r_precision_home_incl.reset()
-
         self.log("test_calibration_l1", self.test_calibration.compute())
         self.test_calibration.reset()
-
-        self.log("test_pred_size", self.test_pred_size.compute())
-        self.test_pred_size.reset()
-
-        self.log("test_true_size", self.test_true_size.compute())
-        self.test_true_size.reset()
-
-        self.log("test_sampled_recall", self.test_sampled_recall.compute())
-        self.test_sampled_recall.reset()
-
-        self.log("test_sampled_size", self.test_sampled_size.compute())
-        self.test_sampled_size.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

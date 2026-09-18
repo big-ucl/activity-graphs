@@ -5,7 +5,6 @@ available in the environment.
 """
 
 import pytest
-import torch
 
 from activitygraphs.config import load_config
 from activitygraphs.ml.datamodule import ActivityDataModule
@@ -41,13 +40,3 @@ class TestActivityDataModule:
         assert train.isdisjoint(val)
         assert train.isdisjoint(test)
         assert val.isdisjoint(test)
-
-    def test_pos_weight_positive_and_train_only(self, datamodule):
-        assert datamodule.pos_weight > 0
-
-        # Recompute independently over the train split only and confirm it matches.
-        idx = datamodule.train_dataset.indices()
-        y = datamodule.train_dataset.spatial_labels[idx]
-        num_pos = y.sum()
-        expected = torch.sqrt((y.numel() - num_pos) / num_pos)
-        torch.testing.assert_close(datamodule.pos_weight, expected)

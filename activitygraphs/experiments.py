@@ -14,10 +14,14 @@ import torch
 from activitygraphs.analysis import check_overfit_health
 from activitygraphs.config import Config
 from activitygraphs.ml.baselines import (
-    ConditionalNodeBaseline,
+    ConditionalGravityBaseline,
+    ConditionalVisitFrequencyBaseline,
+    DistanceDecayBaseline,
     GlobalBaseline,
-    NodeBaseline,
+    GravityBaseline,
+    GravityBinnedBaseline,
     UniformBaseline,
+    VisitFrequencyBaseline,
 )
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.dataset import ActivityDataset
@@ -178,8 +182,9 @@ def overfit_health_experiment(cfg: Config):
     """Check if each architecture can overfit on a single batch.
 
     Forces ``train.overfit_batches`` and requires ``train.log_train_ranking``, since the check is read entirely off
-    ``train_r_precision``. A healthy model drives ``train_r_precision`` to ~1.0 on a batch it has memorised; failure is
-    capacity or optimisation rather than data, and invalidates every downstream reading. Runs one seed and no baselines.
+    ``train_avg_recall@K``. A healthy model drives ``train_avg_recall@K`` to ~1.0 on a batch it has memorised; failure
+    is capacity or optimisation rather than data, and invalidates every downstream reading. Runs one seed and no
+    baselines.
     """
     cfg = copy.deepcopy(cfg)
     cfg.train.experiment = "overfit_health"
@@ -219,8 +224,22 @@ def overfit_health_experiment(cfg: Config):
     save_results(cfg.paths.reports, cfg.data.name, results)
 
     with pl.Config(tbl_rows=-1, float_precision=4):
-        print("\n-- overfit health: best train_r_precision on the memorised batch --")
-        print(check_overfit_health(results))
+        print(f"\n-- overfit health: best train_avg_recall@{cfg.train.max_recall_k} on the memorised batch --")
+        print(check_overfit_health(results, cfg.train.max_recall_k))
+
+
+def baselines_experiment(cfg: Config):
+    """Fit and evaluate the baselines alone, with no learned models.
+
+    The split is fixed by ``cfg.train.split_seed``, so the per-user rows pair with any learned run of the same dataset
+    through ``analysis.extra_runs``.
+    """
+    setup = setup_experiment(cfg)
+
+    if cfg.train.fast_dev_run:
+        return
+
+    save_results(cfg.paths.reports, cfg.data.name, *setup.baseline_results)
 
 
 # =========================================
@@ -283,7 +302,9 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     train_dataset = datamodule.train_dataset
 
     home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
-    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx)
+    ranking_budget = cfg.train.max_recall_k
+    recall_ks = list(cfg.analysis.recall_curve_ks)
+    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, ranking_budget)
 
     hidden_channels = 128
 
@@ -307,7 +328,9 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     baseline_results = [
         res.with_columns(seed=pl.lit(None, dtype=pl.Int64))
         for res in (
-            measure_baselines(num_nodes, datamodule, loss, wandb_params, cfg.train.save_score_vectors)
+            measure_baselines(
+                num_nodes, datamodule, loss, ranking_budget, recall_ks, wandb_params, cfg.train.save_score_vectors
+            )
             if with_baselines
             else []
         )
@@ -328,6 +351,8 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         train_and_evaluate_model,
         datamodule=datamodule,
         loss=loss,
+        max_recall_k=ranking_budget,
+        recall_ks=recall_ks,
         num_epochs=epochs,
         verbose=verbose,
         weight_decay=weight_decay,
@@ -358,39 +383,61 @@ def measure_baselines(
     num_nodes,
     datamodule: ActivityDataModule,
     loss: Loss,
+    ranking_budget: int,
+    recall_ks: list[int],
     wandb_params: WandBParams,
     store_score_vectors: bool = False,
 ):
-    """Fit and evaluate all four frequency baselines; return a list of result dicts."""
+    """Fit and evaluate the baselines: the frequency baselines, then the distance-decay ones.
+
+    Returns:
+        One result frame per baseline, in order.
+    """
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
+    val_loader = datamodule.val_dataloader()
     is_home_idx = datamodule.train_dataset.is_home_col_idx
+    distance_scaler = datamodule.scalers.distances
 
-    uniform_base = UniformBaseline()
-    global_base = GlobalBaseline().fit(train_loader)
-    node_base = NodeBaseline(num_nodes).fit(train_loader)
-    conditional_base = ConditionalNodeBaseline(num_nodes, is_home_idx).fit(train_loader)
+    gravity = GravityBaseline(is_home_idx, distance_scaler).fit(train_loader)
+    gravity_binned = GravityBinnedBaseline(is_home_idx, distance_scaler).fit(train_loader)
+    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes, is_home_idx)
+    conditional_gravity = ConditionalGravityBaseline(gravity)
 
-    results = []
+    baselines = [
+        BaselineSpec("Uniform", UniformBaseline()),
+        BaselineSpec("GlobalMarginal", GlobalBaseline().fit(train_loader)),
+        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes, is_home_idx).fit(train_loader)),
+        BaselineSpec("ConditionalVisitFrequency", conditional_visit_frequency.fit(train_loader, val_loader)),
+        BaselineSpec("DistanceDecay", DistanceDecayBaseline(distance_scaler), full_info=True),
+        BaselineSpec("Gravity", gravity, full_info=True),
+        BaselineSpec("GravityBinned", gravity_binned, full_info=True),
+        BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_loader, val_loader), full_info=True),
+    ]
 
-    for name, baseline in [
-        ("Uniform", uniform_base),
-        ("GlobalMarginal", global_base),
-        ("NodeMarginal", node_base),
-        ("ConditionalNodeMarginal", conditional_base),
-    ]:
-        res = evaluate_baseline(
-            baseline,
+    return [
+        evaluate_baseline(
+            spec.baseline,
             datamodule,
             loss,
-            name,
-            k=datamodule.train_dataset.median_realised_size,
+            spec.name,
+            max_recall_k=ranking_budget,
+            recall_ks=recall_ks,
             wandb_params=wandb_params,
             store_score_vectors=store_score_vectors,
+            full_info=spec.full_info,
         )
-        results.append(res)
+        for spec in baselines
+    ]
 
-    return results
+
+@dataclass(frozen=True)
+class BaselineSpec:
+    """A fitted baseline, the name it is reported under, and how it is evaluated."""
+
+    name: str
+    baseline: torch.nn.Module
+    full_info: bool = False
 
 
 # =========================================
