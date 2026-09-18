@@ -167,10 +167,14 @@ class PerUserRanking(Metric):
 
     Also keeps info about each of the users' positives (i.e. visited nodes, R = |RG_i|), NOT indexed by user, but by
     ``sum(num_pos_u, u in users)`` (i.e. each index is a visited node), struct of flattened lists:
+        - pos_node: index of the positive node within the network graph
         - pos_hops: number of hops from home to the positive node
         - pos_in_top_r: did this positive node make it into the top R (= |RG_i|) nodes, ties broken arbitrarily
         - pos_n_scored_higher: number of nodes ranked higher than the positive node
         - pos_n_tied: number of nodes that tied with the positive node
+
+    Args:
+        store_score_vectors: Keep each user's full per-node score vector.
     """
 
     full_state_update = False
@@ -180,6 +184,7 @@ class PerUserRanking(Metric):
     n_pos_home_incl: list[torch.Tensor]
     r_precision: list[torch.Tensor]
 
+    pos_node: list[torch.Tensor]
     pos_hops: list[torch.Tensor]
     pos_in_top_r: list[torch.Tensor]
     pos_n_scored_higher: list[torch.Tensor]
@@ -188,7 +193,7 @@ class PerUserRanking(Metric):
     score_vector: list[torch.Tensor]
 
     _FIELDS = ("user_id", "n_pos", "n_pos_home_incl", "r_precision")
-    _POSITIVE_FIELDS = ("pos_hops", "pos_in_top_r", "pos_n_scored_higher", "pos_n_tied")
+    _POSITIVE_FIELDS = ("pos_node", "pos_hops", "pos_in_top_r", "pos_n_scored_higher", "pos_n_tied")
 
     def __init__(self, store_score_vectors: bool = False) -> None:
         super().__init__()
@@ -227,6 +232,7 @@ class PerUserRanking(Metric):
             scored_target = full_target[non_excluded_nodes]
             scored_scores = full_scores[non_excluded_nodes]
             scored_hops = hops[mask][non_excluded_nodes]
+            scored_nodes = torch.arange(len(full_target), device=full_target.device)[non_excluded_nodes]
 
             num_positives = int(scored_target.sum())
             if num_positives == 0:
@@ -248,6 +254,7 @@ class PerUserRanking(Metric):
             self.n_pos_home_incl.append(full_num_positives.reshape(1).long())
             self.r_precision.append(r_precision.reshape(1).float())
 
+            self.pos_node.append(scored_nodes[is_positive].long())
             self.pos_hops.append(scored_hops[is_positive].float())
             self.pos_in_top_r.append(in_top_r[is_positive])
             self.pos_n_scored_higher.append(n_scored_higher.long())

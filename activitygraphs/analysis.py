@@ -1,7 +1,8 @@
-"""Analysis of experiment outputs: seed spreads, paired model comparisons, hop bands, home-zone density
+"""Analysis of experiment outputs: seed spreads, paired model comparisons, hop bands, distance bands, home-zone density
   - Distribution of result metrics between seeds/runs;
   - Comparison of models paired up by users;
   - Metrics per hop-band
+  - AUC of each positive within its distance band from home
   - Density of home zones
 
 Reads the parquet files written by ``experiments.py:save_results`` and reports the points above. All analyses use the
@@ -14,13 +15,14 @@ from typing import cast
 
 import numpy as np
 import polars as pl
+import torch
 from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.config import AnalysisConfig
 from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k
-from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
+from activitygraphs.ml.training import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 
 
 # Baseline model representing node popularity.
@@ -50,6 +52,17 @@ PER_POSITIVE_VALUE_COLUMNS = {"r_precision": "pos_in_top_r", AVG_RECALL_COLUMN: 
 # positive and the number that tied with it.
 N_SCORED_HIGHER_COLUMN = "pos_n_scored_higher"
 N_TIED_COLUMN = "pos_n_tied"
+
+# Per-user list column containing the network node index of each positive, and per-user column containing the user's
+# home node. Together with the score vectors and the home distances they carry the within-band AUC.
+PER_POSITIVE_NODE_COLUMN = "pos_node"
+HOME_NODE_COLUMN = "home_node"
+
+METRES_PER_KM = 1000.0
+
+# Users per within-band AUC pass. The comparison holds a ``[n_positives, n_nodes]`` mask per chunk, so chunking keeps
+# a full test split out of memory.
+USER_CHUNK = 512
 
 DEFAULT_ANALYSIS = AnalysisConfig(
     reference_model="Gravity",
@@ -97,6 +110,16 @@ def load_score_vectors(report_data_path: str | Path, name: str, run: int | None 
         raise FileNotFoundError(f"{scores_path} not found; re-run with train.save_score_vectors=true")
 
     return pl.read_parquet(scores_path).filter(pl.col("stage") == SCORE_VECTOR_STAGE)
+
+
+def load_home_distances(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
+    """Load each test user's distance from home to every node of a run: ``user_id, distances``, in metres."""
+    path = Path(report_data_path)
+    run = _latest_run(path, name) if run is None else run
+
+    distances = pl.read_parquet(path / f"{name}-distances-{run}.parquet")
+
+    return distances.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
 
 
 def with_ranking_metrics(per_user_results: pl.DataFrame, budget: int) -> pl.DataFrame:
@@ -744,6 +767,229 @@ def paired_comparison_by_band(
 
 
 # =========================================
+# Distance band analysis
+# =========================================
+
+
+def _edge_label(edge: pl.Expr) -> pl.Expr:
+    """Return a band edge in km as a string, without the trailing zero of a whole number of km."""
+    return pl.when(edge == edge.round(0)).then(edge.cast(pl.Int64).cast(pl.String)).otherwise(edge.cast(pl.String))
+
+
+def _distance_band_label(lower: pl.Expr, upper: pl.Expr) -> pl.Expr:
+    """Return the label of the distance band with these edges in km, e.g. ``"1-2.5"`` or ``"10+"``."""
+    finite_upper = pl.when(upper.is_infinite()).then(lower).otherwise(upper)
+
+    return (
+        pl
+        .when(upper.is_infinite())
+        .then(_edge_label(lower) + pl.lit("+"))
+        .otherwise(_edge_label(lower) + pl.lit("-") + _edge_label(finite_upper))
+    )
+
+
+def distance_band_index(distances: np.ndarray, bands: Sequence[float]) -> np.ndarray:
+    """Return the band each distance falls in, as a position in ``bands``.
+
+    Args:
+        distances: Distances from home in metres, any shape.
+        bands: Upper band edges in km, each band holding the distances in ``[lower_edge, upper_edge)``.
+
+    Returns:
+        Integer array shaped like ``distances``.
+    """
+    return np.digitize(distances / METRES_PER_KM, np.asarray(bands, dtype=np.float64))
+
+
+def _band_edges(bands: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+    """Return the lower and upper edge in km of every band, the last band's upper edge being ``inf``."""
+    edges = np.asarray(bands, dtype=np.float64)
+
+    return np.concatenate([[0.0], edges]), np.concatenate([edges, [np.inf]])
+
+
+def _per_positive_band_auc(
+    scores: np.ndarray, positives: Sequence[Sequence[int]], home_nodes: np.ndarray, band_index: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score every positive of one model and seed against the unvisited nodes of its own band.
+
+    Args:
+        scores: Score of every node for every user, ``[n_users, n_nodes]``.
+        positives: Node indices of each user's positives, one sequence per user.
+        home_nodes: Home node of each user, ``[n_users]``.
+        band_index: Band of every node for every user, ``[n_users, n_nodes]``.
+
+    Returns:
+        ``(auc, n_negatives)``, each ``[n_positives]``, one entry per positive in user order.
+    """
+    scored = []
+
+    for start in range(0, len(scores), USER_CHUNK):
+        chunk = slice(start, start + USER_CHUNK)
+        chunk_scores = scores[chunk]
+
+        target = np.zeros(chunk_scores.shape, dtype=bool)
+        for user, user_positives in enumerate(positives[chunk]):
+            target[user, list(user_positives)] = True
+
+        valid = np.ones(chunk_scores.shape, dtype=bool)
+        valid[np.arange(len(chunk_scores)), home_nodes[chunk]] = False
+
+        scored.append(
+            positive_band_auc(
+                torch.from_numpy(chunk_scores),
+                torch.from_numpy(target),
+                torch.from_numpy(band_index[chunk]),
+                torch.from_numpy(valid),
+            )
+        )
+
+    return (
+        np.concatenate([auc.numpy() for auc, _ in scored]),
+        np.concatenate([n_negatives.numpy() for _, n_negatives in scored]),
+    )
+
+
+def within_band_auc(
+    per_user_results: pl.DataFrame,
+    score_vectors: pl.DataFrame,
+    home_distances: pl.DataFrame,
+    bands: Sequence[float],
+) -> pl.DataFrame:
+    """Each user's mean AUC against the unvisited nodes of a distance band, over their positives in that band.
+
+    Args:
+        per_user_results: Per-user results frame from ``load_report_run``.
+        score_vectors: Per-user score vectors from ``load_score_vectors``.
+        home_distances: Per-user distances from home from ``load_home_distances``.
+        bands: Upper band edges in km.
+
+    Returns:
+        Frame of ``name, stage, seed, user_id, band, band_lo, auc, n_band_pos, n_band_neg``, one row per model, seed,
+        user and band the user has a positive in. Positives whose band holds no unvisited node are dropped.
+    """
+    lower_edges, upper_edges = _band_edges(bands)
+    distance_by_user = dict(home_distances.select("user_id", "distances").iter_rows())
+    per_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
+
+    rows = []
+
+    for name, seed in score_vectors.select("name", "seed").unique().sort("name", "seed").iter_rows():
+        model_rows = _model_seed_rows(per_user, name, seed).join(
+            _model_seed_rows(score_vectors, name, seed).select("user_id", "scores"), on="user_id"
+        )
+        user_ids = model_rows["user_id"].to_list()
+        band_index = distance_band_index(
+            np.asarray([distance_by_user[user] for user in user_ids], dtype=np.float64), bands
+        )
+        positives = model_rows[PER_POSITIVE_NODE_COLUMN].to_list()
+
+        auc, n_negatives = _per_positive_band_auc(
+            np.asarray(model_rows["scores"].to_list(), dtype=np.float64),
+            positives,
+            model_rows[HOME_NODE_COLUMN].to_numpy(),
+            band_index,
+        )
+        positive_user = np.repeat(np.arange(len(user_ids)), [len(nodes) for nodes in positives])
+        positive_band = band_index[positive_user, np.concatenate(positives).astype(int)]
+
+        rows.append(
+            pl.DataFrame({
+                "name": pl.Series([name] * len(auc), dtype=pl.String),
+                "seed": pl.Series([seed] * len(auc), dtype=pl.Int64),
+                "user_id": np.asarray(user_ids)[positive_user],
+                "band_lo": lower_edges[positive_band],
+                "band_hi": upper_edges[positive_band],
+                "auc": auc,
+                "n_band_neg": n_negatives,
+            })
+        )
+
+    return (
+        pl
+        .concat(rows)
+        .filter(pl.col("auc").is_not_nan())
+        .with_columns(band=_distance_band_label(pl.col("band_lo"), pl.col("band_hi")))
+        .group_by("name", "seed", "user_id", "band", "band_lo")
+        .agg(auc=pl.col("auc").mean(), n_band_pos=pl.len(), n_band_neg=pl.col("n_band_neg").mean())
+        .with_columns(stage=pl.lit(PER_USER_STAGE))
+        .select("name", "stage", "seed", "user_id", "band", "band_lo", "auc", "n_band_pos", "n_band_neg")
+        .sort("band_lo", "name", "user_id")
+    )
+
+
+def _model_seed_rows(results: pl.DataFrame, name: str, seed: int | None) -> pl.DataFrame:
+    """Rows of one model and seed, the seedless rows being the baselines'."""
+    rows = results.filter(pl.col("name") == name)
+
+    return rows.filter(pl.col("seed").is_null() if seed is None else pl.col("seed") == seed)
+
+
+def within_band_auc_table(band_auc: pl.DataFrame) -> pl.DataFrame:
+    """Within-band AUC of each model in each distance band, mean +- sd over training seeds.
+
+    Args:
+        band_auc: Per-user within-band AUC from ``within_band_auc``.
+
+    Returns:
+        Frame of ``band, name, n_seeds, mean, sd, n_users, n_pos, n_unvisited``, ordered by band then ``mean``
+        (descending). ``n_users`` and ``n_pos`` are the users scored in the band and their positives in it, and
+        ``n_unvisited`` the unvisited nodes each positive is ranked against, all averaged over seeds.
+    """
+    seed_means = band_auc.group_by("name", "seed", "band", "band_lo").agg(
+        seed_mean=pl.col("auc").mean(),
+        n_users=pl.len(),
+        n_pos=pl.col("n_band_pos").sum(),
+        n_unvisited=pl.col("n_band_neg").mean(),
+    )
+
+    return (
+        seed_means
+        .group_by("name", "band", "band_lo")
+        .agg(
+            n_seeds=pl.len(),
+            mean=pl.col("seed_mean").mean(),
+            sd=pl.col("seed_mean").std(),
+            n_users=pl.col("n_users").mean(),
+            n_pos=pl.col("n_pos").mean(),
+            n_unvisited=pl.col("n_unvisited").mean(),
+        )
+        .sort("band_lo", "mean", descending=[False, True])
+        .select("band", "name", "n_seeds", "mean", "sd", "n_users", "n_pos", "n_unvisited")
+    )
+
+
+def paired_within_band_auc(
+    band_auc: pl.DataFrame,
+    reference_model: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` run on each distance band's within-band AUC.
+
+    Args:
+        band_auc: Per-user within-band AUC from ``within_band_auc``.
+        reference_model: Model every other model is compared against.
+        n_bootstrap: Bootstrap resamples behind the confidence interval.
+        seed: Seed of the bootstrap.
+
+    Returns:
+        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
+        ``mean_diff`` (descending).
+    """
+    bands = band_auc.select("band", "band_lo").unique().sort("band_lo")["band"]
+
+    comparisons = [
+        paired_comparison(
+            band_auc.filter(pl.col("band") == band), reference_model, "auc", n_bootstrap, seed
+        ).with_columns(band=pl.lit(band))
+        for band in bands
+    ]
+
+    return pl.concat(comparisons).select("band", pl.all().exclude("band"))
+
+
+# =========================================
 # Recall@k curve
 # =========================================
 
@@ -901,16 +1147,18 @@ def print_report(
     report_data_path: str | Path,
     name: str,
     max_recall_k: int,
+    distance_bands: Sequence[float],
     run: int | None = None,
     analysis: AnalysisConfig | None = None,
 ) -> None:
     """Print results analyses for a run of the whole comparison experiment: aggregate results, paired comparison,
-    and hop bands.
+    hop bands and distance bands.
 
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
         name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
+        distance_bands: Upper edges in km of the distance bands the within-band AUC is read on.
         run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None. Its ``extra_runs`` add the baselines of
             other runs of the same dataset.
@@ -970,5 +1218,14 @@ def print_report(
 
         if (report_data_path / f"{name}-scores-{run}.parquet").exists():
             scores = load_score_vectors(report_data_path, name, run)
+            home_distances = load_home_distances(report_data_path, name, run)
+            band_auc = within_band_auc(per_user, scores, home_distances, distance_bands)
+
+            print(f"\n-- AUC within each positive's distance band, edges {distance_bands} km, avg over seeds --")
+            print(within_band_auc_table(band_auc))
+
+            print(f"\n-- paired AUC within each positive's distance band, vs {reference} --")
+            print(paired_within_band_auc(band_auc, reference))
+
             print("\n-- model health checks --")
             print(check_model_health(scores, per_user, POPULARITY_MODEL))

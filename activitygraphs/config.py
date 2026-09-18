@@ -177,11 +177,12 @@ class DataPaths:
 
 @dataclass
 class DataConfig:
-    """Base dataset configuration: name, inputs, and paths."""
+    """Base dataset configuration: name, inputs, paths, and the distance bands the region is split into."""
 
     name: str
     inputs: Inputs
     paths: DataPaths
+    distance_bands: list[float]
 
 
 @dataclass

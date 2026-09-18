@@ -14,7 +14,7 @@ from activitygraphs.experiments import (
     run_model_specs,
     save_results,
 )
-from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE, WandBParams
+from activitygraphs.ml.training import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE, WandBParams
 
 
 def make_setup(train_seeds: list[int], run_model=None) -> ExperimentSetup:
@@ -24,6 +24,7 @@ def make_setup(train_seeds: list[int], run_model=None) -> ExperimentSetup:
         train_dataset=None,  # type: ignore[arg-type]
         run_model=run_model,  # type: ignore[arg-type]
         baseline_results=[],
+        home_distances=pl.DataFrame(),
         train_seeds=train_seeds,
         hidden_channels=128,
         dropout=0.2,
@@ -42,6 +43,14 @@ def make_score_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
         epoch=pl.lit(None, dtype=pl.Int64),
         seed=pl.lit(seed, dtype=pl.Int64),
     )
+
+
+def make_home_distance_frame() -> pl.DataFrame:
+    """Two rows of per-node distances from home, as ``home_distance_frame`` returns them."""
+    return pl.DataFrame({
+        "user_id": [7, 9],
+        "distances": [[0.0, 900.0, 4000.0], [4000.0, 900.0, 0.0]],
+    }).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
 
 def make_model_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
@@ -280,6 +289,22 @@ class TestSaveResults:
 
         written = sorted(f.name for f in (tmp_path / "data").iterdir())
         assert written == ["TestSet-per-user-1.parquet", "TestSet-results-1.parquet"]
+
+    def test_home_distances_go_to_their_own_file(self, tmp_path):
+        (tmp_path / "data").mkdir()
+        combined = pl.concat([make_model_frame("MLP"), make_home_distance_frame()], how="diagonal")
+        save_results(tmp_path, "TestSet", combined)
+
+        data = tmp_path / "data"
+        assert sorted(f.name for f in data.iterdir()) == [
+            "TestSet-distances-1.parquet",
+            "TestSet-per-user-1.parquet",
+            "TestSet-results-1.parquet",
+        ]
+
+        distances = pl.read_parquet(data / "TestSet-distances-1.parquet")
+        assert distances["stage"].unique().to_list() == [HOME_DISTANCE_STAGE]
+        assert distances["distances"].to_list() == [[0.0, 900.0, 4000.0], [4000.0, 900.0, 0.0]]
 
     def test_score_vectors_go_to_their_own_file(self, tmp_path):
         (tmp_path / "data").mkdir()

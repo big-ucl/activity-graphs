@@ -4,7 +4,12 @@ import numpy as np
 import pytest
 import torch
 
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
+from activitygraphs.ml.ranking import (
+    average_recall,
+    expected_recall_at_k,
+    positive_band_auc,
+    positive_rank_stats,
+)
 
 BUDGET = 50
 
@@ -48,6 +53,89 @@ class TestPositiveRankStats:
         expected = [positive_rank_stats(scores[u][valid[u]], target[u][valid[u]]) for u in range(4)]
         assert n_higher.tolist() == torch.cat([h for h, _ in expected]).tolist()
         assert n_tied.tolist() == torch.cat([t for _, t in expected]).tolist()
+
+
+def all_candidates(scores: torch.Tensor) -> torch.Tensor:
+    """A candidate mask that drops no node, for the cases that are not about the home exclusion."""
+    return torch.ones_like(scores, dtype=torch.bool)
+
+
+class TestPositiveBandAUC:
+    def test_a_positive_above_its_whole_band_scores_one(self):
+        scores = torch.tensor([0.9, 0.1, 0.2, 0.5])
+        target = torch.tensor([1, 0, 0, 0])
+        bands = torch.tensor([0, 0, 0, 1])
+
+        auc, n_negatives = positive_band_auc(scores, target, bands, all_candidates(scores))
+
+        assert auc.tolist() == pytest.approx([1.0])
+        assert n_negatives.tolist() == [2]
+
+    def test_the_other_bands_do_not_count(self):
+        """Two nodes outscore the positive, but only the one sharing its band lowers the AUC."""
+        scores = torch.tensor([0.5, 0.9, 0.9, 0.1])
+        target = torch.tensor([1, 0, 0, 0])
+        bands = torch.tensor([0, 0, 1, 1])
+
+        auc, n_negatives = positive_band_auc(scores, target, bands, all_candidates(scores))
+
+        assert auc.tolist() == pytest.approx([0.0])
+        assert n_negatives.tolist() == [1]
+
+    def test_a_tie_counts_as_half(self):
+        """The positive outranks one of its band's two unvisited nodes and ties with the other."""
+        scores = torch.tensor([0.5, 0.5, 0.1])
+        target = torch.tensor([1, 0, 0])
+        bands = torch.tensor([0, 0, 0])
+
+        auc, _ = positive_band_auc(scores, target, bands, all_candidates(scores))
+
+        assert auc.tolist() == pytest.approx([1.0 - 0.5 / 2])
+
+    def test_the_other_positives_of_a_band_are_not_ranked_against(self):
+        """Both positives share a band with one another and with a single unvisited node they both outrank."""
+        scores = torch.tensor([0.9, 0.8, 0.1])
+        target = torch.tensor([1, 1, 0])
+        bands = torch.tensor([0, 0, 0])
+
+        auc, n_negatives = positive_band_auc(scores, target, bands, all_candidates(scores))
+
+        assert auc.tolist() == pytest.approx([1.0, 1.0])
+        assert n_negatives.tolist() == [1, 1]
+
+    def test_a_band_without_an_unvisited_node_is_not_scored(self):
+        scores = torch.tensor([0.9, 0.1])
+        target = torch.tensor([1, 0])
+        bands = torch.tensor([0, 1])
+
+        auc, n_negatives = positive_band_auc(scores, target, bands, all_candidates(scores))
+
+        assert torch.isnan(auc).tolist() == [True]
+        assert n_negatives.tolist() == [0]
+
+    def test_an_excluded_node_is_neither_a_positive_nor_a_negative(self):
+        """The user's home node scores highest and shares the band, but is not a candidate."""
+        scores = torch.tensor([0.9, 0.5, 0.1])
+        target = torch.tensor([1, 1, 0])
+        bands = torch.tensor([0, 0, 0])
+        valid = torch.tensor([False, True, True])
+
+        auc, n_negatives = positive_band_auc(scores, target, bands, valid)
+
+        assert auc.tolist() == pytest.approx([1.0])
+        assert n_negatives.tolist() == [1]
+
+    def test_batched_rows_match_one_user_at_a_time(self):
+        generator = torch.Generator().manual_seed(0)
+        scores = torch.randint(0, 5, (4, 12), generator=generator).float()
+        target = torch.rand(4, 12, generator=generator) < 0.3
+        bands = torch.randint(0, 3, (4, 12), generator=generator)
+
+        auc, n_negatives = positive_band_auc(scores, target, bands, all_candidates(scores))
+
+        expected = [positive_band_auc(scores[u], target[u], bands[u], all_candidates(scores[u])) for u in range(4)]
+        torch.testing.assert_close(auc, torch.cat([a for a, _ in expected]), equal_nan=True)
+        assert n_negatives.tolist() == torch.cat([n for _, n in expected]).tolist()
 
 
 class TestAverageRecall:

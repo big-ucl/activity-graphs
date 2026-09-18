@@ -32,3 +32,5 @@ paths:
   gtfs: ${..paths.external}/gtfs
 
   pyg_datasets: ${..paths.processed}/PyGDatasets
+
+distance_bands: [ 2, 5, 10, 25 ]

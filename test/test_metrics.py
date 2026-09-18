@@ -365,6 +365,16 @@ class TestPerUserRanking:
         assert positives["pos_hops"] == [[1.0]]
         assert positives["pos_in_top_r"] == [[False]]
 
+    def test_each_positive_keeps_its_node_index(self):
+        """The indices are the graph's, so they skip over the excluded home node rather than counting candidates."""
+        metric = PerUserRanking()
+        preds = torch.tensor([0.9, 0.2, 0.8, 0.1])
+        target = torch.tensor([1, 1, 0, 1])
+        is_home = torch.tensor([True, False, False, False])
+        metric.update(preds, target, indexes=torch.zeros(4, dtype=torch.long), exclude=is_home, hops=chain_hops(1, 4))
+
+        assert metric.positive_columns()["pos_node"] == [[1, 3]]
+
     def test_positive_columns_stay_row_aligned_across_batches(self):
         metric = self._updated()
         metric.update(
@@ -423,6 +433,7 @@ class TestPerUserColumnsInModule:
             "n_pos",
             "n_pos_home_incl",
             "r_precision",
+            "pos_node",
             "pos_hops",
             "pos_in_top_r",
             "pos_n_scored_higher",
@@ -433,3 +444,4 @@ class TestPerUserColumnsInModule:
         assert columns["n_pos_home_incl"] == [2]
         assert 0.0 <= columns["r_precision"][0] <= 1.0
         assert columns["pos_hops"] == [[3.0]]
+        assert columns["pos_node"] == [[3]]

@@ -30,10 +30,12 @@ from activitygraphs.ml.lightning_module import extracted_features_dim
 from activitygraphs.ml.losses import Loss, build_loss
 from activitygraphs.ml.models import FullyConnectedMLP, GATSkip, GraphTransformer, NodeMLP
 from activitygraphs.ml.training import (
+    HOME_DISTANCE_STAGE,
     PER_USER_STAGE,
     SCORE_VECTOR_STAGE,
     WandBParams,
     evaluate_baseline,
+    home_distance_frame,
     train_and_evaluate_model,
 )
 
@@ -100,7 +102,7 @@ def comparison_experiment(cfg: Config):
     if cfg.train.fast_dev_run:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results)
+    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results, setup.home_distances)
 
 
 def depth_sweep_experiment(cfg: Config):
@@ -133,7 +135,7 @@ def depth_sweep_experiment(cfg: Config):
     if cfg.train.fast_dev_run:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results)
+    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results, setup.home_distances)
 
 
 def demographics_ablation_experiment(cfg: Config):
@@ -176,7 +178,7 @@ def demographics_ablation_experiment(cfg: Config):
     if cfg.train.fast_dev_run:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results)
+    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results, setup.home_distances)
 
 
 def overfit_health_experiment(cfg: Config):
@@ -222,7 +224,7 @@ def overfit_health_experiment(cfg: Config):
         return
 
     results = pl.concat(model_results, how="diagonal")
-    save_results(cfg.paths.reports, cfg.data.name, results)
+    save_results(cfg.paths.reports, cfg.data.name, results, setup.home_distances)
 
     with pl.Config(tbl_rows=-1, float_precision=4):
         print(f"\n-- overfit health: best train_avg_recall@{cfg.train.max_recall_k} on the memorised batch --")
@@ -240,7 +242,7 @@ def baselines_experiment(cfg: Config):
     if cfg.train.fast_dev_run:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *setup.baseline_results)
+    save_results(cfg.paths.reports, cfg.data.name, *setup.baseline_results, setup.home_distances)
 
 
 # =========================================
@@ -260,6 +262,7 @@ class ExperimentSetup:
     train_dataset: ActivityDataset
     run_model: Callable[..., pl.DataFrame]
     baseline_results: list[pl.DataFrame]
+    home_distances: pl.DataFrame
     train_seeds: list[int]
     hidden_channels: int
     dropout: float
@@ -377,6 +380,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         train_dataset=train_dataset,
         run_model=my_run_experiment,
         baseline_results=baseline_results,
+        home_distances=home_distance_frame(datamodule),
         train_seeds=train_seeds,
         hidden_channels=hidden_channels,
         dropout=dropout,
@@ -631,8 +635,9 @@ def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     """Concatenate result DataFrames and write them to ``<path>/data/``.
 
     The aggregate rows (``stage`` of ``fit``/``test``) go to ``<name>-results-<n>.parquet``, the
-    per-user summary rows to ``<name>-per-user-<n>.parquet`` and the full per-user score vectors to
-    ``<name>-scores-<n>.parquet``. All three are numbered ``n``. They are split because they are
+    per-user summary rows to ``<name>-per-user-<n>.parquet``, the full per-user score vectors to
+    ``<name>-scores-<n>.parquet`` and the per-user distances from home to ``<name>-distances-<n>.parquet``.
+    All four are numbered ``n``. They are split because they are
     different sizes, so only they only need to be loaded when required for analysis.
     """
     path = Path(path) / "data"
@@ -644,7 +649,8 @@ def save_results(path: str | Path, name: str, *results: pl.DataFrame):
     combined = pl.concat(results, how="diagonal")
     per_user = combined.filter(pl.col("stage") == PER_USER_STAGE)
     score_vectors = combined.filter(pl.col("stage") == SCORE_VECTOR_STAGE)
-    aggregate = combined.filter(~pl.col("stage").is_in([PER_USER_STAGE, SCORE_VECTOR_STAGE]))
+    home_distances = combined.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
+    aggregate = combined.filter(~pl.col("stage").is_in([PER_USER_STAGE, SCORE_VECTOR_STAGE, HOME_DISTANCE_STAGE]))
 
     drop_empty_columns(aggregate).write_parquet(path / f"{name}-results-{max_num + 1}.parquet")
 
@@ -653,6 +659,9 @@ def save_results(path: str | Path, name: str, *results: pl.DataFrame):
 
     if not score_vectors.is_empty():
         drop_empty_columns(score_vectors).write_parquet(path / f"{name}-scores-{max_num + 1}.parquet")
+
+    if not home_distances.is_empty():
+        drop_empty_columns(home_distances).write_parquet(path / f"{name}-distances-{max_num + 1}.parquet")
 
 
 def drop_empty_columns(df: pl.DataFrame) -> pl.DataFrame:

@@ -23,6 +23,9 @@ from activitygraphs.analysis import (
     band_contributions,
     band_decomposition,
     paired_comparison_by_band,
+    paired_within_band_auc,
+    within_band_auc,
+    within_band_auc_table,
     paired_comparison_by_k,
     recall_at_ks,
     recall_curve,
@@ -638,6 +641,97 @@ class TestBandDecomposition:
         assert diffs == pytest.approx({"0-2": 0.0, "3-5": 0.125, "13+": 0.125})
         assert sum(diffs.values()) == pytest.approx(overall)
         assert by_band["n_users"].to_list() == [2, 2, 2]
+
+
+# Distance from home in metres of the six nodes of the within-band AUC fixture. With edges at 1 and 5 km, nodes 0-2
+# fall in the first band, nodes 3-4 in the second and node 5 alone in the third.
+NODE_DISTANCES = [0.0, 500.0, 800.0, 2000.0, 3000.0, 8000.0]
+BAND_EDGES = [1.0, 5.0]
+
+# Node 0 is every user's home, so it is not a candidate; user 2's only far positive sits alone in its band.
+BAND_POSITIVES = {1: [1, 3], 2: [4, 5]}
+BAND_SCORES = {"MLP": [0.9, 0.6, 0.2, 0.5, 0.4, 0.1], "Baseline": [0.5] * 6}
+
+
+def make_band_per_user() -> pl.DataFrame:
+    """Per-user rows of two users scored by a model at two seeds and by a baseline once."""
+    rows = [
+        {
+            "name": name,
+            "stage": PER_USER_STAGE,
+            "seed": seed,
+            "user_id": user,
+            "n_pos": len(positives),
+            "home_node": 0,
+            "pos_node": positives,
+        }
+        for name, seed in [("MLP", 42), ("MLP", 43), ("Baseline", None)]
+        for user, positives in BAND_POSITIVES.items()
+    ]
+
+    return pl.DataFrame(rows)
+
+
+def make_band_score_vectors() -> pl.DataFrame:
+    """Score vectors of the same models, identical across seeds and users."""
+    rows = [
+        {"name": name, "stage": SCORE_VECTOR_STAGE, "seed": seed, "user_id": user, "scores": BAND_SCORES[name]}
+        for name, seed in [("MLP", 42), ("MLP", 43), ("Baseline", None)]
+        for user in BAND_POSITIVES
+    ]
+
+    return pl.DataFrame(rows)
+
+
+def make_band_home_distances() -> pl.DataFrame:
+    return pl.DataFrame({"user_id": list(BAND_POSITIVES), "distances": [NODE_DISTANCES, NODE_DISTANCES]})
+
+
+def band_auc_frame(bands: list[float] | None = None) -> pl.DataFrame:
+    return within_band_auc(
+        make_band_per_user(), make_band_score_vectors(), make_band_home_distances(), bands or BAND_EDGES
+    )
+
+
+class TestWithinBandAUC:
+    def test_bands_are_labelled_by_their_edges_in_km(self):
+        """Node 5's band holds no unvisited node, so no row carries its label."""
+        assert sorted(band_auc_frame()["band"].unique().to_list()) == ["0-1", "1-5"]
+
+    def test_the_home_node_is_not_one_of_the_band_negatives(self):
+        """Home outscores the near positive, so counting it would drop that AUC from 1 to 0.5."""
+        near = band_auc_frame().filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("band") == "0-1"))
+
+        assert near["user_id"].to_list() == [1]
+        assert near["auc"].to_list() == pytest.approx([1.0])
+        assert near["n_band_neg"].to_list() == pytest.approx([1.0])
+
+    def test_a_positive_alone_in_its_band_is_dropped(self):
+        far = band_auc_frame().filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_id") == 2))
+
+        assert far["band"].to_list() == ["1-5"]
+        assert far["auc"].to_list() == pytest.approx([0.0])
+
+    def test_wider_bands_rank_each_positive_against_more_nodes(self):
+        """The edges are read at report time, so one run answers on any banding."""
+        wide = band_auc_frame(bands=[5.0]).filter((pl.col("name") == "MLP") & (pl.col("seed") == 42))
+
+        assert wide["band"].unique().to_list() == ["0-5"]
+        assert dict(zip(wide["user_id"], wide["auc"], strict=True)) == pytest.approx({1: 1.0, 2: 1 / 3})
+
+    def test_table_averages_users_then_seeds(self):
+        table = within_band_auc_table(band_auc_frame()).filter(pl.col("name") == "MLP")
+
+        assert table["band"].to_list() == ["0-1", "1-5"]
+        assert dict(zip(table["band"], table["mean"], strict=True)) == pytest.approx({"0-1": 1.0, "1-5": 0.5})
+        assert table["n_seeds"].to_list() == [2, 2]
+
+    def test_paired_comparison_keeps_only_the_users_scored_in_the_band(self):
+        by_band = paired_within_band_auc(band_auc_frame(), "Baseline", n_bootstrap=200)
+
+        assert by_band["band"].to_list() == ["0-1", "1-5"]
+        assert by_band["mean_diff"].to_list() == pytest.approx([0.5, 0.0])
+        assert by_band["n_users"].to_list() == [1, 2]
 
 
 def make_ranked_per_user() -> pl.DataFrame:

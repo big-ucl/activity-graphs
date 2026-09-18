@@ -36,7 +36,14 @@ def main(cfg: Config):
 
 @hydra.main(version_base=None, config_path="conf", config_name="report")
 def report_results(cfg: Config):
-    print_report(cfg.paths.reports_data, cfg.data.name, cfg.train.max_recall_k, cfg.analysis.run, cfg.analysis)
+    print_report(
+        cfg.paths.reports_data,
+        cfg.data.name,
+        cfg.train.max_recall_k,
+        cfg.data.distance_bands,
+        cfg.analysis.run,
+        cfg.analysis,
+    )
 
 
 if __name__ == "__main__":

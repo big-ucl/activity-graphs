@@ -29,3 +29,6 @@ paths:
   gtfs: ${..paths.external}/gtfs
 
   pyg_datasets: ${..paths.processed}/PyGDatasets
+
+# Upper edges in km of the distance-from-home bands the within-band AUC is read on.
+distance_bands: [ 2, 5, 10, 25 ]
