@@ -109,16 +109,16 @@ def _():
 @app.cell
 def _(cfg, extra_runs, latest_run, load_report_run, project_root, run):
     reports_data_path = project_root / cfg.paths.reports_data
-    ranking_budget = cfg.train.largest_size_recall_at_k
+    max_recall_k = cfg.train.largest_size_recall_at_k
     report_run = latest_run(reports_data_path, cfg.data.name) if run is None else run
 
     aggregate_results, per_user_results = load_report_run(
-        reports_data_path, cfg.data.name, report_run, extra_runs, ranking_budget
+        reports_data_path, cfg.data.name, report_run, extra_runs, max_recall_k
     )
     return (
         aggregate_results,
         per_user_results,
-        ranking_budget,
+        max_recall_k,
         report_run,
         reports_data_path,
     )
@@ -152,8 +152,8 @@ def _(mo):
 
 
 @app.cell
-def _(analysis, ranking_budget):
-    headline = f"{analysis.per_user_metric}@{ranking_budget}"
+def _(analysis, max_recall_k):
+    headline = f"{analysis.per_user_metric}@{max_recall_k}"
     return (headline,)
 
 
@@ -989,12 +989,12 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, load_run, overfit_run, ranking_budget, reports_data_path):
+def _(cfg, load_run, overfit_run, max_recall_k, reports_data_path):
     from activitygraphs.analysis import check_overfit_health
 
     _aggregate_results, _ = load_run(reports_data_path, cfg.data.name, run=overfit_run)
 
-    overfit_health = check_overfit_health(_aggregate_results, ranking_budget)
+    overfit_health = check_overfit_health(_aggregate_results, max_recall_k)
     overfit_health
     return
 

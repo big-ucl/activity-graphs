@@ -15,7 +15,7 @@ from activitygraphs.ml.lightning_module import (
 )
 from activitygraphs.ml.models import NodeMLP
 
-RANKING_BUDGET = 50
+MAX_RECALL_K = 50
 RECALL_KS = [1, 3, 5]
 
 
@@ -89,7 +89,7 @@ def make_module(
         store_score_vectors=store_score_vectors,
         is_home_idx=IS_HOME_IDX,
         home_hop_distance=chain_hop_distance(),
-        max_recall_k=RANKING_BUDGET,
+        max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
 
@@ -163,7 +163,7 @@ class TestValidationStep:
         expected = {
             "val_bce",
             "val_r_precision",
-            f"val_avg_recall@{RANKING_BUDGET}",
+            f"val_avg_recall@{MAX_RECALL_K}",
             *(f"val_recall@{k}" for k in RECALL_KS),
             "val_calibration_l1",
         }
@@ -192,9 +192,9 @@ class TestValidationStep:
             mask = scored_nodes(batch, i)
             scores = out[mask].squeeze().sigmoid()
             labels = batch.y[mask].squeeze()
-            recall_curve = [recall_at_k(scores, labels, k) for k in range(1, RANKING_BUDGET + 1)]
+            recall_curve = [recall_at_k(scores, labels, k) for k in range(1, MAX_RECALL_K + 1)]
             per_user.append({
-                f"val_avg_recall@{RANKING_BUDGET}": sum(recall_curve) / RANKING_BUDGET,
+                f"val_avg_recall@{MAX_RECALL_K}": sum(recall_curve) / MAX_RECALL_K,
                 **{f"val_recall@{k}": recall_curve[k - 1] for k in RECALL_KS},
             })
 
@@ -246,7 +246,7 @@ class TestTestStep:
         expected = {
             "test_bce",
             "test_r_precision",
-            f"test_avg_recall@{RANKING_BUDGET}",
+            f"test_avg_recall@{MAX_RECALL_K}",
             *(f"test_recall@{k}" for k in RECALL_KS),
             "test_n_scored_users",
             "test_n_dropped_users",
@@ -268,7 +268,7 @@ class TestUseDemographics:
             use_demographics=use_demographics,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
-            max_recall_k=RANKING_BUDGET,
+            max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
         )
 
@@ -299,7 +299,7 @@ class TestTrainRanking:
             lr=1e-3,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
-            max_recall_k=RANKING_BUDGET,
+            max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
             **kwargs,
         )
@@ -313,7 +313,7 @@ class TestTrainRanking:
 
         module.training_step(batch, 0)
 
-        assert f"train_avg_recall@{RANKING_BUDGET}" in logged
+        assert f"train_avg_recall@{MAX_RECALL_K}" in logged
         assert "train_loss" in logged
 
     def test_can_be_switched_off(self, monkeypatch):
@@ -326,7 +326,7 @@ class TestTrainRanking:
         module.training_step(batch, 0)
 
         assert module.train_avg_recall is None
-        assert f"train_avg_recall@{RANKING_BUDGET}" not in logged
+        assert f"train_avg_recall@{MAX_RECALL_K}" not in logged
         assert "train_loss" in logged
 
 
@@ -588,7 +588,7 @@ def make_home_pe_module(
         lr=1e-3,
         home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
-        max_recall_k=RANKING_BUDGET,
+        max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
         use_home_pe=True,
         home_pe_bins=n_bins,

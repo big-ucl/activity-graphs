@@ -806,19 +806,21 @@ class TestPostHocMatchesLogged:
 
 class TestAppendBaselines:
     def _extra_run(self) -> pl.DataFrame:
-        """A later run holding a new baseline and a learned model trained there."""
+        """A later run holding a new baseline, a seeded baseline and a learned model trained there."""
         return pl.DataFrame({
-            "name": ["Gravity", "Gravity", "MLP-new", "MLP-new"],
-            "stage": [PER_USER_STAGE] * 4,
-            "user_id": [1, 2, 1, 2],
-            "seed": [None, None, 42, 42],
-            "r_precision": [0.25, 0.75, 1.0, 1.0],
+            "name": ["Gravity", "Gravity", "HomeZoneMF", "HomeZoneMF", "MLP-new", "MLP-new"],
+            "stage": [PER_USER_STAGE] * 6,
+            "user_id": [1, 2, 1, 2, 1, 2],
+            "seed": [None, None, 42, 42, 42, 42],
+            "is_baseline": [True, True, True, True, False, False],
+            "r_precision": [0.25, 0.75, 0.5, 0.5, 1.0, 1.0],
         })
 
-    def test_appends_only_the_seedless_rows(self):
+    def test_appends_only_the_baseline_rows(self):
         combined = append_baselines(make_per_user(), self._extra_run())
 
         assert combined.filter(pl.col("name") == "Gravity").height == 2
+        assert combined.filter(pl.col("name") == "HomeZoneMF").height == 2
         assert combined.filter(pl.col("name") == "MLP-new").is_empty()
 
     def test_the_appended_baseline_pairs_by_user(self):

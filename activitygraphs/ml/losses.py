@@ -90,18 +90,39 @@ def bpr_loss(
         )  # fall back to all unvisited for users whose restricted pool is empty
         neg_mask = torch.where(empty, neg_mask, restricted)
 
-    has_pos = pos_mask.any(dim=1) & neg_mask.any(dim=1)
-    if not has_pos.any():
-        return logits.sum() * 0.0  # keep Autodiff graph connected, zero-out loss
+    return dense_bpr_loss(scores, pos_mask.float(), neg_mask.float(), n_pairs, generator)
 
-    pos_w = pos_mask[has_pos].float()  # Weights are 1 for positives, 0 for negatives. Ignores users with no positives
-    neg_w = neg_mask[has_pos].float()
-    s = scores[has_pos]
 
-    pos_idx = torch.multinomial(pos_w, n_pairs, replacement=True, generator=generator)  # [U_has_pos, n_pairs]
-    neg_idx = torch.multinomial(neg_w, n_pairs, replacement=True, generator=generator)
+def dense_bpr_loss(
+    scores: torch.Tensor,
+    pos_weight: torch.Tensor,
+    neg_weight: torch.Tensor,
+    n_pairs: int = 128,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Mean BPR loss over ``n_pairs`` (positive, negative) pairs sampled per row of a dense score matrix.
 
-    diff = s.gather(1, pos_idx) - s.gather(1, neg_idx)  # [U_has_pos, n_pairs]
+    Args:
+        scores: Candidate scores, ``[n_rows, n_candidates]``.
+        pos_weight: Non-negative weight of drawing each candidate as the positive of its row, ``[n_rows,
+            n_candidates]``; a zero excludes the candidate.
+        neg_weight: The same for the negative of the pair.
+        n_pairs: Pairs drawn per row, so rows are weighted equally regardless of how many positives they hold.
+        generator: Generator of the pair sampling.
+
+    Returns:
+        Scalar loss. Rows without both a positive and a negative are dropped; when no row has both, the loss is zero
+        and still attached to ``scores``.
+    """
+    has_pairs = (pos_weight > 0).any(dim=1) & (neg_weight > 0).any(dim=1)
+    if not has_pairs.any():
+        return scores.sum() * 0.0  # keep Autodiff graph connected, zero-out loss
+
+    row_scores = scores[has_pairs]
+    pos_idx = torch.multinomial(pos_weight[has_pairs], n_pairs, replacement=True, generator=generator)
+    neg_idx = torch.multinomial(neg_weight[has_pairs], n_pairs, replacement=True, generator=generator)
+
+    diff = row_scores.gather(1, pos_idx) - row_scores.gather(1, neg_idx)  # [n_rows_with_pairs, n_pairs]
     return -F.logsigmoid(diff).mean()
 
 

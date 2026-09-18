@@ -10,11 +10,11 @@ import torch_geometric as pyg
 from sklearn.preprocessing import StandardScaler
 
 from activitygraphs.ml.baselines.common import (
-    PerUserTensors,
     extract_per_user_tensors,
     fit_smoothing_strength,
     graph_home_indices,
     graph_node_indices,
+    non_home_mask,
     smoothed_rate,
 )
 from activitygraphs.ml.popularity import home_excluded_visit_rate, home_visit_counts
@@ -40,13 +40,6 @@ def unscale_distances(scaled_distances: torch.Tensor, scaler: StandardScaler) ->
     scale = float(scaler.scale_[0])
 
     return (scaled_distances.float() * scale + mean).clamp(min=MIN_DISTANCE_M)
-
-
-def non_home_mask(per_user_tensors: PerUserTensors) -> torch.Tensor:
-    """Return the ``[n_users, n_nodes]`` mask of the (user, node) pairs where the node is not the user's home."""
-    mask = torch.ones_like(per_user_tensors.labels, dtype=torch.bool)
-    mask[torch.arange(len(mask)), per_user_tensors.home_idx] = False
-    return mask
 
 
 class DistanceDecayBaseline(torch.nn.Module):

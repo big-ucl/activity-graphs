@@ -20,6 +20,7 @@ from activitygraphs.ml.baselines import (
     GlobalBaseline,
     GravityBaseline,
     GravityBinnedBaseline,
+    HomeZoneMFBaseline,
     UniformBaseline,
     VisitFrequencyBaseline,
 )
@@ -302,9 +303,9 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     train_dataset = datamodule.train_dataset
 
     home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
-    ranking_budget = cfg.train.max_recall_k
+    max_recall_k = cfg.train.max_recall_k
     recall_ks = list(cfg.analysis.recall_curve_ks)
-    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, ranking_budget)
+    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, max_recall_k)
 
     hidden_channels = 128
 
@@ -325,16 +326,20 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     verbose = 1
 
     num_nodes = train_dataset[0].num_nodes
-    baseline_results = [
-        res.with_columns(seed=pl.lit(None, dtype=pl.Int64))
-        for res in (
-            measure_baselines(
-                num_nodes, datamodule, loss, ranking_budget, recall_ks, wandb_params, cfg.train.save_score_vectors
-            )
-            if with_baselines
-            else []
+    baseline_results = (
+        measure_baselines(
+            num_nodes,
+            datamodule,
+            loss,
+            max_recall_k,
+            recall_ks,
+            train_seeds,
+            wandb_params,
+            cfg.train.save_score_vectors,
         )
-    ]
+        if with_baselines
+        else []
+    )
 
     models_dir = cfg.paths.models
 
@@ -351,7 +356,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         train_and_evaluate_model,
         datamodule=datamodule,
         loss=loss,
-        max_recall_k=ranking_budget,
+        max_recall_k=max_recall_k,
         recall_ks=recall_ks,
         num_epochs=epochs,
         verbose=verbose,
@@ -383,15 +388,19 @@ def measure_baselines(
     num_nodes,
     datamodule: ActivityDataModule,
     loss: Loss,
-    ranking_budget: int,
+    max_recall_k: int,
     recall_ks: list[int],
+    train_seeds: list[int],
     wandb_params: WandBParams,
     store_score_vectors: bool = False,
 ):
-    """Fit and evaluate the baselines: the frequency baselines, then the distance-decay ones.
+    """Fit and evaluate the baselines: the frequency baselines, then the distance-decay ones, then HomeZoneMF.
+
+    The closed-form baselines are fitted once and their frames carry a null ``seed``. ``HomeZoneMF`` is fitted by
+    stochastic optimisation, so it is refitted once per training seed and its frames carry that seed.
 
     Returns:
-        One result frame per baseline, in order.
+        One result frame per baseline, in order, then one per training seed for ``HomeZoneMF``.
     """
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
@@ -415,20 +424,38 @@ def measure_baselines(
         BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_loader, val_loader), full_info=True),
     ]
 
-    return [
+    results = [
         evaluate_baseline(
             spec.baseline,
             datamodule,
             loss,
             spec.name,
-            max_recall_k=ranking_budget,
+            max_recall_k=max_recall_k,
             recall_ks=recall_ks,
             wandb_params=wandb_params,
             store_score_vectors=store_score_vectors,
             full_info=spec.full_info,
-        )
+        ).with_columns(seed=pl.lit(None, dtype=pl.Int64))
         for spec in baselines
     ]
+
+    for train_seed in train_seeds:
+        home_zone_mf = HomeZoneMFBaseline(num_nodes, is_home_idx, max_recall_k, seed=train_seed)
+        results.append(
+            evaluate_baseline(
+                home_zone_mf.fit(train_loader, val_loader),
+                datamodule,
+                loss,
+                "HomeZoneMF",
+                max_recall_k=max_recall_k,
+                recall_ks=recall_ks,
+                wandb_params=wandb_params,
+                store_score_vectors=store_score_vectors,
+                run_tag=f"seed{train_seed}" if len(train_seeds) > 1 else None,
+            ).with_columns(seed=pl.lit(train_seed, dtype=pl.Int64))
+        )
+
+    return results
 
 
 @dataclass(frozen=True)

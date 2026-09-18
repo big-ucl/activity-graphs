@@ -101,6 +101,7 @@ def evaluate_baseline(
     wandb_params: WandBParams | None = None,
     store_score_vectors: bool = False,
     full_info: bool = False,
+    run_tag: str | None = None,
 ) -> pl.DataFrame:
     """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
 
@@ -110,6 +111,8 @@ def evaluate_baseline(
 
     Args:
         full_info: Append each node's distance from home as the last feature column, for the distance baselines.
+        run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
+            does not reach the returned frame, whose ``name`` stays ``name``.
     """
     baseline_module = ActivityGraphModule(
         model=baseline,
@@ -127,12 +130,13 @@ def evaluate_baseline(
         logger: WandbLogger = WandbLogger(
             project=wandb_params.project,
             entity=wandb_params.entity,
-            name=name,
+            name=name if run_tag is None else f"{name}-{run_tag}",
             group=wandb_params.group,
             tags=wandb_params.tags("baseline"),
         )
         logger.log_hyperparams({
             "model": name,
+            "run_tag": run_tag,
             "dataset": wandb_params.dataset_name,
             "experiment": wandb_params.experiment,
             "model_type": "baseline",
@@ -159,7 +163,9 @@ def evaluate_baseline(
     per_user_results = per_user_frame(baseline_module, name, datamodule.home_coverage)
     score_vectors = score_vector_frame(baseline_module, name)
 
-    return pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal")
+    return pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal").with_columns(
+        is_baseline=pl.lit(True)
+    )
 
 
 def train_and_evaluate_model(
@@ -341,7 +347,9 @@ def train_and_evaluate_model(
         per_user_results = per_user_frame(lit_model, name, datamodule.home_coverage)
         score_vectors = score_vector_frame(lit_model, name)
 
-        results = pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal")
+        results = pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal").with_columns(
+            is_baseline=pl.lit(False)
+        )
 
         first_cols = ["name", "stage", "epoch"]
         other_cols = [c for c in results.columns if c not in first_cols]

@@ -140,8 +140,7 @@ def _positive_average_recall(positives: pl.DataFrame, budget: int) -> pl.Series:
 def append_baselines(results: pl.DataFrame, extra_results: pl.DataFrame) -> pl.DataFrame:
     """Append the baseline rows of another run of the same dataset to a result frame.
 
-    Baselines are the seedless rows. Their users pair with the other run's by ``user_id``, since the split is fixed by
-    ``train.split_seed``.
+    Their users pair with the other run's by ``user_id``, since the split is fixed by ``train.split_seed``.
 
     Args:
         results: Aggregate, per-user or score-vector frame of the main run.
@@ -153,7 +152,7 @@ def append_baselines(results: pl.DataFrame, extra_results: pl.DataFrame) -> pl.D
     Raises:
         ValueError: If a baseline name already appears in ``results``.
     """
-    baselines = extra_results.filter(pl.col("seed").is_null())
+    baselines = extra_results.filter(pl.col("is_baseline"))
     shared = set(results["name"].unique()) & set(baselines["name"].unique())
 
     if shared:
@@ -163,7 +162,7 @@ def append_baselines(results: pl.DataFrame, extra_results: pl.DataFrame) -> pl.D
 
 
 def load_report_run(
-    report_data_path: str | Path, name: str, run: int, ranking_budget: int
+    report_data_path: str | Path, name: str, run: int, max_recall_k: int
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Load a run for reporting with the aggregate results and the per-user ``avg_recall``.
 
@@ -171,13 +170,13 @@ def load_report_run(
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
         name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
         run: Run number of the main run.
-        ranking_budget: Largest rank cutoff ``K`` of ``avg_recall@K``.
+        max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
 
     Returns:
         Tuple ``(aggregate_results, per_user_results)``.
     """
     aggregate, per_user = load_run(report_data_path, name, run)
-    return aggregate, with_ranking_metrics(per_user, ranking_budget)
+    return aggregate, with_ranking_metrics(per_user, max_recall_k)
 
 
 def _latest_run(path: Path, name: str) -> int:
@@ -204,7 +203,7 @@ def _latest_run(path: Path, name: str) -> int:
 def aggregate_metrics(aggregate_results: pl.DataFrame, metric: str) -> pl.DataFrame:
     """Mean +- SD of a test metric over all training seeds, one row per model.
 
-    Baselines are deterministic (no seed), so function reports ``n_seeds = 1`` and null SD.
+    The closed-form baselines are fitted once, so the function reports ``n_seeds = 1`` and a null SD for them.
 
     Returns:
         Frame of ``name, n_seeds, mean, sd, min, max``, sorted by mean (descending).
@@ -901,7 +900,7 @@ def home_zone_summary(dataset: ActivityDataset, occupancy_thresholds: Sequence[i
 def print_report(
     report_data_path: str | Path,
     name: str,
-    ranking_budget: int,
+    max_recall_k: int,
     run: int | None = None,
     analysis: AnalysisConfig | None = None,
 ) -> None:
@@ -911,7 +910,7 @@ def print_report(
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
         name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
-        ranking_budget: Largest rank cutoff ``K`` of ``avg_recall@K``.
+        max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
         run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None. Its ``extra_runs`` add the baselines of
             other runs of the same dataset.
@@ -919,7 +918,7 @@ def print_report(
     report_data_path: Path = Path(report_data_path)
     run = run if run is not None else _latest_run(report_data_path, name)
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
-    aggregate, per_user = load_report_run(report_data_path, name, run, ranking_budget)
+    aggregate, per_user = load_report_run(report_data_path, name, run, max_recall_k)
 
     n_scored, n_dropped = _num_scored_dropped_users(aggregate)
     metric = analysis.per_user_metric
@@ -930,7 +929,7 @@ def print_report(
         print(f"\n=== {name} run {run} ===")
         print(f"test users: {n_scored} scored, {n_dropped} dropped due to empty RG_i")
 
-        print(f"\n-- per-user {metric} (K = {ranking_budget}), avg over seeds --")
+        print(f"\n-- per-user {metric} (K = {max_recall_k}), avg over seeds --")
         print(per_user_metric_summary(per_user, metric))
 
         print(f"\n-- per-user recall@k at k = {ks}, avg over seeds, lift over {POPULARITY_MODEL} --")
