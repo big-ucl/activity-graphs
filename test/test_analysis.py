@@ -23,6 +23,9 @@ from activitygraphs.analysis import (
     band_contributions,
     band_decomposition,
     paired_comparison_by_band,
+    distance_band_recall,
+    distance_band_recall_table,
+    paired_distance_band_recall,
     paired_within_band_auc,
     within_band_auc,
     within_band_auc_table,
@@ -732,6 +735,43 @@ class TestWithinBandAUC:
         assert by_band["band"].to_list() == ["0-1", "1-5"]
         assert by_band["mean_diff"].to_list() == pytest.approx([0.5, 0.0])
         assert by_band["n_users"].to_list() == [1, 2]
+
+
+# Each positive's ``pos_avg_recall`` in the order of ``BAND_POSITIVES``, the same at both seeds.
+BAND_POSITIVE_RECALL = {"MLP": {1: [0.8, 0.4], 2: [0.6, 0.2]}, "Baseline": {1: [0.4, 0.4], 2: [0.2, 0.2]}}
+
+
+def by_distance_frame() -> pl.DataFrame:
+    per_user = make_band_per_user().with_columns(
+        pos_avg_recall=pl.struct("name", "user_id").map_elements(
+            lambda row: BAND_POSITIVE_RECALL[row["name"]][row["user_id"]], return_dtype=pl.List(pl.Float64)
+        )
+    )
+
+    return distance_band_recall(per_user, make_band_home_distances(), BAND_EDGES)
+
+
+class TestDistanceBandRecall:
+    def test_a_positive_alone_in_its_band_is_kept(self):
+        """Every positive is ranked against every node, so an empty band does not drop it."""
+        assert by_distance_frame()["band"].unique(maintain_order=True).to_list() == ["0-1", "1-5", "5+"]
+
+    def test_contributions_sum_to_the_headline(self):
+        table = distance_band_recall_table(by_distance_frame()).filter(pl.col("name") == "MLP")
+
+        assert dict(zip(table["band"], table["contribution"], strict=True)) == pytest.approx(
+            {"0-1": 0.2, "1-5": 0.25, "5+": 0.05}
+        )
+        assert table["contribution"].sum() == pytest.approx(0.5)
+        assert dict(zip(table["band"], table["mean"], strict=True)) == pytest.approx({"0-1": 0.8, "1-5": 0.5, "5+": 0.2})
+        assert table["share_of_pos"].to_list() == pytest.approx([0.25, 0.5, 0.25])
+
+    def test_paired_comparison_keeps_only_the_users_with_a_positive_in_the_band(self):
+        by_band = paired_distance_band_recall(by_distance_frame(), "Baseline", n_bootstrap=200)
+
+        assert by_band["band"].to_list() == ["0-1", "1-5", "5+"]
+        assert by_band["mean_diff"].to_list() == pytest.approx([0.4, 0.2, 0.0])
+        assert by_band["n_users"].to_list() == [1, 2, 1]
 
 
 def make_ranked_per_user() -> pl.DataFrame:

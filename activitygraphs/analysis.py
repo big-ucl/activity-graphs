@@ -2,6 +2,7 @@
   - Distribution of result metrics between seeds/runs;
   - Comparison of models paired up by users;
   - Metrics per hop-band
+  - Per-user avg_recall by distance band of each positive
   - AUC of each positive within its distance band from home
   - Density of home zones
 
@@ -850,6 +851,97 @@ def _per_positive_band_auc(
     )
 
 
+def distance_band_recall(
+    per_user_results: pl.DataFrame, home_distances: pl.DataFrame, bands: Sequence[float]
+) -> pl.DataFrame:
+    """Each user's per-user ``avg_recall`` split by the distance band from home of each positive.
+
+    Args:
+        per_user_results: Per-user results frame from ``load_report_run``.
+        home_distances: Per-user distances from home from ``load_home_distances``.
+        bands: Upper band edges in km.
+
+    Returns:
+        Frame of ``name, stage, seed, user_id, band, band_lo, band_recall, n_band_pos, n_pos``, one row per model,
+        seed, user and band the user has a positive in. ``band_recall`` is the mean ``pos_avg_recall`` of the user's
+        positives in the band, ranked against every node, so ``band_recall * n_band_pos / n_pos`` summed over bands
+        is the user's ``avg_recall``.
+    """
+    lower_edges, upper_edges = _band_edges(bands)
+    distances = home_distances.select("user_id", "distances")
+
+    positives = (
+        per_user_results
+        .filter(pl.col("stage") == PER_USER_STAGE)
+        .join(distances, on="user_id")
+        .with_columns(
+            pos_distance=pl.col("distances").list.gather(pl.col(PER_POSITIVE_NODE_COLUMN)),
+        )
+        .select("name", "seed", "user_id", "n_pos", PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
+        .explode(PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
+    )
+    band_index = distance_band_index(positives["pos_distance"].to_numpy().astype(np.float64), bands)
+
+    return (
+        positives
+        .with_columns(band_lo=pl.Series(lower_edges[band_index]), band_hi=pl.Series(upper_edges[band_index]))
+        .with_columns(band=_distance_band_label(pl.col("band_lo"), pl.col("band_hi")))
+        .group_by("name", "seed", "user_id", "band", "band_lo")
+        .agg(
+            band_recall=pl.col(PER_POSITIVE_AVG_RECALL_COLUMN).cast(pl.Float64).mean(),
+            n_band_pos=pl.len(),
+            n_pos=pl.col("n_pos").first(),
+        )
+        .with_columns(stage=pl.lit(PER_USER_STAGE))
+        .select("name", "stage", "seed", "user_id", "band", "band_lo", "band_recall", "n_band_pos", "n_pos")
+        .sort("band_lo", "name", "user_id")
+    )
+
+
+def distance_band_recall_table(band_recall: pl.DataFrame) -> pl.DataFrame:
+    """Recall of the positives in each distance band and the band's share of the headline, mean +- sd over seeds.
+
+    Args:
+        band_recall: Per-user band recall from ``distance_band_recall``.
+
+    Returns:
+        Frame of ``band, name, n_seeds, mean, sd, contribution, n_users, n_pos, share_of_pos``, ordered by band then
+        ``mean`` (descending). ``mean`` averages ``band_recall`` over the users with a positive in the band, and
+        ``contribution`` is the band's term of the per-user ``avg_recall`` averaged over every scored user, so a
+        model's contributions sum to its headline. ``share_of_pos`` is the band's fraction of the positives.
+    """
+    seed_means = (
+        band_recall
+        .with_columns(
+            n_seed_users=pl.col("user_id").n_unique().over("name", "seed"),
+            weighted=pl.col("band_recall") * pl.col("n_band_pos") / pl.col("n_pos"),
+        )
+        .group_by("name", "seed", "band", "band_lo")
+        .agg(
+            seed_mean=pl.col("band_recall").mean(),
+            contribution=pl.col("weighted").sum() / pl.col("n_seed_users").first(),
+            n_users=pl.len(),
+            n_pos=pl.col("n_band_pos").sum(),
+        )
+    )
+
+    return (
+        seed_means
+        .group_by("name", "band", "band_lo")
+        .agg(
+            n_seeds=pl.len(),
+            mean=pl.col("seed_mean").mean(),
+            sd=pl.col("seed_mean").std(),
+            contribution=pl.col("contribution").mean(),
+            n_users=pl.col("n_users").mean(),
+            n_pos=pl.col("n_pos").mean(),
+        )
+        .with_columns(share_of_pos=pl.col("n_pos") / pl.col("n_pos").sum().over("name"))
+        .sort("band_lo", "mean", descending=[False, True])
+        .select("band", "name", "n_seeds", "mean", "sd", "contribution", "n_users", "n_pos", "share_of_pos")
+    )
+
+
 def within_band_auc(
     per_user_results: pl.DataFrame,
     score_vectors: pl.DataFrame,
@@ -977,11 +1069,39 @@ def paired_within_band_auc(
         Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
         ``mean_diff`` (descending).
     """
-    bands = band_auc.select("band", "band_lo").unique().sort("band_lo")["band"]
+    return _paired_by_distance_band(band_auc, reference_model, "auc", n_bootstrap, seed)
+
+
+def paired_distance_band_recall(
+    band_recall: pl.DataFrame,
+    reference_model: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` run on each distance band's ``band_recall``.
+
+    Args:
+        band_recall: Per-user band recall from ``distance_band_recall``.
+        reference_model: Model every other model is compared against.
+        n_bootstrap: Bootstrap resamples behind the confidence interval.
+        seed: Seed of the bootstrap.
+
+    Returns:
+        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
+        ``mean_diff`` (descending).
+    """
+    return _paired_by_distance_band(band_recall, reference_model, "band_recall", n_bootstrap, seed)
+
+
+def _paired_by_distance_band(
+    band_frame: pl.DataFrame, reference_model: str, value: str, n_bootstrap: int, seed: int
+) -> pl.DataFrame:
+    """``paired_comparison`` of the per-user ``value`` column run on each distance band of ``band_frame``."""
+    bands = band_frame.select("band", "band_lo").unique().sort("band_lo")["band"]
 
     comparisons = [
         paired_comparison(
-            band_auc.filter(pl.col("band") == band), reference_model, "auc", n_bootstrap, seed
+            band_frame.filter(pl.col("band") == band), reference_model, value, n_bootstrap, seed
         ).with_columns(band=pl.lit(band))
         for band in bands
     ]
@@ -1158,7 +1278,7 @@ def print_report(
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
         name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
-        distance_bands: Upper edges in km of the distance bands the within-band AUC is read on.
+        distance_bands: Upper edges in km of the distance bands, for the band split and the within-band AUC.
         run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None. Its ``extra_runs`` add the baselines of
             other runs of the same dataset.
@@ -1209,6 +1329,14 @@ def print_report(
 
         print(f"\n-- paired per-user {metric} by hop band of each positive, vs {reference} --")
         print(paired_comparison_by_band(per_user, reference, metric))
+
+        by_distance = distance_band_recall(per_user, load_home_distances(report_data_path, name, run), distance_bands)
+
+        print(f"\n-- per-user {metric} by distance band of each positive, edges {distance_bands} km, avg over seeds --")
+        print(distance_band_recall_table(by_distance))
+
+        print(f"\n-- paired per-user {metric} by distance band of each positive, vs {reference} --")
+        print(paired_distance_band_recall(by_distance, reference))
 
         print("\n-- home coverage of test users --")
         print(home_coverage_summary(per_user))
