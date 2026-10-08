@@ -234,8 +234,7 @@ def overfit_health_experiment(cfg: Config):
 def baselines_experiment(cfg: Config):
     """Fit and evaluate the baselines alone, with no learned models.
 
-    The split is fixed by ``cfg.train.split_seed``, so the per-user rows pair with any learned run of the same dataset
-    through ``analysis.extra_runs``.
+    The split is fixed by ``cfg.train.split_seed``, so the per-user rows pair with any learned run of the same dataset.
     """
     setup = setup_experiment(cfg)
 

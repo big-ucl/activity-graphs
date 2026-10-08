@@ -2,7 +2,6 @@
 
 import math
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -19,7 +18,6 @@ from activitygraphs.analysis import (
     _diff_sd_per_seed,
     _latest_run,
     aggregate_metrics,
-    append_baselines,
     band_contributions,
     band_decomposition,
     paired_comparison_by_band,
@@ -936,64 +934,6 @@ class TestPostHocMatchesLogged:
         for k in (1, 5):
             post_hoc = recalls.filter(pl.col("k") == k)["recall_at_k"].mean()
             assert post_hoc == pytest.approx(logged[f"test_recall@{k}"], abs=1e-6)
-
-
-class TestAppendBaselines:
-    def _extra_run(self) -> pl.DataFrame:
-        """A later run holding a new baseline, a seeded baseline and a learned model trained there."""
-        return pl.DataFrame({
-            "name": ["Gravity", "Gravity", "HomeZoneMF", "HomeZoneMF", "MLP-new", "MLP-new"],
-            "stage": [PER_USER_STAGE] * 6,
-            "user_id": [1, 2, 1, 2, 1, 2],
-            "seed": [None, None, 42, 42, 42, 42],
-            "is_baseline": [True, True, True, True, False, False],
-            "r_precision": [0.25, 0.75, 0.5, 0.5, 1.0, 1.0],
-        })
-
-    def test_appends_only_the_baseline_rows(self):
-        combined = append_baselines(make_per_user(), self._extra_run())
-
-        assert combined.filter(pl.col("name") == "Gravity").height == 2
-        assert combined.filter(pl.col("name") == "HomeZoneMF").height == 2
-        assert combined.filter(pl.col("name") == "MLP-new").is_empty()
-
-    def test_the_appended_baseline_pairs_by_user(self):
-        combined = append_baselines(make_per_user(), self._extra_run())
-
-        compared = paired_comparison(combined, "Gravity", PER_USER_METRIC, n_bootstrap=200)
-
-        assert compared.filter(pl.col("name") == "MLP")["n_users"].item() == 2
-
-    def test_a_name_in_both_runs_raises(self):
-        extra = self._extra_run().with_columns(name=pl.lit("Baseline"))
-
-        with pytest.raises(ValueError, match="Baseline"):
-            append_baselines(make_per_user(), extra)
-
-
-class TestLoadReportRun:
-    def _write_runs(self, path) -> None:
-        per_user = make_ranked_per_user().filter(pl.col("name") == "MLP")
-        extra = make_ranked_per_user().filter(pl.col("name") == "Uniform")
-        aggregate = pl.DataFrame({"name": ["MLP"], "stage": ["test"], "seed": [42], "test_r_precision": [0.5]})
-        extra_aggregate = pl.DataFrame(
-            {"name": ["Uniform"], "stage": ["test"], "seed": [None], "test_r_precision": [0.1]},
-            schema_overrides={"seed": pl.Int64},
-        )
-        for run, aggregate_frame, per_user_frame in [(1, aggregate, per_user), (2, extra_aggregate, extra)]:
-            aggregate_frame.write_parquet(path / f"GenevaTPG-results-{run}.parquet")
-            per_user_frame.write_parquet(path / f"GenevaTPG-per-user-{run}.parquet")
-
-        make_score_vectors([[0.1, 0.9]]).write_parquet(path / "GenevaTPG-scores-1.parquet")
-
-    def test_extra_runs_without_score_vectors_are_skipped(self, tmp_path):
-        self._write_runs(tmp_path)
-
-        path = Path(tmp_path)
-        scores1 = load_score_vectors(path, "GenevaTPG", 1)
-        scores = scores1
-
-        assert scores["name"].unique().to_list() == ["MLP-dist"]
 
 
 class TestLiftOverReference:

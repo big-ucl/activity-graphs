@@ -161,30 +161,6 @@ def _positive_average_recall(positives: pl.DataFrame, budget: int) -> pl.Series:
     )
 
 
-def append_baselines(results: pl.DataFrame, extra_results: pl.DataFrame) -> pl.DataFrame:
-    """Append the baseline rows of another run of the same dataset to a result frame.
-
-    Their users pair with the other run's by ``user_id``, since the split is fixed by ``train.split_seed``.
-
-    Args:
-        results: Aggregate, per-user or score-vector frame of the main run.
-        extra_results: The same kind of frame from the other run.
-
-    Returns:
-        ``results`` with the other run's baseline rows appended.
-
-    Raises:
-        ValueError: If a baseline name already appears in ``results``.
-    """
-    baselines = extra_results.filter(pl.col("is_baseline"))
-    shared = set(results["name"].unique()) & set(baselines["name"].unique())
-
-    if shared:
-        raise ValueError(f"models {sorted(shared)} appear in both runs")
-
-    return pl.concat([results, baselines], how="diagonal_relaxed")
-
-
 def load_report_run(
     report_data_path: str | Path, name: str, run: int, max_recall_k: int
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -1280,8 +1256,7 @@ def print_report(
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
         distance_bands: Upper edges in km of the distance bands, for the band split and the within-band AUC.
         run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
-        analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None. Its ``extra_runs`` add the baselines of
-            other runs of the same dataset.
+        analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None.
     """
     report_data_path: Path = Path(report_data_path)
     run = run if run is not None else _latest_run(report_data_path, name)

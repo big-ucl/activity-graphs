@@ -47,8 +47,7 @@ def _(dataset_dropdown):
     latest = None
 
     run = latest
-    extra_runs = []
-    return dataset_str, extra_runs, overfit_run, run
+    return dataset_str, overfit_run, run
 
 
 @app.cell(hide_code=True)
@@ -107,13 +106,13 @@ def _():
 
 
 @app.cell
-def _(cfg, extra_runs, latest_run, load_report_run, project_root, run):
+def _(cfg, latest_run, load_report_run, project_root, run):
     reports_data_path = project_root / cfg.paths.reports_data
-    max_recall_k = cfg.train.largest_size_recall_at_k
+    max_recall_k = cfg.train.max_recall_k
     report_run = latest_run(reports_data_path, cfg.data.name) if run is None else run
 
     aggregate_results, per_user_results = load_report_run(
-        reports_data_path, cfg.data.name, report_run, extra_runs, max_recall_k
+        reports_data_path, cfg.data.name, report_run, max_recall_k
     )
     return (
         aggregate_results,
@@ -959,7 +958,7 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, extra_runs, report_run, reports_data_path):
+def _(cfg, report_run, reports_data_path):
     path = Path(reports_data_path)
     scores = load_score_vectors(path, cfg.data.name, report_run)
     score_vectors = scores
