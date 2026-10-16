@@ -4,7 +4,6 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-
 import polars as pl
 import pytest
 import torch
@@ -17,34 +16,34 @@ from activitygraphs.analysis import (
     _average_metric_over_seeds,
     _diff_sd_per_seed,
     _latest_run,
+    _num_scored_dropped_users,
+    _restrict_to_realised_size,
     aggregate_metrics,
     band_contributions,
     band_decomposition,
-    paired_comparison_by_band,
-    distance_band_recall,
-    distance_band_recall_table,
-    paired_distance_band_recall,
-    paired_within_band_auc,
-    within_band_auc,
-    within_band_auc_table,
-    paired_comparison_by_k,
-    recall_at_ks,
-    recall_curve,
-    home_zone_summary,
-    lift_over_reference,
-    with_ranking_metrics,
     check_home_node_rank,
-    load_run,
-    load_score_vectors,
     check_model_health,
     check_overfit_health,
-    paired_comparison,
     check_popularity_correlation,
     check_user_invariance,
+    distance_band_recall,
+    distance_band_recall_table,
+    home_zone_summary,
+    lift_over_reference,
+    load_run,
+    load_score_vectors,
+    paired_comparison,
+    paired_comparison_by_band,
+    paired_comparison_by_k,
+    paired_distance_band_recall,
+    paired_within_band_auc,
     per_user_metric_summary,
     realised_size_summary,
-    _restrict_to_realised_size,
-    _num_scored_dropped_users,
+    recall_at_ks,
+    recall_curve,
+    with_ranking_metrics,
+    within_band_auc,
+    within_band_auc_table,
 )
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.models import NodeMLP
@@ -119,45 +118,45 @@ def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:
 class TestLoading:
     def test_latest_run_picks_the_highest_number(self, tmp_path):
         for run in [1, 2, 10]:
-            (tmp_path / f"GenevaTPG-results-{run}.parquet").touch()
+            (tmp_path / f"TPG-results-{run}.parquet").touch()
         (tmp_path / "OtherCity-results-99.parquet").touch()
 
-        assert _latest_run(tmp_path, "GenevaTPG") == 10
+        assert _latest_run(tmp_path, "TPG") == 10
 
     def test_latest_run_raises_when_nothing_matches(self, tmp_path):
         with pytest.raises(FileNotFoundError):
-            _latest_run(tmp_path, "GenevaTPG")
+            _latest_run(tmp_path, "TPG")
 
     def test_load_run_reads_both_frames_of_the_latest_run(self, tmp_path):
-        make_aggregate().write_parquet(tmp_path / "GenevaTPG-results-1.parquet")
-        make_per_user().write_parquet(tmp_path / "GenevaTPG-per-user-1.parquet")
-        make_aggregate().head(1).write_parquet(tmp_path / "GenevaTPG-results-2.parquet")
-        make_per_user().head(1).write_parquet(tmp_path / "GenevaTPG-per-user-2.parquet")
+        make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
+        make_per_user().write_parquet(tmp_path / "TPG-per-user-1.parquet")
+        make_aggregate().head(1).write_parquet(tmp_path / "TPG-results-2.parquet")
+        make_per_user().head(1).write_parquet(tmp_path / "TPG-per-user-2.parquet")
 
-        aggregate, per_user = load_run(tmp_path, "GenevaTPG")
+        aggregate, per_user = load_run(tmp_path, "TPG")
         assert aggregate.height == 1
         assert per_user.height == 1
 
-        aggregate, per_user = load_run(tmp_path, "GenevaTPG", run=1)
+        aggregate, per_user = load_run(tmp_path, "TPG", run=1)
         assert aggregate.height == 4
         assert per_user.height == 9
 
 
 class TestLoadScoreVectors:
     def test_reads_the_score_frame_of_the_latest_run(self, tmp_path):
-        make_aggregate().write_parquet(tmp_path / "GenevaTPG-results-1.parquet")
-        make_score_vectors([[0.1, 0.9]]).write_parquet(tmp_path / "GenevaTPG-scores-1.parquet")
-        make_aggregate().write_parquet(tmp_path / "GenevaTPG-results-2.parquet")
-        make_score_vectors([[0.2, 0.8], [0.3, 0.7]]).write_parquet(tmp_path / "GenevaTPG-scores-2.parquet")
+        make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
+        make_score_vectors([[0.1, 0.9]]).write_parquet(tmp_path / "TPG-scores-1.parquet")
+        make_aggregate().write_parquet(tmp_path / "TPG-results-2.parquet")
+        make_score_vectors([[0.2, 0.8], [0.3, 0.7]]).write_parquet(tmp_path / "TPG-scores-2.parquet")
 
-        assert load_score_vectors(tmp_path, "GenevaTPG").height == 2
-        assert load_score_vectors(tmp_path, "GenevaTPG", run=1)["scores"].to_list() == [[0.1, 0.9]]
+        assert load_score_vectors(tmp_path, "TPG").height == 2
+        assert load_score_vectors(tmp_path, "TPG", run=1)["scores"].to_list() == [[0.1, 0.9]]
 
     def test_raises_when_the_run_saved_no_score_vectors(self, tmp_path):
-        make_aggregate().write_parquet(tmp_path / "GenevaTPG-results-1.parquet")
+        make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
 
         with pytest.raises(FileNotFoundError, match="save_score_vectors"):
-            load_score_vectors(tmp_path, "GenevaTPG")
+            load_score_vectors(tmp_path, "TPG")
 
 
 class TestUserInvariance:
@@ -757,11 +756,17 @@ class TestDistanceBandRecall:
     def test_contributions_sum_to_the_headline(self):
         table = distance_band_recall_table(by_distance_frame()).filter(pl.col("name") == "MLP")
 
-        assert dict(zip(table["band"], table["contribution"], strict=True)) == pytest.approx(
-            {"0-1": 0.2, "1-5": 0.25, "5+": 0.05}
-        )
+        assert dict(zip(table["band"], table["contribution"], strict=True)) == pytest.approx({
+            "0-1": 0.2,
+            "1-5": 0.25,
+            "5+": 0.05,
+        })
         assert table["contribution"].sum() == pytest.approx(0.5)
-        assert dict(zip(table["band"], table["mean"], strict=True)) == pytest.approx({"0-1": 0.8, "1-5": 0.5, "5+": 0.2})
+        assert dict(zip(table["band"], table["mean"], strict=True)) == pytest.approx({
+            "0-1": 0.8,
+            "1-5": 0.5,
+            "5+": 0.2,
+        })
         assert table["share_of_pos"].to_list() == pytest.approx([0.25, 0.5, 0.25])
 
     def test_paired_comparison_keeps_only_the_users_with_a_positive_in_the_band(self):

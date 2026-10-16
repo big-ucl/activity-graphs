@@ -6,7 +6,6 @@ import polars as pl
 import torch
 
 from activitygraphs import experiments
-
 from activitygraphs.experiments import (
     ExperimentSetup,
     ModelSpec,

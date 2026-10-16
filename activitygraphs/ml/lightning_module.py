@@ -9,10 +9,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
+from activitygraphs.ml.batch import UserBatch
 from activitygraphs.ml.dataset import ActivityDataset, is_home_node_mask
 from activitygraphs.ml.losses import BCELoss, Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
@@ -21,7 +23,7 @@ HOME_PE_BINS = 8
 
 
 def extract_features(
-    batch: pyg.data.Batch,
+    batch: UserBatch,
     full_info: bool,
     is_home_idx: int,
     use_demographics: bool = True,
@@ -43,11 +45,9 @@ def extract_features(
     If ``use_demographics`` is True, the per-graph user-specific demographics (``batch.graph_x``) are broadcast over
     nodes and concatenated.
 
-    If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column;
-    this is used only by the distance-augmented MLP baseline so that the explicit distance-to-home signal does not leak
-    into the other models.
+    If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column.
     """
-    x = cast(torch.Tensor, batch.x)
+    x = batch.x
 
     if pop_logit is not None:
         pop_logit_col = create_pop_logit_column(pop_logit, batch, standardize=True)
@@ -89,7 +89,7 @@ def extracted_features_dim(
     return dim
 
 
-def create_pop_logit_column(pop_logit: torch.Tensor, batch: pyg.data.Batch, standardize: bool):
+def create_pop_logit_column(pop_logit: torch.Tensor, batch: UserBatch, standardize: bool):
     """Per-node popularity logit aligned to the nodes in `batch`, shape [num_nodes, 1].
 
     `standardize` z-scores it over the node vector (for the pop-logit-as-input-feature variant).
@@ -101,12 +101,12 @@ def create_pop_logit_column(pop_logit: torch.Tensor, batch: pyg.data.Batch, stan
     return pop_logit_col.unsqueeze(-1)
 
 
-def _compute_node_index_within_graph(batch: pyg.data.Batch, device: torch.device) -> torch.Tensor:
+def _compute_node_index_within_graph(batch: UserBatch, device: torch.device) -> torch.Tensor:
     """Index of each node within its own graph (0..N-1), aligned to batch.x row order."""
     return torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
 
 
-def compute_home_hops(batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
+def compute_home_hops(batch: UserBatch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
     """Hop distance from each node to the user's home node in the graph, shape ``[num_nodes]``."""
     device = batch.x.device
     node_idx = _compute_node_index_within_graph(batch, device)
@@ -119,11 +119,12 @@ def compute_home_hops(batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is
 
 
 def create_home_distance_encoding(
-    batch: pyg.data.Batch, home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = 8
+    batch: UserBatch, home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = 8
 ) -> torch.Tensor:
-    """Positional-encoding based on distance from user home (single anchor). RBF expansion of num. hops to home for
-    each node, shape ``[num_nodes, n_bins]``."""
+    """Positional encoding based on distance from user home (single anchor), shape ``[num_nodes, n_bins]``.
 
+    RBF expansion of the number of hops to home for each node.
+    """
     hops = compute_home_hops(batch, home_hop_distance, is_home_idx).clamp(max=40)
     centers = torch.linspace(0, 40, n_bins, device=batch.x.device)
 
@@ -132,8 +133,10 @@ def create_home_distance_encoding(
 
 @dataclass(frozen=True)
 class RankingTensors:
-    """Set of tensors read by the ranking metrics (R-Precision, Recall@K, etc). The tensors are restricted to the
-    non-excluded/scored candidates (i.e. home node is excluded)."""
+    """Set of tensors read by the ranking metrics (R-Precision, Recall@K, etc).
+
+    The tensors are restricted to the non-excluded/scored candidates (i.e. home node is excluded).
+    """
 
     logits: Tensor
     probs: Tensor
@@ -144,9 +147,11 @@ class RankingTensors:
 
 @dataclass(frozen=True)
 class EvaluationTensors:
-    """Set of tensors computed during the validation and testing steps. Metrics are computed using these tensors.
-    All nodes are included in the tensors, whereas the ``ranking`` field contains the set of tensors with the home node
-    excluded (used for the ranking metrics)."""
+    """Set of tensors computed during the validation and testing steps.
+
+    Metrics are computed using these tensors. All nodes are included in the tensors, whereas the ``ranking`` field
+    contains the set of tensors with the home node excluded (used for the ranking metrics).
+    """
 
     logits: Tensor
     loss: Tensor
@@ -190,6 +195,7 @@ class ActivityGraphModule(L.LightningModule):
     """
 
     home_hop_distance: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
+    pop_logit: torch.Tensor | None
 
     def __init__(
         self,
@@ -278,10 +284,12 @@ class ActivityGraphModule(L.LightningModule):
         """Compile the inner NN with ``torch.compile``."""
         if self._compiled or not self.compile_model:
             return
-        if self.trainer.fast_dev_run or self.trainer.overfit_batches:
+        if self.trainer.fast_dev_run or self.trainer.overfit_batches:  # pyrefly: ignore[missing-attribute]
             return
 
-        self.model = torch.compile(self.model, dynamic=True)  # dynamic=True since graph sizes (i.e. batch sizes) differ
+        self.model = cast(
+            torch.nn.Module, torch.compile(self.model, dynamic=True)
+        )  # dynamic=True since graph sizes (i.e. batch sizes) differ
         self._compiled = True
 
     def forward(
@@ -291,9 +299,15 @@ class ActivityGraphModule(L.LightningModule):
         edge_attr: torch.Tensor | None,
         batch: torch.Tensor | None,
     ) -> torch.Tensor:
+        """Return the wrapped model's logits for a batch's features."""
         return self.model(x, edge_index, edge_attr, batch)
 
-    def training_step(self, batch: pyg.data.Batch, batch_idx: int) -> torch.Tensor:
+    def on_after_batch_transfer(self, batch: pyg.data.Batch, dataloader_idx: int) -> UserBatch:
+        """Return the typed view of each batch, which every step and callback then receives."""
+        return UserBatch.from_pyg(batch)
+
+    def training_step(self, batch: UserBatch, batch_idx: int) -> torch.Tensor:
+        """Compute and log the training loss for one batch."""
         out = self.compute_logits(batch)
         loss = self.loss.loss_fn(out, batch)
 
@@ -319,7 +333,7 @@ class ActivityGraphModule(L.LightningModule):
 
         return loss
 
-    def _compute_ranking_tensors(self, batch: pyg.data.Batch, logits: Tensor) -> RankingTensors:
+    def _compute_ranking_tensors(self, batch: UserBatch, logits: Tensor) -> RankingTensors:
         scored_mask = ~is_home_node_mask(batch.x, self.is_home_idx)
         flat_logits = logits.squeeze(-1)
 
@@ -331,7 +345,7 @@ class ActivityGraphModule(L.LightningModule):
             scored=scored_mask,
         )
 
-    def _common_evaluation_step(self, batch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
+    def _common_evaluation_step(self, batch: UserBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
         out = self.compute_logits(batch)
 
         generator = torch.Generator(device=out.device).manual_seed(42)
@@ -362,15 +376,18 @@ class ActivityGraphModule(L.LightningModule):
         return eval_tensors
 
     def _num_scored_and_dropped_users(self, stage: Literal["val", "test"]) -> dict[str, float]:
-        """Returns a dictionary of the number of scored and dropped users for a given stage. Each key is
-        ``{stage}_{name}``, with name being either "n_scored_users" or "n_dropped_users"."""
+        """Returns a dictionary of the number of scored and dropped users for a given stage.
+
+        Each key is ``{stage}_{name}``, with name being either "n_scored_users" or "n_dropped_users".
+        """
         collection = self.val_metrics if stage == "val" else self.test_metrics
         avg_recall = cast(RetrievalAverageRecall, collection[f"{stage}_avg_recall"])
         user_counts = avg_recall.user_counts()
 
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
-    def validation_step(self, batch, batch_idx: int) -> None:
+    def validation_step(self, batch: UserBatch, batch_idx: int) -> None:
+        """Update the validation ranking, BCE and calibration metrics for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "val")
         ranking_tensors = eval_tensors.ranking
 
@@ -382,6 +399,7 @@ class ActivityGraphModule(L.LightningModule):
         self.val_calibration.update(eval_tensors.probs, eval_tensors.target.long())
 
     def on_validation_epoch_end(self) -> None:
+        """Log and reset the validation metrics."""
         self.log_dict(self.val_metrics.compute())
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
@@ -389,7 +407,8 @@ class ActivityGraphModule(L.LightningModule):
         self.log("val_calibration_l1", self.val_calibration.compute())
         self.val_calibration.reset()
 
-    def test_step(self, batch, batch_idx: int) -> None:
+    def test_step(self, batch: UserBatch, batch_idx: int) -> None:
+        """Update the test metrics and collect per-user rankings and score vectors for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "test")
         ranking = eval_tensors.ranking
 
@@ -413,6 +432,7 @@ class ActivityGraphModule(L.LightningModule):
         self.test_calibration.update(eval_tensors.probs, eval_tensors.target.long())
 
     def on_test_epoch_end(self) -> None:
+        """Log and reset the test metrics and keep the per-user columns and score vectors."""
         self.log_dict(self.test_metrics.compute())
         self.log_dict(self._num_scored_and_dropped_users("test"))
         self.test_metrics.reset()
@@ -426,12 +446,13 @@ class ActivityGraphModule(L.LightningModule):
         self.log("test_calibration_l1", self.test_calibration.compute())
         self.test_calibration.reset()
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> OptimizerLRScheduler:
+        """Return AdamW, with a plateau LR scheduler when scheduling is on and not overfitting."""
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
         # Only add a scheduler if not trying to overfit (i.e. not in diagnostic mode). Validation error is not a useful
         # signal when purposefully overfitting
-        if self.trainer.overfit_batches == 0 and self.schedule_lr:
+        if self.trainer.overfit_batches == 0 and self.schedule_lr:  # pyrefly: ignore[missing-attribute]
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode=self.loss.monitor_mode, factor=0.5, patience=5
             )
@@ -440,7 +461,7 @@ class ActivityGraphModule(L.LightningModule):
 
         return optimizer
 
-    def compute_logits(self, batch: pyg.data.Batch) -> torch.Tensor:
+    def compute_logits(self, batch: UserBatch) -> torch.Tensor:
         """Model logits for a batch, includes node-popularity feature column or offset if configured."""
         pop_logits = self.pop_logit if self.pop_mode == "feature" else None
         home_hop_distance = self.home_hop_distance if self.use_home_pe else None
@@ -457,6 +478,7 @@ class ActivityGraphModule(L.LightningModule):
         out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
 
         if self.pop_mode == "offset":
+            assert self.pop_logit is not None
             out = out + create_pop_logit_column(self.pop_logit, batch, standardize=False)
 
         return out

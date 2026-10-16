@@ -9,16 +9,16 @@ import polars as pl
 import pytest
 from shapely.geometry import Polygon
 
-from activitygraphs.base import USER_JOURNEY_SCHEMA, USER_SCHEMA, CRS, Mode, Purpose
+from activitygraphs.base import CRS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
 from activitygraphs.data.cmap import (
     AGE_MIDPOINTS,
-    CMAPData,
-    CMAPInputs,
     DEMOGRAPHIC_COLUMNS,
     EXCLUDED_CENSUS_TRACTS,
     INCOME_MIDPOINTS_KUSD,
     MODE_MAP,
     PURPOSE_MAP,
+    CMAPData,
+    CMAPTables,
     build_cmap_data,
     build_cmap_journeys,
     build_cmap_locations,
@@ -59,7 +59,7 @@ def boundaries_ct() -> gpd.GeoDataFrame:
 
 @pytest.fixture
 def locations_gdf(boundaries_ct) -> gpd.GeoDataFrame:
-    return build_cmap_locations(CMAPInputs(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), boundaries_ct))
+    return build_cmap_locations(CMAPTables(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), boundaries_ct))
 
 
 def make_journeys(rows: list[dict]) -> pl.DataFrame:
@@ -145,7 +145,7 @@ class TestBuildLocations:
 class TestBuildJourneys:
     def test_output_matches_the_journey_schema(self, boundaries_ct, locations_gdf):
         journeys = make_journeys([{"person_id": 1}, {"person_id": 2}])
-        inputs = CMAPInputs(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
+        inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
         built = build_cmap_journeys(inputs, locations_gdf)
 
@@ -157,7 +157,7 @@ class TestBuildJourneys:
     )
     def test_unusable_destinations_become_the_na_sink(self, destination, boundaries_ct, locations_gdf):
         journeys = make_journeys([{"d_tract_2020": IN_REGION_TRACTS[1]}, {"d_tract_2020": destination}])
-        inputs = CMAPInputs(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
+        inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
         built = build_cmap_journeys(inputs, locations_gdf)
 
@@ -167,7 +167,7 @@ class TestBuildJourneys:
         # Trips to the NA sink produce no in-graph visit but must not be dropped, or trip and day
         # counts (and so the exposure t_i) would be wrong.
         journeys = make_journeys([{"d_tract_2020": OUT_OF_REGION_TRACT}])
-        inputs = CMAPInputs(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
+        inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
         assert build_cmap_journeys(inputs, locations_gdf).height == 1
 
@@ -176,7 +176,7 @@ class TestBuildJourneys:
             {"linked_trip_mode": sentinel, "d_purpose_category": sentinel, "o_purpose_category": sentinel}
             for sentinel in SENTINELS
         ])
-        inputs = CMAPInputs(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
+        inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
         built = build_cmap_journeys(inputs, locations_gdf)
 
@@ -187,7 +187,7 @@ class TestBuildJourneys:
     def test_departure_purposes_are_mapped_not_stubbed(self, boundaries_ct, locations_gdf):
         # Unlike THATS, CMAP has real origin purposes, so home shows up in location_visits.
         journeys = make_journeys([{"o_purpose_category": 1, "d_purpose_category": 7}])
-        inputs = CMAPInputs(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
+        inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
         built = build_cmap_journeys(inputs, locations_gdf)
 
@@ -198,7 +198,7 @@ class TestBuildJourneys:
 class TestBuildUsers:
     def _build(self, boundaries_ct, locations_gdf, persons, households, journeys=None):
         journeys = make_journeys([{"person_id": row} for row in persons["person_id"]]) if journeys is None else journeys
-        inputs = CMAPInputs(journeys, persons, households, boundaries_ct)
+        inputs = CMAPTables(journeys, persons, households, boundaries_ct)
 
         return build_cmap_users(inputs, locations_gdf, build_cmap_journeys(inputs, locations_gdf))
 
@@ -320,7 +320,7 @@ def cmap_data(boundaries_ct) -> CMAPData:
     ])
     journeys = make_journeys([{"person_id": p, "linked_trip_id": p} for p in (1, 2, 3, 4)])
 
-    return build_cmap_data(CMAPInputs(journeys, persons, households, boundaries_ct)).with_filter("subsector")
+    return build_cmap_data(CMAPTables(journeys, persons, households, boundaries_ct)).with_filter("subsector")
 
 
 class TestCMAPDataViews:
@@ -368,16 +368,8 @@ class TestCMAPDataViews:
 @pytest.mark.integration
 class TestCMAPDataRoundTrip:
     @pytest.fixture
-    def loaded(self):
-        from activitygraphs.config import load_config
-        from activitygraphs.utils import get_project_root
-
-        root = get_project_root()
-        try:
-            cfg = load_config(root, verbose=False, data="cmap")
-            return CMAPData.load(cfg.data, root)
-        except Exception as exc:  # config or processed data not present in this environment
-            pytest.skip(f"cmap dataset/config unavailable: {exc}")
+    def loaded(self, load_or_skip):
+        return load_or_skip("cmap", lambda cfg, root: CMAPData.load(cfg.data, root))
 
     def test_persists_hh_id_through_the_cache(self, loaded):
         # save() must write the private _users_df; a public view without hh_id would break the

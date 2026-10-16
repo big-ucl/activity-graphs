@@ -8,50 +8,41 @@ dependencies = [
     "altair[all]>=5.5.0",
     "city2graph>=0.3.0",
     "contextily>=1.6.2",
-    "dash>=3.0.4",
-    "duckdb>=1.3.1",
     "fastexcel>=0.14.0",
     "folium>=0.12",
     "geopandas>=1.1.0",
     "hydra-core>=1.3.2",
-    "joblib>=1.5.3",
     "mapclassify>=2.10.0",
-    "marimo[lsp]>=0.13.11",
     "matplotlib>=3.10.3",
-    "mypy>=1.15.0",
-    "nbconvert>=7.17.0",
-    "nbformat>=5.10.4",
-    "networkx>=3.4.2",
-    "nvitop>=1.6.2",
     "omegaconf>=2.3.0",
     "pandas>=3.0.1",
-    "pandas-stubs~=3.0.0",
-    "pdoc>=15",
-    "playwright>=1.58.0",
-    "plotly>=6.1.2",
     "polars[pyarrow]>=1.30.0",
-    "pydantic>=2.13.3",
     "pypolyline>=0.5.6",
     "pyproj>=3.7.1",
-    "pyrefly>=0.62.0",
-    "pytest>=9.0.1",
-    "python-lsp-server>=1.14.0",
-    "pyzmq>=27.1.0",
     "rapidfuzz>=3.14.3",
-    "rich>=14.2.0",
-    "ruff>=0.11.11",
     "scikit-learn>=1.7.1",
     "scipy>=1.15.3",
-    "seaborn>=0.13.2",
-    "sqlglot>=26.29.0",
     "lightning>=2.0",
     "torch>=2.10.0",
     "torch-geometric>=2.7.0",
     "tqdm>=4.67.1",
     "torchmetrics>=1.9.0",
-    "scipy-stubs~=1.17.1",
     "wandb>=0.27.0",
     "numpy>=2.4.6",
+]
+
+[dependency-groups]
+dev = [
+    "nvitop>=1.6.2",
+    "pandas-stubs~=3.0.0",
+    "pdoc>=15",
+    "pyrefly>=0.62.0",
+    "pytest>=9.0.1",
+    "ruff>=0.11.11",
+    "scipy-stubs~=1.17.1",
+]
+notebooks = [
+    "marimo>=0.13.11",
 ]
 
 [project.scripts]
@@ -63,6 +54,7 @@ include = ["activitygraphs*"]
 
 [tool.uv]
 package = true
+default-groups = ["dev", "notebooks"]
 no-build-isolation-package = [
   "torch-cluster",
   "torch-scatter",
@@ -112,13 +104,10 @@ lsp = true
 output_max_bytes = 30_000_000
 
 [tool.marimo.language_servers.pylsp]
-enabled = true               # Enable/disable the Python language server
-enable_mypy = true           # Type checking with mypy (enabled by default, if installed)
-enable_ruff = true           # Linting with ruff (enabled by default, if installed)
-enable_flake8 = false        # Linting with flake8
-enable_pydocstyle = false    # Check docstring style
-enable_pylint = false        # Linting with pylint
-enable_pyflakes = false      # Syntax checking with pyflakes
+enabled = false
+
+[tool.marimo.language_servers.pyrefly]
+enabled = true
 
 # Diagnostics configuration
 [tool.marimo.diagnostics]
@@ -127,9 +116,23 @@ enabled = true               # Show diagnostics in the editor
 [tool.ruff]
 line-length = 120
 
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "D"]
+ignore = ["D107"]
+
+[tool.ruff.lint.per-file-ignores]
+"test/*" = ["D1"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.ruff.format]
 # Enable preview style formatting.
 preview = true
+
+[tool.pyrefly]
+project-includes = ["activitygraphs"]
+python-version = "3.12"
 
 [tool.pytest.ini_options]
 markers = [

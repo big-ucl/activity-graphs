@@ -5,14 +5,14 @@ from pathlib import Path
 import geopandas as gpd
 import polars as pl
 
-from activitygraphs.config import GenevaStatsInputs, THATSStatsInputs, CMAPStatsInputs
+from activitygraphs.config import CMAPStatsPaths, THATSStatsPaths, TPGStatsPaths
 from activitygraphs.utils import gdf_to_polars
 
 
-def add_geneva_population_job_statistics(
-    locations: gpd.GeoDataFrame, cfg: GenevaStatsInputs, normalise: bool = True, project_root: Path | None = None
+def add_tpg_population_job_statistics(
+    locations: gpd.GeoDataFrame, cfg: TPGStatsPaths, normalise: bool = True, project_root: Path | None = None
 ) -> gpd.GeoDataFrame:
-    """Add population and job counts to Geneva subsector locations
+    """Add population and job counts to Geneva subsector locations.
 
     Args:
         locations: Subsector locations (must have a ``loc_id`` column).
@@ -20,7 +20,7 @@ def add_geneva_population_job_statistics(
         normalise: If True, divide counts by polygon area to obtain densities.
         project_root: Repo root; defaults to ``Path(".")``.
     """
-    project_root: Path = project_root if project_root is not None else Path(".")
+    project_root = project_root if project_root is not None else Path(".")
 
     utm_crs = locations.estimate_utm_crs()
     original_locations = locations
@@ -44,7 +44,7 @@ def add_geneva_population_job_statistics(
 
 
 def add_thats_population_job_statistics(
-    locations: gpd.GeoDataFrame, cfg: THATSStatsInputs, normalise: bool = True, project_root: Path | None = None
+    locations: gpd.GeoDataFrame, cfg: THATSStatsPaths, normalise: bool = True, project_root: Path | None = None
 ) -> gpd.GeoDataFrame:
     """Add census population and job counts to Toronto (CT/subsector) locations.
 
@@ -54,7 +54,7 @@ def add_thats_population_job_statistics(
         normalise: If True, divide counts by area to obtain densities.
         project_root: Repo root; defaults to ``Path(".")``.
     """
-    project_root: Path = project_root if project_root is not None else Path(".")
+    project_root = project_root if project_root is not None else Path(".")
 
     locations_df = gdf_to_polars(locations).lazy()
 
@@ -62,7 +62,7 @@ def add_thats_population_job_statistics(
     census_stats = pl.scan_csv(
         project_root / cfg.directory / cfg.population,
         encoding="utf8-lossy",
-        schema_overrides={"ALT_GEO_CODE": str},
+        schema_overrides={"ALT_GEO_CODE": pl.String},
     )
 
     pop_stats = census_stats.filter(CHARACTERISTIC_ID=1).select("ALT_GEO_CODE", population="C1_COUNT_TOTAL")
@@ -80,7 +80,7 @@ def add_thats_population_job_statistics(
 
     job_stats = pl.scan_csv(
         project_root / cfg.directory / cfg.jobs,
-        schema_overrides={"ALT_GEO_CODE": str},
+        schema_overrides={"ALT_GEO_CODE": pl.String},
     ).join(dguids_to_loc_ids, on="DGUID")
 
     job_stats = (
@@ -122,7 +122,7 @@ def normalise_statistics(stats_by_sector: gpd.GeoDataFrame, normalise: bool = Tr
 
 
 def add_cmap_population_job_statistics(
-    locations_gdf: gpd.GeoDataFrame, cfg: CMAPStatsInputs, normalise: bool = True, project_root: Path | None = None
+    locations_gdf: gpd.GeoDataFrame, cfg: CMAPStatsPaths, normalise: bool = True, project_root: Path | None = None
 ) -> gpd.GeoDataFrame:
     """Add census population and job counts to Chicago CMAP MyDailyTravel locations (census tracts).
 

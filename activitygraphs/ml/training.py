@@ -129,6 +129,14 @@ def evaluate_baseline(
     ``run_experiment`` output.
 
     Args:
+        baseline: Fitted baseline module to evaluate.
+        datamodule: ``ActivityDataModule`` instance (``setup()`` is called internally if needed).
+        loss: ``Loss`` instance, for the BCE and the monitored metric.
+        name: Baseline name used for logging and in the returned frame.
+        max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
+        recall_ks: Rank cutoffs of the logged ``recall@k``.
+        wandb_params: parameters to configure WandB logging; None disables it.
+        store_score_vectors: retain each test user's full per-node score vector.
         full_info: Append each node's distance from home as the last feature column, for the distance baselines.
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
@@ -146,7 +154,7 @@ def evaluate_baseline(
     )
 
     if wandb_params and wandb_params.use_wandb:
-        logger: WandbLogger = WandbLogger(
+        logger = WandbLogger(
             project=wandb_params.project,
             entity=wandb_params.entity,
             name=name if run_tag is None else f"{name}-{run_tag}",
@@ -231,6 +239,7 @@ def train_and_evaluate_model(
         lr: Initial learning rate.
         reg: Optional regularisation; ``"l1"`` adds L1 weight penalty.
         full_info: Passed to ``extract_features`` to optionally include home/distance features.
+        use_demographics: concatenate the per-user demographics onto the node features.
         model_save_dir: Directory for checkpoint and CSV log files; None disables both.
         fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
@@ -239,6 +248,8 @@ def train_and_evaluate_model(
         pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
             features to the model.
         use_home_pe: if true, add home-anchored positional encodings to features
+        store_score_vectors: retain each test user's full per-node score vector.
+        log_train_ranking: log ``train_avg_recall@K`` on the training batches.
         compile_model: use PyTorch Dynamo compilation on the model
         wandb_params: parameters to configure WandB logging.
         extra_hyperparams: run-specific values to log alongside the standard ones, (architecture

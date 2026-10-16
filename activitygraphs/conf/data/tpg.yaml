@@ -1,5 +1,5 @@
 # @package data
-name: GenevaTPG
+name: TPG
 
 inputs:
   raw_journeys: tpg_od.parquet

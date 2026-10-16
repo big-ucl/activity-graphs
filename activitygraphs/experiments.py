@@ -74,7 +74,7 @@ def comparison_experiment(cfg: Config):
         ModelSpec("MLP", mlp, lr_for("MLP"), {}),
         ModelSpec("MLP-dist", partial(mlp, full_info=True), lr_for("MLP"), {"full_info": True}),
         ModelSpec(
-            "MLP-hpe",
+            "MLP-hpe-dist",
             partial(mlp, full_info=True, use_home_pe=True),
             lr_for("MLP"),
             {"full_info": True, "use_home_pe": True},
@@ -88,9 +88,9 @@ def comparison_experiment(cfg: Config):
             lr_for("GATSkip"),
             {"full_info": True, "use_home_pe": True},
         ),
-        ModelSpec(gps_name, partial(gps, use_home_pe=True), lr_for("GTransformer"), {"use_home_pe": True}),
+        ModelSpec(gps_name + "-hpe", partial(gps, use_home_pe=True), lr_for("GTransformer"), {"use_home_pe": True}),
         ModelSpec(
-            gps_name + "-dist",
+            gps_name + "-hpe-dist",
             partial(gps, full_info=True, use_home_pe=True),
             lr_for("GTransformer"),
             {"full_info": True, "use_home_pe": True},
@@ -269,8 +269,10 @@ class ExperimentSetup:
 
 
 def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetup:
-    """Setup an experiment. Configure logging, build the datamodule, loss, baselines,
-    and a preconfigured ``train_and_evaluate_model`` partial function that will run for each model.
+    """Set up an experiment.
+
+    Configure logging, build the datamodule, loss, baselines, and a preconfigured ``train_and_evaluate_model`` partial
+    function that will run for each model.
 
     Hyperparameters not exposed by the config are fixed here: hidden_channels=128, dropout=0.2 and
     the per-model learning rates (all overridden when ``cfg.train.overfit_batches > 0``, unless
@@ -327,7 +329,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
 
     verbose = 1
 
-    num_nodes = train_dataset[0].num_nodes
+    num_nodes = train_dataset.num_nodes
     baseline_results = (
         measure_baselines(
             num_nodes,
@@ -350,8 +352,11 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     lr_by_model = {"MLP": 1e-3, "GATSkip": 1e-3, "GTransformer": 1e-4, "MLP-dist": 1e-3, "FullMLP": 1e-3}
 
     def lr_for(key: str) -> float:
-        """Learning rate for a model. Overfit mode forces one rate unless ``train.overfit_lr`` is null,
-        in which case every architecture keeps the rate it is normally trained at."""
+        """Learning rate for a model.
+
+        Overfit mode forces one rate unless ``train.overfit_lr`` is null, in which case every architecture keeps the
+        rate it is normally trained at.
+        """
         return lr if overfitting and lr is not None else lr_by_model[key]
 
     my_run_experiment = partial(
@@ -480,7 +485,8 @@ class ModelSpec:
     """Specification for a PyTorch model.
 
     Model with ``model_name`` is initialised using the ``build_model_f`` callable. Learning rate ``lr`` and other parameters
-    ``train_and_eval_kwargs`` kwargs are passed to ``training.train_and_evaluate_model``"""
+    ``train_and_eval_kwargs`` kwargs are passed to ``training.train_and_evaluate_model``
+    """
 
     model_name: str
     build_model_f: Callable[[], torch.nn.Module]
@@ -523,7 +529,7 @@ def build_gat(
     use_home_pe: bool = False,
 ) -> GATSkip:
     """Instantiate a ``GATSkip`` model sized for ``dataset`` (1 pre-layer, 3 post-layers)."""
-    edge_dim = dataset[0].edge_attr.size(-1)
+    edge_dim = dataset.network_edge_attr.size(-1)
 
     return GATSkip(
         num_pre_layers=1,
@@ -555,7 +561,7 @@ def build_gps(
     use_home_pe: bool = False,
 ):
     """Instantiate a ``GraphTransformer`` (GPS) model sized for ``dataset``."""
-    edge_dim = dataset[0].edge_attr.size(-1)
+    edge_dim = dataset.network_edge_attr.size(-1)
 
     return GraphTransformer(
         in_channels=extracted_features_dim(

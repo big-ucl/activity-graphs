@@ -21,16 +21,20 @@ def inverse_sigmoid(prob):
 class UniformBaseline(torch.nn.Module):
     """P(y_i = 1) = 0.5 for all nodes."""
 
-    def forward(self, x, edge_index, edge_attr=None, batch=None):
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
+    ) -> torch.Tensor:
+        """Return a zero logit for every node, shape ``(num_nodes, 1)``."""
         return torch.zeros(x.shape[0], 1, device=x.device)
 
 
 class GlobalBaseline(torch.nn.Module):
     """P(y_i = 1) = global visit rate across all training graphs."""
 
+    logit: torch.Tensor
+
     def __init__(self):
         super().__init__()
-        self.logit = None
 
     def fit(self, loader: pyg.loader.DataLoader):
         """Compute the global positive rate over ``loader`` and store as a logit."""
@@ -46,18 +50,22 @@ class GlobalBaseline(torch.nn.Module):
 
         return self
 
-    def forward(self, x, edge_index, edge_attr=None, batch=None):
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the global visit-rate logit for every node, shape ``(num_nodes, 1)``."""
         return self.logit.expand(x.shape[0], 1).to(x.device)
 
 
 class VisitFrequencyBaseline(torch.nn.Module):
     """P(y_i = 1) = per-node visit frequency across the training users who do not live at the node."""
 
+    logits: torch.Tensor
+
     def __init__(self, num_nodes: int, is_home_idx: int):
         super().__init__()
         self.num_nodes = num_nodes
         self.is_home_idx = is_home_idx
-        self.logits = None
 
     def fit(self, loader: pyg.loader.DataLoader):
         """Compute the home-excluded per-node visit rates over ``loader`` and store them as logits."""
@@ -66,13 +74,17 @@ class VisitFrequencyBaseline(torch.nn.Module):
 
         return self
 
-    def forward(self, x, edge_index, edge_attr=None, batch=None):
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
         return self.logits.to(x.device)[graph_node_indices(x, batch)].unsqueeze(1)
 
 
 class ConditionalVisitFrequencyBaseline(torch.nn.Module):
-    """P(y_i = 1 | home = h) = per-home visit frequency, smoothed to VisitFrequency is node is never visited by users
-    with home = h.
+    """P(y_i = 1 | home = h) = per-home visit frequency, smoothed towards VisitFrequency.
+
+    The smoothing covers nodes never visited by users with home = h.
 
     ``p(n | h) = (c_hn + a * p_n) / (u_h + a)``, with ``c_hn`` the training visits to ``n`` by residents of ``h``,
     ``u_h`` the training residents of ``h``, ``p_n`` the home-excluded visit rate, and ``a`` fit on validation.
@@ -82,12 +94,13 @@ class ConditionalVisitFrequencyBaseline(torch.nn.Module):
         logits: ``[num_nodes, num_nodes]`` smoothed logits indexed by (home, node).
     """
 
+    strength: float
+    logits: torch.Tensor
+
     def __init__(self, num_nodes: int, is_home_idx: int):
         super().__init__()
         self.num_nodes = num_nodes
         self.is_home_idx = is_home_idx
-        self.strength = None
-        self.logits = None
 
     def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
         """Count visits per home on ``train_loader`` and pick the smoothing strength on ``val_loader``."""
@@ -102,6 +115,9 @@ class ConditionalVisitFrequencyBaseline(torch.nn.Module):
 
         return self
 
-    def forward(self, x, edge_index, edge_attr=None, batch=None):
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the user's home-conditioned visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
         homes = graph_home_indices(x, batch, self.is_home_idx)
         return self.logits.to(x.device)[homes, graph_node_indices(x, batch)].unsqueeze(1)

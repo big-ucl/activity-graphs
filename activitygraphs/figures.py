@@ -9,6 +9,7 @@ they are shown under, and their colours - saturated for the learned models, mute
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 import altair as alt
 import contextily as cx
@@ -16,6 +17,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from matplotlib.artist import Artist
 from matplotlib.axes import Axes
 from matplotlib.colors import Colormap, LinearSegmentedColormap, Normalize
 from matplotlib.figure import Figure
@@ -155,7 +157,7 @@ def edges_within(edges: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame) -> gpd.GeoDat
     """The adjacency edges with both endpoints among ``nodes``, for drawing a subset of the region.
 
     The endpoints are read off the two index levels by position: ``contiguity_graph`` leaves them
-    unnamed, and only the Geneva builder names them while joining its islands.
+    unnamed, and only the TPG builder names them while joining its islands.
 
     Args:
         edges: Edges from ``load_*_network_graph``, indexed by (source ``loc_id``, target ``loc_id``).
@@ -266,7 +268,7 @@ def top_k_nodes(scores: np.ndarray, k: int) -> np.ndarray:
 # Zone maps (matplotlib)
 # =========================================
 
-BASEMAP = cx.providers.Esri.WorldGrayCanvas
+BASEMAP = cx.providers.Esri.WorldGrayCanvas  # pyrefly: ignore[missing-attribute]
 """Carto's CDN serves an "API KEY REQUIRED" watermark over its Positron tiles; Esri's grey canvas is
 the equivalent unkeyed light basemap."""
 
@@ -345,9 +347,7 @@ def rank_colour_bar(
     )
     bar.set_ticks([prominence_of_rank(rank, n_nodes) for rank in ticks])
     bar.set_ticklabels([str(rank) for rank in ticks])
-    bar.set_label(
-        label or f"rank of zone in the model's ranking (white: outside the top {floor})", fontsize=10
-    )
+    bar.set_label(label or f"rank of zone in the model's ranking (white: outside the top {floor})", fontsize=10)
     bar.ax.tick_params(labelsize=9)
 
     return bar
@@ -451,15 +451,13 @@ def zone_map(
         ax.scatter(points.x, points.y, s=14, color=NODE_COLOUR, edgecolor="white", linewidth=0.4, zorder=5)
 
     if highlight is not None:
-        nodes.iloc[list(highlight)].boundary.plot(
-            ax=ax, color=highlight_colour, linewidth=highlight_width, zorder=6
-        )
+        nodes.iloc[list(highlight)].boundary.plot(ax=ax, color=highlight_colour, linewidth=highlight_width, zorder=6)
 
     if markers:
         centroids = _centroids(nodes)
 
         for (label, indices), colour in zip(markers.items(), MARKER_COLOURS, strict=False):
-            points = centroids.iloc[list(indices)]
+            points = centroids.take(list(indices))
             scatter = ax.scatter(
                 points.x, points.y, s=120, color=colour, edgecolor="white", linewidth=1.2, zorder=7, label=label
             )
@@ -473,9 +471,7 @@ def zone_map(
         pad_x, pad_y = (max_x - min_x) * focus_margin, (max_y - min_y) * focus_margin
         min_x, max_x, min_y, max_y = min_x - pad_x, max_x + pad_x, min_y - pad_y, max_y + pad_y
         anchor = None if aspect_anchor is None else float(_centroids(nodes.iloc[[aspect_anchor]]).y.iloc[0])
-        min_y, max_y = _flatten(
-            (min_y, max_y), _ground_aspect(nodes.iloc[list(focus)]), max_aspect, anchor
-        )
+        min_y, max_y = _flatten((min_y, max_y), _ground_aspect(nodes.iloc[list(focus)]), max_aspect, anchor)
         ax.set_xlim(min_x, max_x)
         ax.set_ylim(min_y, max_y)
 
@@ -619,7 +615,7 @@ def add_transit_line(
     """
     xlim, ylim = ax.get_xlim(), ax.get_ylim()
 
-    points = _centroids(nodes).iloc[list(through)]
+    points = _centroids(nodes).take(list(through))
     coords = np.column_stack([points.x.to_numpy(), points.y.to_numpy()])
 
     direction = coords[-1] - coords[0]
@@ -639,8 +635,9 @@ def add_transit_line(
     ax.set_ylim(ylim)
 
     if label is not None:
-        handles = ax.get_legend().legend_handles if ax.get_legend() else []
-        labels = [text.get_text() for text in ax.get_legend().get_texts()] if ax.get_legend() else []
+        legend = ax.get_legend()
+        handles = cast(list[Artist], list(legend.legend_handles)) if legend else []
+        labels = [text.get_text() for text in legend.get_texts()] if legend else []
         handles.append(plt.Line2D([0], [0], color=colour, linewidth=linewidth))
         labels.append(label)
         ax.legend(handles, labels, **MAP_LEGEND)
@@ -767,12 +764,12 @@ def recall_chart(
         .mark_line(point=points, strokeWidth=2)
         .encode(x=axis, y=alt.Y("mean:Q", title="recall@k"), color=colour, strokeDash=model_dash(specs))
     )
-    properties = {"width": size[0], "height": size[1]}
+    properties: dict[str, Any] = {"width": size[0], "height": size[1]}
 
     if title is not None:
         properties["title"] = title
 
-    return _stylable(style)(alt.layer(band, line).properties(**properties))
+    return cast(alt.LayerChart, _stylable(style)(alt.layer(band, line).properties(**properties)))
 
 
 def roc_chart(
@@ -789,6 +786,7 @@ def roc_chart(
         n_nodes: Nodes in the region, which turns each ``k`` into a share.
         specs: Models to draw, in legend order.
         size: Chart ``(width, height)``.
+        style: Apply ``chart_style``; False for a panel that will be concatenated and styled after.
 
     Returns:
         The layered chart, with the random-ranking diagonal underneath.
@@ -812,7 +810,7 @@ def roc_chart(
         )
     )
 
-    return _stylable(style)(alt.layer(diagonal, line).properties(width=size[0], height=size[1]))
+    return cast(alt.LayerChart, _stylable(style)(alt.layer(diagonal, line).properties(width=size[0], height=size[1])))
 
 
 BAND_COUNT_COLOUR = "#8c959f"
@@ -893,12 +891,12 @@ def band_recall_chart(
         .mark_text(dy=BAND_COUNT_OFFSET, color=BAND_COUNT_COLOUR, fontSize=9, baseline="top")
         .encode(x=axis, y=alt.value(size[1]), text="band_positives:N")
     )
-    properties = {"width": size[0], "height": size[1]}
+    properties: dict[str, Any] = {"width": size[0], "height": size[1]}
 
     if title is not None:
         properties["title"] = title
 
-    return _stylable(style)(alt.layer(line, positives).properties(**properties))
+    return cast(alt.LayerChart, _stylable(style)(alt.layer(line, positives).properties(**properties)))
 
 
 # =========================================

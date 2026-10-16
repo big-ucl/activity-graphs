@@ -28,8 +28,9 @@ TDataFrame = TypeVar("TDataFrame", pl.DataFrame, gpd.GeoDataFrame)
 
 
 class NetworkData(ABC):
-    """Wrapper around survey DataFrames that provides a cached, filterable network view. Each datset (Geneva, Toronto, etc...)
-    inherits from this class
+    """Wrapper around survey DataFrames that provides a cached, filterable network view.
+
+    Each dataset (TPG, THATS, CMAP) inherits from this class.
 
     Locations are filtered by ``filters``. It will only show locations that match the `loc_type` provided in the filter.
     Only journeys with both endpoints in filtered locations and users with home locations inside filtered locations will not be shown.
@@ -44,7 +45,8 @@ class NetworkData(ABC):
     def __init__(
         self, user_journeys_df: pl.DataFrame, locations_gdf: gpd.GeoDataFrame, filters: list[str] | None = None
     ):
-        """
+        """Initialise from the journey and location tables.
+
         Args:
             user_journeys_df: Journey legs conforming to ``USER_JOURNEY_SCHEMA``.
             locations_gdf: Locations conforming to ``LOCATIONS_SCHEMA``, sorted by ``loc_id``.
@@ -62,6 +64,7 @@ class NetworkData(ABC):
 
     @cached_property
     def user_journeys_df(self) -> pl.DataFrame:
+        """Journeys, filtered by active location filters on departure and arrival."""
         dep_filtered = self._filter_loc_types(self._user_journeys_df, loc_id_col="dep_loc_id", filter_users=True)
         arr_filtered = self._filter_loc_types(dep_filtered, loc_id_col="arr_loc_id")
 
@@ -69,14 +72,17 @@ class NetworkData(ABC):
 
     @cached_property
     def locations_gdf(self) -> gpd.GeoDataFrame:
+        """Locations, filtered by active location filters."""
         return self._filter_loc_types(self._locations_gdf)
 
     @cached_property
     def locations_df(self) -> pl.DataFrame:
+        """``locations_gdf`` as a polars DataFrame."""
         return utils.gdf_to_polars(self.locations_gdf)
 
     @cached_property
     def aggregated_journeys(self) -> pl.DataFrame:
+        """Aggregated journeys, filtered by active location filters on departure and arrival."""
         filtered_trips = self._filter_loc_types(self._aggregated_journeys, loc_id_col="dep_loc_id", filter_users=True)
         filtered_trips = self._filter_loc_types(filtered_trips, loc_id_col="arr_loc_id")
 
@@ -84,22 +90,27 @@ class NetworkData(ABC):
 
     @cached_property
     def location_visits(self) -> pl.DataFrame:
+        """Location visits, filtered by active location filters."""
         return self._filter_loc_types(self._location_visits, filter_users=True)
 
     @cached_property
     def home_locations(self) -> pl.DataFrame:
+        """Home locations, filtered by active location filters."""
         return self._filter_loc_types(self._home_locations, filter_users=True)
 
     @cached_property
     def work_locations(self) -> pl.DataFrame:
+        """Each user's main work locations."""
         return self.location_visits.filter(purpose=Purpose.WORK_MAIN).select("user_id", "loc_id").unique()
 
     @cached_property
     def edu_locations(self) -> pl.DataFrame:
+        """Each user's study locations."""
         return self.location_visits.filter(purpose=Purpose.STUDY).select("user_id", "loc_id").unique()
 
     @cached_property
     def users_df(self) -> pl.DataFrame:
+        """One row per user with home location, using ``user_id`` as the household id."""
         return (
             self
             ._filter_loc_types(self.home_locations)
@@ -109,10 +120,12 @@ class NetworkData(ABC):
 
     @property
     def demographic_columns(self) -> list[str]:
+        """Names of the demographic columns in ``users_df``; none by default."""
         return []
 
     @cached_property
     def user_ids(self) -> pl.Series:
+        """Sorted user ids, filtered by active home location filters."""
         if self._type_filters is None:
             return self._home_locations["user_id"].unique().sort()
 
@@ -152,7 +165,7 @@ class NetworkData(ABC):
             raise ValueError(f"Cannot find column `user_id` in columns {df.columns}")
         elif filter_users and isinstance(df, pl.DataFrame):
             df = df.join(self.user_ids.to_frame(), on="user_id")
-        elif filter_users:
+        elif filter_users and isinstance(df, gpd.GeoDataFrame):
             df = df.merge(self.user_ids.to_frame().to_pandas(), on="user_id")
 
         if isinstance(df, pl.DataFrame):
@@ -161,7 +174,7 @@ class NetworkData(ABC):
         return df.merge(valid_loc_ids.to_pandas(), on=loc_id_col)
 
     @abstractmethod
-    def _copy(self, filters: list[str] | None = None): ...
+    def _copy(self, filters: list[str] | None = None) -> Self: ...
 
     @staticmethod
     def _compute_agg_journeys(user_journeys_df: pl.DataFrame) -> pl.DataFrame:
@@ -193,8 +206,7 @@ class NetworkData(ABC):
 
     @staticmethod
     def _compute_home_locations(location_visits: pl.DataFrame) -> pl.DataFrame:
-        """Computes home location from visits. Drops users with num_home_locations != 1"""
-
+        """Computes home location from visits. Drops users with num_home_locations != 1."""
         locations_by_purpose = (
             location_visits.group_by("user_id", "purpose").agg(pl.col("loc_id").unique()).sort("user_id")
         )

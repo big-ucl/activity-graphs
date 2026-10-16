@@ -13,7 +13,7 @@ DEFAULT_TRANSFER_TIME_MIN = 2
 
 
 @dataclass(frozen=True)
-class GTFSInputs:
+class GTFSTables:
     """Parsed GTFS tables for a single feed (stops, stop times, trips, routes, agency, calendar, transfers)."""
 
     stops_df: pl.DataFrame
@@ -63,7 +63,7 @@ SAMPLE_DAY_END = pl.time(21, 0, 0)
 
 def build_pt_layer_edges(
     locations_df: pl.DataFrame,
-    gtfs: GTFSInputs,
+    gtfs: GTFSTables,
     pt_node_type: PTNodeType,
     drop_null_headways: bool = False,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -111,7 +111,7 @@ def build_pt_layer_edges(
     return check_schema(pt_edge_df, PT_EDGE_LIST_SCHEMA), check_schema(transfer_edge_df, TRANSFER_EDGE_LIST_SCHEMA)
 
 
-def filter_active_stop_times(locations_df: pl.DataFrame, gtfs: GTFSInputs) -> pl.LazyFrame:
+def filter_active_stop_times(locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl.LazyFrame:
     """Filter GTFS stop times to trips that visit at least two active locations."""
     # Filter out all stops not in the list of active locations
     # Only keep trips that connect at least 2 active locations
@@ -151,7 +151,7 @@ def create_pt_trip_df(active_stop_times: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def compute_avg_headways(pt_trips: pl.LazyFrame, gtfs: GTFSInputs, edge_id: list[str]) -> pl.LazyFrame:
+def compute_avg_headways(pt_trips: pl.LazyFrame, gtfs: GTFSTables, edge_id: list[str]) -> pl.LazyFrame:
     """Compute daily trip count and average headway for each edge on the sample weekday (Wednesday 2022-05-18)."""
     exceptions = gtfs.calendar_dates_df.filter(date=SAMPLE_DATE)
     services_added = exceptions.filter(exception_type=1).select("service_id")
@@ -182,7 +182,7 @@ def compute_avg_headways(pt_trips: pl.LazyFrame, gtfs: GTFSInputs, edge_id: list
     )
 
 
-def add_route_attributes_to_edges(edge_df: pl.DataFrame, gtfs: GTFSInputs, pt_node_type: PTNodeType) -> pl.DataFrame:
+def add_route_attributes_to_edges(edge_df: pl.DataFrame, gtfs: GTFSTables, pt_node_type: PTNodeType) -> pl.DataFrame:
     """Add route mode and name onto the PT edge DataFrame."""
     if pt_node_type == PTNodeType.ONE_PER_STOP:
         return edge_df.with_columns(
@@ -209,7 +209,7 @@ def add_route_attributes_to_edges(edge_df: pl.DataFrame, gtfs: GTFSInputs, pt_no
     return edge_df.join(active_routes_df, on="route_id")
 
 
-def create_transfer_edges(pt_edge_df: pl.DataFrame, locations_df: pl.DataFrame, gtfs: GTFSInputs) -> pl.DataFrame:
+def create_transfer_edges(pt_edge_df: pl.DataFrame, locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl.DataFrame:
     """Build transfer edges within PT stops (route-to-route) and between PT stops (transfer-node to transfer-node) from GTFS transfer times."""
     transfer_route_id = PARENT_STOP_ROUTE_ID
 

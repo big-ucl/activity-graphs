@@ -8,7 +8,7 @@ import geopandas as gpd
 import pandas as pd
 
 from activitygraphs.base import CRS
-from activitygraphs.config import OvertureInputs
+from activitygraphs.config import OverturePaths
 
 
 class Overture:
@@ -111,10 +111,10 @@ class Overture:
 
     @classmethod
     def load(
-        cls, locations: gpd.GeoDataFrame | gpd.GeoSeries, cfg: OvertureInputs, project_root: Path | None = None
+        cls, locations: gpd.GeoDataFrame | gpd.GeoSeries, cfg: OverturePaths, project_root: Path | None = None
     ) -> Self:
         """Load Overture land-use and place data from disk, downloading via city2graph if not cached."""
-        project_root: Path = project_root if project_root is not None else Path(".")
+        project_root = project_root if project_root is not None else Path(".")
 
         output_dir = project_root / cfg.directory
         land_use_path = output_dir / cfg.land_use

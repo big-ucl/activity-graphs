@@ -5,21 +5,26 @@ from typing import Literal, Protocol
 
 import torch
 import torch.nn.functional as F
-import torch_geometric as pyg
 from torch_geometric.utils import to_dense_batch
 
 from activitygraphs.config import LossConfig
+from activitygraphs.ml.batch import UserBatch
 from activitygraphs.ml.dataset import is_home_node_mask
 
 
 class LossFn(Protocol):
+    """Signature of a loss function over a batch's logits."""
+
     def __call__(
-        self, logits: torch.Tensor, batch: pyg.data.Batch, generator: torch.Generator | None = None
-    ) -> torch.Tensor: ...
+        self, logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        """Return the scalar loss for ``logits`` against the labels in ``batch``."""
 
 
 @dataclass(frozen=True)
 class Loss:
+    """A loss function with the validation metric and direction that checkpointing monitors."""
+
     name: str
     loss_fn: LossFn
     monitor: str
@@ -28,7 +33,7 @@ class Loss:
 
 def bce_loss(
     logits: torch.Tensor,
-    batch: pyg.data.Batch,
+    batch: UserBatch,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Standard BCE loss with logits."""
@@ -39,6 +44,7 @@ BCELoss = Loss(name="bce", loss_fn=bce_loss, monitor="val_bce", monitor_mode="mi
 
 
 def build_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_col_index: int, max_recall_k: int) -> Loss:
+    """Build the loss selected by ``cfg.type``."""
     if cfg.type == "bce":
         return BCELoss
     if cfg.type == "bpr":
@@ -48,11 +54,11 @@ def build_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_col_index
 
 
 def _build_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_col_idx: int, max_recall_k: int) -> Loss:
-    def _uniform_bpr_loss(logits: torch.Tensor, batch: pyg.data.Batch, generator: torch.Generator | None = None):
+    def _uniform_bpr_loss(logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None):
         return bpr_loss(logits, batch.y, batch.batch, n_pairs=cfg.n_pairs, generator=generator)
 
     def _hard_neg_bpr_loss(
-        logits: torch.Tensor, batch: pyg.data.Batch, generator: torch.Generator | None = None
+        logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
         neg_restrict = _near_home_negative_mask(batch, distance_matrix, is_home_col_idx, cfg.is_near_threshold)
         return bpr_loss(logits, batch.y, batch.batch, cfg.n_pairs, neg_restrict, generator)
@@ -127,7 +133,7 @@ def dense_bpr_loss(
 
 
 def _near_home_negative_mask(
-    batch: pyg.data.Batch, distance_matrix: torch.Tensor, is_home_idx: int, is_near_threshold: int
+    batch: UserBatch, distance_matrix: torch.Tensor, is_home_idx: int, is_near_threshold: int
 ) -> torch.Tensor:
     """Boolean ``[B, N]`` mask of unvisited nodes within ``hard_k`` hops of each user's home.
 

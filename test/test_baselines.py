@@ -1,8 +1,8 @@
 """Tests for frequency-based baseline models."""
 
+import pytest
 import torch
 import torch_geometric as pyg
-import pytest
 
 from activitygraphs.ml.baselines import ConditionalVisitFrequencyBaseline, VisitFrequencyBaseline
 from activitygraphs.ml.baselines.common import (
@@ -63,7 +63,7 @@ class TestVisitFrequencyBaseline:
         baseline = VisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx=IS_HOME_IDX)
         loader = pyg.loader.DataLoader(make_graphs(8, num_nodes, 3), batch_size=4)
         baseline.fit(loader)
-        out = baseline(batch_uniform.x, batch_uniform.edge_index, batch=batch_uniform.batch)
+        out = baseline(batch_uniform.x, batch_uniform.edge_index, None, batch_uniform.batch)
         assert out.shape == (batch_uniform.num_nodes, 1)
 
     def test_forward_values_in_logit_range(self, batch_uniform):
@@ -71,7 +71,7 @@ class TestVisitFrequencyBaseline:
         baseline = VisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx=IS_HOME_IDX)
         loader = pyg.loader.DataLoader(make_graphs(8, num_nodes, 3), batch_size=4)
         baseline.fit(loader)
-        out = baseline(batch_uniform.x, batch_uniform.edge_index, batch=batch_uniform.batch)
+        out = baseline(batch_uniform.x, batch_uniform.edge_index, None, batch_uniform.batch)
         assert torch.isfinite(out).all()
 
     def test_scores_are_the_home_excluded_visit_rate(self, batch_uniform):
@@ -81,7 +81,7 @@ class TestVisitFrequencyBaseline:
 
         split = extract_per_user_tensors(pyg.loader.DataLoader(graphs, batch_size=8), IS_HOME_IDX)
         expected = torch.logit(home_excluded_visit_rate(split.labels, split.home_idx))
-        out = baseline(batch_uniform.x, batch_uniform.edge_index, batch=batch_uniform.batch)
+        out = baseline(batch_uniform.x, batch_uniform.edge_index, None, batch_uniform.batch)
 
         torch.testing.assert_close(out.squeeze(-1), expected.repeat(batch_uniform.num_graphs))
 
@@ -102,7 +102,7 @@ class TestConditionalVisitFrequencyBaseline:
 
         baseline = ConditionalVisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx=is_home_idx)
         baseline.fit(loader, loader)
-        out = baseline(batched.x, batched.edge_index, batch=batched.batch)
+        out = baseline(batched.x, batched.edge_index, None, batched.batch)
         assert out.shape == (batched.num_nodes, 1)
 
 
@@ -185,9 +185,9 @@ class TestConditionalVisitFrequencySmoothing:
         )
 
         unseen = pyg.data.Batch.from_data_list(graphs_of(split_of([[0, 0, 0, 1]], [3])))
-        args = (unseen.x, unseen.edge_index)
+        args = (unseen.x, unseen.edge_index, None, unseen.batch)
 
-        torch.testing.assert_close(conditional(*args, batch=unseen.batch), frequency(*args, batch=unseen.batch))
+        torch.testing.assert_close(conditional(*args), frequency(*args))
 
     def test_the_strength_is_fitted(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])

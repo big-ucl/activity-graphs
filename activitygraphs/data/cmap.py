@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
+from typing import Self
 
 import geopandas as gpd
 import pandas as pd
@@ -13,19 +14,19 @@ from activitygraphs.base import (
     LOCATIONS_COLUMNS,
     LOCATIONS_SCHEMA,
     USER_JOURNEY_SCHEMA,
+    USER_SCHEMA,
     Mode,
     Purpose,
-    USER_SCHEMA,
 )
 from activitygraphs.config import CMAPDataConfig
-from activitygraphs.network import NetworkData, build_special_locations, NA
+from activitygraphs.network import NA, NetworkData, build_special_locations
 from activitygraphs.utils import (
     DataFrameStore,
     add_lon_lat_from_centroid,
+    bands_to_midpoint_map,
     check_schema,
     get_project_root,
     invert_mapping,
-    bands_to_midpoint_map,
 )
 
 DEMOGRAPHIC_COLUMNS = [
@@ -119,7 +120,7 @@ AGE_MIDPOINTS = bands_to_midpoint_map({
 
 
 @dataclass(frozen=True)
-class CMAPInputs:
+class CMAPTables:
     """Parsed raw inputs for the CMAP MyDailyTravel survey (journeys, persons, households, days, boundaries)."""
 
     raw_journeys_df: pl.DataFrame
@@ -134,7 +135,7 @@ class CMAPData(NetworkData, DataFrameStore):
 
     def __init__(
         self,
-        inputs: CMAPInputs,
+        inputs: CMAPTables,
         locations_gdf: gpd.GeoDataFrame,
         user_journeys_df: pl.DataFrame,
         users_df: pl.DataFrame,
@@ -146,25 +147,30 @@ class CMAPData(NetworkData, DataFrameStore):
 
     @cached_property
     def home_locations(self) -> pl.DataFrame:
+        """Home location of each user, one row per user."""
         return self.users_df.select("user_id", loc_id="home_loc_id")
 
     @cached_property
     def users_df(self) -> pl.DataFrame:
+        """Users, filtered by active home location filters, sorted by ``user_id``."""
         return self._filter_loc_types(self._users_df, "home_loc_id").sort("user_id")
 
     @cached_property
     def user_ids(self) -> pl.Series:
+        """Sorted ids of the users in ``users_df``."""
         return self.users_df["user_id"].sort()
 
     @property
     def demographic_columns(self) -> list[str]:
+        """Names of the demographic columns in ``users_df``."""
         return DEMOGRAPHIC_COLUMNS
 
-    def _copy(self, filters: list[str] | None = None):
-        return CMAPData(self.inputs, self._locations_gdf, self._user_journeys_df, self.users_df, filters)
+    def _copy(self, filters: list[str] | None = None) -> Self:
+        return type(self)(self.inputs, self._locations_gdf, self._user_journeys_df, self.users_df, filters)
 
     @classmethod
     def load(cls, cfg: CMAPDataConfig, project_root: Path | None = None, name: str | None = None) -> "CMAPData":
+        """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
         cmap_inputs = load_files(cfg, project_root)
 
@@ -181,6 +187,7 @@ class CMAPData(NetworkData, DataFrameStore):
             return data
 
     def save(self, cfg: CMAPDataConfig, project_root: Path | None = None, name: str | None = None):
+        """Write the locations, journeys and users to the processed cache."""
         project_root, data_dir = self._dirs(cfg, project_root, name)
 
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +196,8 @@ class CMAPData(NetworkData, DataFrameStore):
         self._users_df.write_parquet(data_dir / "users_df.parquet")
 
 
-def load_files(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPInputs:
+def load_files(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPTables:
+    """Read the raw CMAP trip, person and household files and the census-tract boundaries."""
     project_root = get_project_root(project_root)
 
     raw_data_dir = project_root / cfg.paths.raw
@@ -200,10 +208,10 @@ def load_files(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPInp
     boundaries_dir = project_root / cfg.inputs.boundaries.directory
     boundaries_ct = gpd.read_file(boundaries_dir / cfg.inputs.boundaries.census_tracts)
 
-    return CMAPInputs(raw_journeys_df, raw_persons_df, raw_household_df, boundaries_ct)
+    return CMAPTables(raw_journeys_df, raw_persons_df, raw_household_df, boundaries_ct)
 
 
-def build_cmap_data(inputs: CMAPInputs) -> CMAPData:
+def build_cmap_data(inputs: CMAPTables) -> CMAPData:
     """Parse raw CMAP inputs into a standardised ``CMAPData`` instance."""
     locations_gdf = build_cmap_locations(inputs)
     user_journeys_df = build_cmap_journeys(inputs, locations_gdf)
@@ -220,7 +228,7 @@ def build_cmap_data(inputs: CMAPInputs) -> CMAPData:
 # =========================================
 
 
-def build_cmap_locations(inputs: CMAPInputs) -> gpd.GeoDataFrame:
+def build_cmap_locations(inputs: CMAPTables) -> gpd.GeoDataFrame:
     """Build the CMAP locations GeoDataFrame (census tracts and NA)."""
     subsector_locations = inputs.boundaries_ct[inputs.boundaries_ct["COUNTYFP"].isin(CMAP_COUNTY_FP_CODES)]
     subsector_locations = subsector_locations.rename(columns={"GEOID": "loc_id", "NAME": "loc_name"}).to_crs(CRS)
@@ -242,8 +250,8 @@ def build_cmap_locations(inputs: CMAPInputs) -> gpd.GeoDataFrame:
 def _census_tract_to_loc_id(census_tract_col: str, locations_gdf: gpd.GeoDataFrame) -> pl.Expr:
     loc_ids = set(locations_gdf["loc_id"])
 
-    census_tract_col = pl.col(census_tract_col).cast(pl.String)
-    return pl.when(census_tract_col.is_in(loc_ids)).then(census_tract_col).otherwise(pl.lit(NA))
+    tract = pl.col(census_tract_col).cast(pl.String)
+    return pl.when(tract.is_in(loc_ids)).then(tract).otherwise(pl.lit(NA))
 
 
 # =========================================
@@ -251,7 +259,8 @@ def _census_tract_to_loc_id(census_tract_col: str, locations_gdf: gpd.GeoDataFra
 # =========================================
 
 
-def build_cmap_journeys(inputs: CMAPInputs, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+def build_cmap_journeys(inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+    """Build the standardised journey table from the raw linked trips, one leg per trip."""
     user_journeys_df = inputs.raw_journeys_df.select(
         user_id=pl.col("person_id").cast(pl.String),
         journey_id=pl.col("linked_trip_id").cast(pl.String),
@@ -282,8 +291,9 @@ def build_cmap_journeys(inputs: CMAPInputs, locations_gdf: gpd.GeoDataFrame) -> 
 
 
 def build_cmap_users(
-    inputs: CMAPInputs, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
+    inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
 ) -> pl.DataFrame:
+    """Build one row per user with home tract, household id and demographics, single-day diaries only."""
     hh_df = inputs.raw_household_df.filter(pl.col("diary_platform").is_in(SINGLE_DAY_DIARY_PLATFORMS)).select(
         hh_id=pl.col("hh_id").cast(pl.String),
         home_loc_id=_census_tract_to_loc_id("home_tract_2020", locations_gdf),

@@ -1,28 +1,23 @@
 """Integration smoke tests for ActivityDataModule.
 
-Marked ``integration`` and skipped automatically when the processed dataset or config is not
-available in the environment.
+Marked ``integration`` and skipped automatically when the dataset is not on disk.
 """
 
 import pytest
 
-from activitygraphs.config import load_config
 from activitygraphs.ml.datamodule import ActivityDataModule
-from activitygraphs.utils import get_project_root
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")
-def datamodule() -> ActivityDataModule:
-    root = get_project_root()
-    try:
-        cfg = load_config(root, verbose=False, data="thats")
+def datamodule(load_or_skip) -> ActivityDataModule:
+    def build(cfg, root) -> ActivityDataModule:
         dm = ActivityDataModule(cfg, val_size=0.2, test_size=0.1, seed=42, batch_size=64)
         dm.setup()
-    except Exception as exc:  # config or processed data not present in this environment
-        pytest.skip(f"thats dataset/config unavailable: {exc}")
-    return dm
+        return dm
+
+    return load_or_skip("thats", build)
 
 
 class TestActivityDataModule:

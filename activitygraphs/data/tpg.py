@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 import geopandas as gpd
 import pandas as pd
@@ -11,8 +12,8 @@ from rapidfuzz import fuzz, process
 
 from activitygraphs import utils
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, LOCATIONS_SCHEMA, USER_JOURNEY_SCHEMA, Mode, Purpose
-from activitygraphs.config import DataConfig, GenevaDataConfig
-from activitygraphs.data.gtfs import GTFSInputs
+from activitygraphs.config import DataConfig, TPGDataConfig
+from activitygraphs.data.gtfs import GTFSTables
 from activitygraphs.network import (
     NetworkData,
     build_special_locations,
@@ -88,7 +89,7 @@ FUZZY_MATCH_THRESHOLD = 65
 
 
 @dataclass(frozen=True)
-class GenevaInputs:
+class TPGTables:
     """Parsed raw inputs for the Geneva TPG survey (journeys, boundary GeoDataFrames, and GTFS)."""
 
     raw_journeys_df: pl.DataFrame
@@ -99,15 +100,15 @@ class GenevaInputs:
     swiss_boundaries_gdf: gpd.GeoDataFrame
     french_gdf: gpd.GeoDataFrame
 
-    gtfs: GTFSInputs
+    gtfs: GTFSTables
 
 
-class GenevaData(NetworkData, DataFrameStore):
+class TPGData(NetworkData, DataFrameStore):
     """Geneva TPG ``NetworkData`` subclass with caching via ``DataFrameStore``."""
 
     def __init__(
         self,
-        inputs: GenevaInputs,
+        inputs: TPGTables,
         locations_gdf: gpd.GeoDataFrame,
         user_journeys_df: pl.DataFrame,
         filters: list[str] | None = None,
@@ -121,26 +122,28 @@ class GenevaData(NetworkData, DataFrameStore):
         self.inputs = inputs
         self.gtfs = self.inputs.gtfs
 
-    def _copy(self, filters: list[str] | None = None):
-        return GenevaData(self.inputs, self._locations_gdf, self._user_journeys_df, filters)
+    def _copy(self, filters: list[str] | None = None) -> Self:
+        return type(self)(self.inputs, self._locations_gdf, self._user_journeys_df, filters)
 
     @classmethod
-    def load(cls, cfg: GenevaDataConfig, project_root: Path | None = None, name: str | None = None) -> "GenevaData":
+    def load(cls, cfg: TPGDataConfig, project_root: Path | None = None, name: str | None = None) -> "TPGData":
+        """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
-        gva_inputs = load_files(cfg, project_root)
+        tpg_tables = load_files(cfg, project_root)
 
         if data_dir.exists():
             locations_gdf = gpd.read_parquet(data_dir / "locations_gdf.parquet")
             user_journeys_df = pl.read_parquet(data_dir / "user_journeys_df.parquet", schema=USER_JOURNEY_SCHEMA)
 
-            return cls(gva_inputs, locations_gdf, user_journeys_df)
+            return cls(tpg_tables, locations_gdf, user_journeys_df)
         else:
-            data = build_geneva_data(gva_inputs)
+            data = build_tpg_data(tpg_tables)
             data.save(cfg, project_root, name)
 
-            return build_geneva_data(gva_inputs)
+            return build_tpg_data(tpg_tables)
 
-    def save(self, cfg: GenevaDataConfig, project_root: Path | None = None, name: str | None = None):
+    def save(self, cfg: TPGDataConfig, project_root: Path | None = None, name: str | None = None):
+        """Write the locations and journeys to the processed cache."""
         project_root, data_dir = self._dirs(cfg, project_root, name)
 
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -148,13 +151,13 @@ class GenevaData(NetworkData, DataFrameStore):
         self.user_journeys_df.write_parquet(data_dir / "user_journeys_df.parquet")
 
 
-def load_files(cfg: GenevaDataConfig, project_root: Path | None = None) -> GenevaInputs:
-    """Read all raw Geneva files (journeys, boundaries, GTFS) into a ``GenevaInputs`` container."""
+def load_files(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTables:
+    """Read all raw TPG files (journeys, boundaries, GTFS) into a ``TPGTables`` container."""
 
     def parse_gtfs_date(*cols: str) -> pl.Expr:
         return pl.col(*cols).cast(pl.String).str.to_date("%Y%m%d")
 
-    project_root: Path = project_root if project_root is not None else Path(".")
+    project_root = project_root if project_root is not None else Path(".")
 
     raw_path = project_root / cfg.paths.raw
 
@@ -203,19 +206,17 @@ def load_files(cfg: GenevaDataConfig, project_root: Path | None = None) -> Genev
         },
     )
 
-    gtfs = GTFSInputs(
+    gtfs = GTFSTables(
         stops_df, stop_times_df, trips_df, routes_df, agency_df, calendar_df, calendar_dates_df, transfers_df
     )
 
-    return GenevaInputs(
-        raw_journeys_df, subsectors_gdf, postcodes_gdf, localities_gdf, boundaries_gdf, french_gdf, gtfs
-    )
+    return TPGTables(raw_journeys_df, subsectors_gdf, postcodes_gdf, localities_gdf, boundaries_gdf, french_gdf, gtfs)
 
 
-def build_geneva_data(inputs: GenevaInputs) -> GenevaData:
-    """Parse raw Geneva inputs into a standardised ``GenevaData`` instance."""
+def build_tpg_data(inputs: TPGTables) -> TPGData:
+    """Parse raw TPG tables into a standardised ``TPGData`` instance."""
     # Create locations with all PT stops
-    locations_gdf = build_geneva_locations(
+    locations_gdf = build_tpg_locations(
         inputs.gtfs.stops_df,
         inputs.subsectors_gdf,
         inputs.postcodes_gdf,
@@ -254,10 +255,10 @@ def build_geneva_data(inputs: GenevaInputs) -> GenevaData:
     locations_gdf = locations_gdf.merge(user_loc_ids, on="loc_id")
     locations_gdf = check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
-    return GenevaData(inputs, locations_gdf, user_journeys_df)
+    return TPGData(inputs, locations_gdf, user_journeys_df)
 
 
-def build_geneva_locations(
+def build_tpg_locations(
     stops: pl.DataFrame,
     subsectors: gpd.GeoDataFrame,
     postcodes: gpd.GeoDataFrame,
@@ -337,7 +338,7 @@ def _build_municipality_swiss_locations(
 
     municipality_locations["loc_name"] = municipality_locations["NAME"] + " - " + municipality_locations["ZIP4"]
     municipality_locations["loc_id"] = (
-        "CH-" + municipality_locations["ZIP4"] + "-" + municipality_locations["INDEXNAME"]
+        "CH-" + municipality_locations["ZIP4"] + "-" + municipality_locations["INDEXNAME"]  # pyrefly: ignore[unsupported-operation]
     )
 
     in_geneva = municipality_locations["in_geneva"]
@@ -351,7 +352,7 @@ def _build_municipality_swiss_locations(
 def _build_municipality_french_locations(french_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     french_locations = add_lon_lat_from_centroid(french_gdf, index_col="ID")
     french_locations["loc_id"] = "FR-" + french_locations["ID"]
-    french_locations["loc_name"] = french_locations["LIB"].str.upper() + " - " + french_locations["ID"]
+    french_locations["loc_name"] = french_locations["LIB"].str.upper() + " - " + french_locations["ID"]  # pyrefly: ignore[unsupported-operation]
     french_locations["type"] = "municipality_french"
 
     return french_locations[LOCATIONS_COLUMNS]
@@ -411,10 +412,12 @@ def match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, st
 
 
 def manual_patch_stop_names(user_journeys_df: pl.DataFrame, *stop_name_cols: str) -> pl.DataFrame:
+    """Replace known misspelled stop names in ``stop_name_cols`` with their GTFS names."""
     return user_journeys_df.with_columns(pl.col(stop_name_cols).replace(STOP_NAME_MAPPING))
 
 
 def match_loc_id_on_strict_stop_name(user_journeys_df: pl.DataFrame, stop_names_to_id_df: pl.DataFrame) -> pl.DataFrame:
+    """Match departure and arrival stops to locations by case-insensitive exact stop name."""
     return (
         user_journeys_df
         .join(
@@ -440,6 +443,7 @@ def match_loc_id_on_subsector(
     stop_name_col: str,
     match_type_col: str,
 ):
+    """Match still-unmatched stop names that name a subsector to that subsector's location."""
     regex = LOCATION_REGEXES["subsector"]
     subsectors = all_locations_df.filter(pl.col("type") == "subsector").select("loc_id", "loc_name")
     does_regex_match_expr = pl.col(loc_id_col).is_null() & ~pl.col("loc_id").is_null()
@@ -468,6 +472,7 @@ def match_loc_id_on_municipality_swiss(
     stop_name_col: str,
     match_type_col: str,
 ):
+    """Match still-unmatched stop names that name a Swiss municipality to its location."""
     regex = LOCATION_REGEXES["municipality_swiss"]
     municipalities = all_locations_df.filter(
         pl.col("type").is_in(["municipality_swiss", "municipality_geneva"])
@@ -503,6 +508,7 @@ def match_loc_id_on_municipality_french(
     stop_name_col: str,
     match_type_col: str,
 ):
+    """Match still-unmatched stop names that name a French municipality to its location."""
     regex = LOCATION_REGEXES["municipality_french"]
     municipalities = all_locations_df.filter(pl.col("type") == "municipality_french").select("loc_id", "loc_name")
     does_regex_match_expr = pl.col(loc_id_col).is_null() & ~pl.col("loc_id").is_null()
@@ -534,6 +540,7 @@ def match_loc_id_on_na(
     stop_name_col: str,
     match_type_col: str,
 ) -> pl.DataFrame:
+    """Match still-unmatched stop names that denote an unknown place to the NA location."""
     regex = LOCATION_REGEXES["na"]
     municipalities = all_locations_df.filter(pl.col("type") == "na").select("loc_id", "loc_name")
     does_regex_match_expr = (
@@ -563,6 +570,7 @@ def match_loc_id_on_fuzzy_stop_names(
     stop_name_col: str,
     match_type_col: str,
 ) -> pl.DataFrame:
+    """Match still-unmatched stop names to the closest GTFS stop name by fuzzy string similarity."""
     unmatched_stop_names = pl.concat([
         user_journeys_df.filter(pl.col("dep_loc_id").is_null())["lieu_depart_trajet"].rename("stop_name"),
         user_journeys_df.filter(pl.col("arr_loc_id").is_null())["lieu_arrivee_trajet"].rename("stop_name"),
@@ -609,6 +617,7 @@ def match_loc_id_on_fuzzy_stop_names(
 
 
 def match_null_loc_ids_to_na(user_journeys_df: pl.DataFrame, loc_id_col: str, match_type_col: str) -> pl.DataFrame:
+    """Assign every stop that is still unmatched to the NA location."""
     is_unmatched = pl.col(loc_id_col).is_null()
 
     return user_journeys_df.with_columns(
@@ -621,7 +630,7 @@ def _read_raw_data(data_cfg: DataConfig, project_root=None) -> pl.DataFrame:
     project_root = project_root if project_root is not None else Path(".")
     data_path = project_root / data_cfg.paths.raw
 
-    raw_geneva_df = utils.read_from_parquet(
+    raw_tpg_df = utils.read_from_parquet(
         data_path / data_cfg.inputs.raw_journeys,
         schema={
             "id_utilisateur": pl.String,
@@ -638,15 +647,15 @@ def _read_raw_data(data_cfg: DataConfig, project_root=None) -> pl.DataFrame:
         },
     )
 
-    raw_geneva_df = raw_geneva_df.with_columns(pl.col("jour_depart").str.to_date(format="%+", strict=False))
+    raw_tpg_df = raw_tpg_df.with_columns(pl.col("jour_depart").str.to_date(format="%+", strict=False))
 
-    return raw_geneva_df
+    return raw_tpg_df
 
 
-def _handle_null_values(raw_geneva_df: pl.DataFrame) -> pl.DataFrame:
+def _handle_null_values(raw_tpg_df: pl.DataFrame) -> pl.DataFrame:
     # Remove null rows
     cols_remove_null_rows = ["jour_depart"]
-    removed_rows_df = raw_geneva_df.drop_nulls(subset=cols_remove_null_rows)
+    removed_rows_df = raw_tpg_df.drop_nulls(subset=cols_remove_null_rows)
 
     # Remove empty rows from certain columns
     cols_remove_empty_rows = ["jour_depart", "date", "motif_depart", "motif_arrivee"]

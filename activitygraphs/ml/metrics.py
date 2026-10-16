@@ -100,6 +100,7 @@ class RetrievalAverageRecall(Metric):
         self.add_state("n_dropped", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
+        """Accumulate per-user average recall and recall@k over a batch."""
         avg_recall, recall_at_ks, n_dropped = per_user_recall(preds, target, indexes, self.budget, self.ks)
 
         self.avg_recall_sum = self.avg_recall_sum + avg_recall.sum()
@@ -141,6 +142,7 @@ class RetrievalRPrecision(Metric):
         self.add_state("n_dropped", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
+        """Accumulate per-user R-precision over a batch, counting users with no positives as dropped."""
         for idx in torch.unique(indexes):
             mask = indexes == idx
             t = target[mask]
@@ -153,6 +155,7 @@ class RetrievalRPrecision(Metric):
             self.n_users = self.n_users + 1
 
     def compute(self) -> torch.Tensor:
+        """Return the mean R-precision over scored users."""
         return self.score_sum / self.n_users.clamp(min=1)
 
 
@@ -211,8 +214,9 @@ class PerUserRanking(Metric):
         exclude: torch.Tensor,
         hops: torch.Tensor,
     ) -> None:
-        """Update the per-user and per-positive tensors with the results from the current batch. Skips users with no
-        positives.
+        """Update the per-user and per-positive tensors with the results from the current batch.
+
+        Skips users with no positives.
 
         Args:
             preds: flat tensor of predicted scores, [n_users * n_nodes]
@@ -264,8 +268,9 @@ class PerUserRanking(Metric):
                 self.score_vector.append(full_scores.detach().float().reshape(1, -1).cpu())
 
     def columns(self) -> dict[str, torch.Tensor]:
-        """Return the per-user columns as a mapping (col_name -> tensor of values), values are indexed by users.  See
-        class docstring for description of columns.
+        """Return the per-user columns as a mapping (col_name -> tensor of values), values are indexed by users.
+
+        See class docstring for description of columns.
 
         Use this rather than ``compute``: the torchmetrics wrapper around ``compute`` squeezes
         single-element outputs to 0-dim, which would turn a one-user split into a scalar.
@@ -273,8 +278,10 @@ class PerUserRanking(Metric):
         return {field: dim_zero_cat(getattr(self, field)) for field in self._FIELDS}
 
     def positive_columns(self) -> dict[str, list[list]]:
-        """Return the positive (visited nodes) columns as a mapping (col_name -> tensor of values), values are indexed
-        by positives (i.e. ``sum(num_pos_u for u in users)``). See class docstring for description of columns.
+        """Return the positive (visited nodes) columns as a mapping (col_name -> tensor of values).
+
+        Values are indexed by positives (i.e. ``sum(num_pos_u for u in users)``). See class docstring for description
+        of columns.
         """
         values = {pos_field: dim_zero_cat(getattr(self, pos_field)).tolist() for pos_field in self._POSITIVE_FIELDS}
         positives: dict[str, list[list]] = {pos_field: [] for pos_field in self._POSITIVE_FIELDS}
@@ -289,12 +296,15 @@ class PerUserRanking(Metric):
         return positives
 
     def score_vectors(self) -> torch.Tensor:
-        """Return the tensor of model score vectors, row-aligned with ``columns()``, ``[n_users, num_nodes]``. Empty
-        when ``store_score_vectors`` is off."""
+        """Return the tensor of model score vectors, row-aligned with ``columns()``, ``[n_users, num_nodes]``.
+
+        Empty when ``store_score_vectors`` is off.
+        """
         if not self.score_vector:
             return torch.empty(0)
 
         return dim_zero_cat(self.score_vector)
 
     def compute(self) -> dict[str, torch.Tensor]:
+        """Return the per-user ranking columns."""
         return self.columns()

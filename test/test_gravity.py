@@ -90,7 +90,7 @@ class TestDistanceDecay:
         batch = pyg.data.Batch.from_data_list(make_graphs(torch.zeros(1, 5), torch.tensor([0]), distances, scaler))
         x = extract_features(batch, full_info=True, is_home_idx=IS_HOME_IDX)
 
-        scores = DistanceDecayBaseline(scaler)(x, batch.edge_index, batch=batch.batch).squeeze(-1)
+        scores = DistanceDecayBaseline(scaler)(x, batch.edge_index, None, batch.batch).squeeze(-1)
 
         assert scores.argsort(descending=True).tolist() == [0, 2, 1, 4, 3]
         assert scores.sigmoid().unique().numel() == 5
@@ -129,7 +129,7 @@ class TestGravity:
 
         batch = pyg.data.Batch.from_data_list(graphs[:2])
         x = extract_features(batch, full_info=True, is_home_idx=IS_HOME_IDX)
-        out = gravity(x, batch.edge_index, batch=batch.batch).squeeze(-1)
+        out = gravity(x, batch.edge_index, None, batch.batch).squeeze(-1)
 
         node = 3
         relative = float(unscale_distances(batch.distances[node], scaler)) / gravity.d0
@@ -193,8 +193,8 @@ class TestConditionalGravity:
         )
         x = extract_features(unseen, full_info=True, is_home_idx=IS_HOME_IDX)
 
-        prior = gravity(x, unseen.edge_index, batch=unseen.batch)
-        out = conditional(x, unseen.edge_index, batch=unseen.batch)
+        prior = gravity(x, unseen.edge_index, None, unseen.batch)
+        out = conditional(x, unseen.edge_index, None, unseen.batch)
 
         non_home = slice(0, 9)
         torch.testing.assert_close(out[non_home], prior[non_home], rtol=1e-4, atol=1e-4)

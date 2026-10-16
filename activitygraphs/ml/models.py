@@ -2,14 +2,14 @@
 
 import functools
 import itertools
-from typing import Any
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
 from torch import Tensor
 from torch.nn import Module
-from torch_geometric.nn.conv import GCNConv, GPSConv, GATConv
+from torch_geometric.nn.conv import GATConv, GCNConv, GPSConv
 
 EDGE_ATTR_CONVS = [
     GATConv,
@@ -17,11 +17,12 @@ EDGE_ATTR_CONVS = [
 
 
 def accepts_edge_attr(conv: Module) -> bool:
+    """Return whether ``conv`` takes edge attributes."""
     return any(isinstance(conv, valid_conv) for valid_conv in EDGE_ATTR_CONVS)
 
 
 def build_module_list(
-    module_f: torch.nn.Module,
+    module_f: Callable[..., Module],
     num_layers: int,
     in_channels: int,
     out_channels: int,
@@ -31,8 +32,8 @@ def build_module_list(
     """Construct a ``ModuleList`` of ``num_layers`` stacked ``module_f`` instances.
 
     Args:
-        module_f: Callable ``(in, out, **kwargs) → nn.Module`` used to create each layer.
-        num_layers: Total number of layers; must be ≥ 1.
+        module_f: Callable ``(in, out, **kwargs) -> nn.Module`` used to create each layer.
+        num_layers: Total number of layers; must be >= 1.
         in_channels: Input size of the first layer.
         out_channels: Output size of the last layer.
         hidden_channels: Hidden size for intermediate layers; required when ``num_layers > 1``.
@@ -67,7 +68,7 @@ class GCN(torch.nn.Module):
         out_channels: int,
         dropout: float = 0.2,
         residuals: bool = False,
-        conv: pyg.nn.conv.MessagePassing = None,
+        conv: Callable[..., pyg.nn.conv.MessagePassing] | None = None,
     ):
         super().__init__()
 
@@ -83,6 +84,7 @@ class GCN(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
+        """Return one output per node, shape ``(num_nodes, out_channels)``."""
         # Single layer case
         if len(self.convs) == 1:
             return self.convolve(self.convs[0], x, edge_index, edge_attr)
@@ -107,6 +109,7 @@ class GCN(torch.nn.Module):
 
     @staticmethod
     def convolve(conv: Module, x: Tensor, edge_index: Tensor, edge_attr: Tensor | None) -> torch.Tensor:
+        """Apply ``conv``, passing ``edge_attr`` only if given and supported."""
         if edge_attr is not None and accepts_edge_attr(conv):
             return conv(x, edge_index, edge_attr=edge_attr)
         else:
@@ -127,6 +130,7 @@ class NodeMLP(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
+        """Return one output per node, shape ``(num_nodes, out_channels)``."""
         # Single layer case
         if len(self.lins) == 1:
             return self.lins[0](x)
@@ -176,6 +180,7 @@ class FullyConnectedMLP(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
+        """Return one output per node from each user's flattened graph, shape ``(num_nodes, out_channels)``."""
         total_nodes, num_features = x.shape
 
         if total_nodes % self.num_nodes != 0:
@@ -205,6 +210,7 @@ class GCNPlus(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
+        """Return one output per node, shape ``(num_nodes, out_channels)``."""
         x = self.gcn(x, edge_index, edge_attr).relu()
         x = self.lin(x, edge_index)
 
@@ -234,6 +240,7 @@ class GCNRes(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
+        """Return one output per node, shape ``(num_nodes, out_channels)``."""
         x = self.pre_lin(x, edge_index)
         x = self.convs(x, edge_index)
         x = self.post_lin(x, edge_index)
@@ -254,7 +261,7 @@ class GCNSkip(torch.nn.Module):
         out_channels: int,
         dropout: float = 0.2,
         residuals: bool = False,
-        conv: pyg.nn.conv.MessagePassing | None = None,
+        conv: Callable[..., pyg.nn.conv.MessagePassing] | None = None,
     ):
         super().__init__()
 
@@ -268,6 +275,7 @@ class GCNSkip(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
+        """Return one output per node, shape ``(num_nodes, out_channels)``."""
         x_skip = x
 
         x = self.pre_lin(x, edge_index)
@@ -326,6 +334,7 @@ class GPSLayer(torch.nn.Module):
         )  # Disable compilation for Preformer attention
 
     def forward(self, x, edge_index, edge_attr, batch):
+        """Return the updated node representations, shape ``(num_nodes, channels)``."""
         return self.conv(x, edge_index, batch, edge_attr=edge_attr)
 
 
@@ -359,6 +368,7 @@ class GraphTransformer(torch.nn.Module):
         )
 
     def forward(self, x, edge_index, edge_attr, batch):
+        """Return one output per node, shape ``(num_nodes, out_channels)``."""
         x = self.input_proj(x)
         edge_attr = self.edge_proj(edge_attr)
 

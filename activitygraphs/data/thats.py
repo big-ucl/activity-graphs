@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
+from typing import Self
 
 import geopandas as gpd
 import pandas as pd
@@ -138,7 +139,7 @@ ACTIVITY_MAP = invert_mapping({
 
 
 @dataclass(frozen=True)
-class THATSInputs:
+class THATSTables:
     """Parsed raw inputs for the Toronto THATS survey (journeys, persons, households, activities, boundaries)."""
 
     raw_journeys_df: pl.DataFrame
@@ -156,7 +157,7 @@ class THATSData(NetworkData, DataFrameStore):
 
     def __init__(
         self,
-        inputs: THATSInputs,
+        inputs: THATSTables,
         locations_gdf: gpd.GeoDataFrame,
         user_journeys_df: pl.DataFrame,
         activities_df: pl.DataFrame,
@@ -170,18 +171,22 @@ class THATSData(NetworkData, DataFrameStore):
 
     @cached_property
     def home_locations(self) -> pl.DataFrame:
+        """Home location of each user, one row per user."""
         return self.users_df.select("user_id", loc_id="home_loc_id")
 
     @cached_property
     def users_df(self) -> pl.DataFrame:
+        """Users, filtered by active home location filters, sorted by ``user_id``."""
         return self._filter_loc_types(self._users_df, "home_loc_id").sort("user_id")
 
     @cached_property
     def user_ids(self) -> pl.Series:
+        """Sorted ids of the users in ``users_df``."""
         return self.users_df["user_id"].sort()
 
     @property
     def demographic_columns(self) -> list[str]:
+        """Names of the demographic columns in ``users_df``."""
         return DEMOGRAPHIC_COLUMNS
 
     @cached_property
@@ -194,13 +199,14 @@ class THATSData(NetworkData, DataFrameStore):
             .rename({"person_id": "user_id"})
         )
 
-    def _copy(self, filters: list[str] | None = None):
-        return THATSData(
+    def _copy(self, filters: list[str] | None = None) -> Self:
+        return type(self)(
             self.inputs, self._locations_gdf, self._user_journeys_df, self.activities_df, self.users_df, filters
         )
 
     @classmethod
     def load(cls, cfg: THATSDataConfig, project_root: Path | None = None, name: str | None = None) -> "THATSData":
+        """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
         thats_inputs = load_files(cfg, project_root)
 
@@ -218,6 +224,7 @@ class THATSData(NetworkData, DataFrameStore):
             return data
 
     def save(self, cfg: THATSDataConfig, project_root: Path | None = None, name: str | None = None):
+        """Write the locations, journeys, activities and users to the processed cache."""
         project_root, data_dir = self._dirs(cfg, project_root, name)
 
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -227,8 +234,8 @@ class THATSData(NetworkData, DataFrameStore):
         self._users_df.write_parquet(data_dir / "users_df.parquet")
 
 
-def load_files(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSInputs:
-    """Read all raw Toronto files (journeys, persons, households, activities, boundaries) into a ``TorontoInputs`` container."""
+def load_files(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSTables:
+    """Read all raw Toronto files (journeys, persons, households, activities, boundaries) into a ``THATSTables`` container."""
     project_root = get_project_root(project_root)
 
     raw_data_dir = project_root / cfg.paths.raw
@@ -242,13 +249,13 @@ def load_files(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSI
     boundary_ct = gpd.read_file(boundaries_dir / cfg.inputs.boundaries.census_tracts)
     boundary_da = gpd.read_file(boundaries_dir / cfg.inputs.boundaries.dissemination_areas)
 
-    return THATSInputs(
+    return THATSTables(
         raw_journeys_df, raw_persons_df, raw_household_df, raw_activities_df, boundary_cma, boundary_ct, boundary_da
     )
 
 
-def build_thats_data(inputs: THATSInputs) -> THATSData:
-    """Parse raw Toronto inputs into a standardised ``TorontoData`` instance."""
+def build_thats_data(inputs: THATSTables) -> THATSData:
+    """Parse raw Toronto inputs into a standardised ``THATSData`` instance."""
     locations_gdf = build_thats_locations(inputs)
     user_journeys_df = build_thats_journeys(inputs, locations_gdf)
     activities_df = build_thats_activities(inputs, user_journeys_df)
@@ -262,7 +269,7 @@ def build_thats_data(inputs: THATSInputs) -> THATSData:
 # =========================================
 
 
-def build_thats_locations(inputs: THATSInputs) -> gpd.GeoDataFrame:
+def build_thats_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     """Build the Toronto locations GeoDataFrame (census tracts and NA)."""
     special_locations = build_special_locations()
     subsector_locations = build_subsector_locations(inputs)
@@ -278,7 +285,7 @@ def build_thats_locations(inputs: THATSInputs) -> gpd.GeoDataFrame:
     )
 
 
-def build_subsector_locations(inputs: THATSInputs) -> gpd.GeoDataFrame:
+def build_subsector_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     """Extract census-tract "subsector" locations within the Toronto CMA and return them as subsector locations."""
     toronto_cma = inputs.metropolitan_areas_gdf.query(f"CMAUID == '{TORONTO_CMA}'")
     utm_crs = toronto_cma.estimate_utm_crs()
@@ -302,7 +309,7 @@ def build_subsector_locations(inputs: THATSInputs) -> gpd.GeoDataFrame:
 # =========================================
 
 
-def build_thats_journeys(inputs: THATSInputs, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+def build_thats_journeys(inputs: THATSTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
     """Parse raw trip records into standardised journey DF conforming to ``USER_JOURNEY_SCHEMA``."""
     trips = inputs.raw_journeys_df
     persons = inputs.raw_person_df
@@ -404,7 +411,7 @@ def build_thats_journeys(inputs: THATSInputs, locations_gdf: gpd.GeoDataFrame) -
 # =========================================
 
 
-def build_thats_activities(inputs: THATSInputs, user_journeys_df: pl.DataFrame):
+def build_thats_activities(inputs: THATSTables, user_journeys_df: pl.DataFrame):
     """Parse the wide-format hourly activity DF into a long, collapsed by span, activity DataFrame."""
     # Move from a wide to long data format by adding an "index" column for activities that happen in the same hour
     activities = unpivot_activities(inputs.raw_activities_df)
@@ -544,7 +551,7 @@ def collapse_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
 
 
 def build_thats_users(
-    inputs: THATSInputs, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
+    inputs: THATSTables, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
 ) -> pl.DataFrame:
     """Build the user DataFrame with household demographics and home location for Toronto."""
     persons = inputs.raw_person_df.select(

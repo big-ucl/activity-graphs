@@ -1,6 +1,6 @@
 """Share of each survey's non-home training labels that are work or study locations.
 
-Run from the repo root: ``uv run python notebooks/purpose_shares.py [geneva] [cmap]``.
+Run from the repo root: ``uv run python notebooks/purpose_shares.py [tpg] [cmap]``.
 """
 
 import sys
@@ -120,4 +120,4 @@ def main(datasets: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or ["geneva", "cmap"])
+    main(sys.argv[1:] or ["tpg", "cmap"])

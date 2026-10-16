@@ -26,7 +26,7 @@ class FakeDataset:
 def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_per_group: int = 1) -> FakeDataset:
     """Build a fake dataset whose users are laid out in consecutive groups of ``users_per_group``.
 
-    ``users_per_group=1`` reproduces the ungrouped case (Geneva, where ``hh_id`` is ``user_id``).
+    ``users_per_group=1`` reproduces the ungrouped case (TPG, where ``hh_id`` is ``user_id``).
     """
     group_ids = torch.arange(n_users) // users_per_group
 
@@ -38,7 +38,7 @@ def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_pe
     )
 
 
-def make_cfg(name: str = "GenevaTPG", epochs: int = 50):
+def make_cfg(name: str = "TPG", epochs: int = 50):
     return OmegaConf.create({
         "data": {
             "name": name,
@@ -150,7 +150,7 @@ class TestGroupedSplit:
 
         groups = {
             name: set(dataset.group_ids[idx].tolist())
-            for name, idx in zip(("train", "val", "test"), (train, val, test))
+            for name, idx in zip(("train", "val", "test"), (train, val, test), strict=True)
         }
 
         assert groups["train"] & groups["val"] == set()

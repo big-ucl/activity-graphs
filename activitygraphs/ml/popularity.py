@@ -1,5 +1,7 @@
-"""Computation of the home-excluded node popularity: i.e. the training visit rate of each node among the users who do
-not live there."""
+"""Computation of the home-excluded node popularity.
+
+That is, the training visit rate of each node among the users who do not live there.
+"""
 
 import torch
 

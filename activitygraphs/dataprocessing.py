@@ -1,8 +1,8 @@
 """Build Network Graphs and per-user PyG tensors from NetworkData."""
 
-import pickle
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, cast
+from typing import cast
 
 import city2graph as c2g
 import geopandas as gpd
@@ -11,30 +11,27 @@ import pandas as pd
 import polars as pl
 import torch
 import torch_geometric as pyg
-import torch_geometric.transforms as T
-from joblib import Parallel, delayed
-
 
 from activitygraphs.base import CRS
 from activitygraphs.config import (
-    DataConfig,
-    GenevaStatsInputs,
-    StatsInputs,
-    THATSStatsInputs,
-    THATSDataConfig,
-    GenevaDataConfig,
     CMAPDataConfig,
-    CMAPStatsInputs,
+    CMAPStatsPaths,
+    DataConfig,
+    StatsPaths,
+    THATSDataConfig,
+    THATSStatsPaths,
+    TPGDataConfig,
+    TPGStatsPaths,
 )
 from activitygraphs.data.cmap import CMAPData
-from activitygraphs.data.geneva import GenevaData
 from activitygraphs.data.overture import Overture
 from activitygraphs.data.statistics import (
-    add_geneva_population_job_statistics,
-    add_thats_population_job_statistics,
     add_cmap_population_job_statistics,
+    add_thats_population_job_statistics,
+    add_tpg_population_job_statistics,
 )
 from activitygraphs.data.thats import THATSData
+from activitygraphs.data.tpg import TPGData
 from activitygraphs.network import NetworkData
 from activitygraphs.utils import get_project_root
 
@@ -61,9 +58,7 @@ SPATIAL_FEATURE_NAMES = ["is_home"]
 # A. Network graph
 # =========================================
 
-type NetworkGraphBuilder = Callable[
-    [gpd.GeoDataFrame, Overture, StatsInputs], tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]
-]
+type NetworkGraphBuilder = Callable[[gpd.GeoDataFrame, Overture, StatsPaths], tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]]
 
 
 def load_network_graph(
@@ -110,14 +105,14 @@ def load_network_graph(
     return network_nodes, network_edges
 
 
-def load_gva_network_graph(
-    gva_data: GenevaData,
+def load_tpg_network_graph(
+    tpg_data: TPGData,
     cfg: DataConfig,
     project_root: Path | None = None,
     name: str = "NetworkGraph",
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Wrapper around ``load_network_graph`` for the Geneva dataset."""
-    return load_network_graph(gva_data, cfg, build_gva_network_graph, project_root, name)
+    """Wrapper around ``load_network_graph`` for the TPG dataset."""
+    return load_network_graph(tpg_data, cfg, build_tpg_network_graph, project_root, name)
 
 
 def load_thats_network_graph(
@@ -140,21 +135,19 @@ def load_cmap_network_graph(
     return load_network_graph(cmap_data, cfg, build_cmap_network_graph, project_root, name)
 
 
-def build_gva_network_graph(
+def build_tpg_network_graph(
     locations: gpd.GeoDataFrame,
     overture: Overture,
-    stats_cfg: StatsInputs,
+    stats_cfg: StatsPaths,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Build the Geneva spatial contiguity graph enriched with census stats, POIs, and land uses.
+    """Build the TPG spatial contiguity graph enriched with census stats, POIs, and land uses.
 
     Disconnected island subsectors are connected to the mainland via a kNN graph.
     """
     utm_crs = locations.estimate_utm_crs()
     locations = locations.to_crs(utm_crs)
 
-    stats_cfg: GenevaStatsInputs
-
-    network_locations = add_geneva_population_job_statistics(locations, stats_cfg)
+    network_locations = add_tpg_population_job_statistics(locations, cast(TPGStatsPaths, stats_cfg))
     network_locations = overture.add_poi_counts(network_locations)
     network_locations = overture.add_land_uses(network_locations)
     network_locations = network_locations.set_index("loc_id")
@@ -179,7 +172,7 @@ def build_gva_network_graph(
     island_edges = island_edges.set_index(["source", "target"])
 
     nodes = nodes.to_crs(CRS)
-    edges: gpd.GeoDataFrame = pd.concat([edges, island_edges])
+    edges = cast(gpd.GeoDataFrame, pd.concat([edges, island_edges]))
     edges = edges.to_crs(CRS)
 
     return nodes, edges
@@ -188,15 +181,13 @@ def build_gva_network_graph(
 def build_thats_network_graph(
     locations: gpd.GeoDataFrame,
     overture: Overture,
-    stats_cfg: StatsInputs,
+    stats_cfg: StatsPaths,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Build the Toronto spatial contiguity graph enriched with census stats, POIs, and land uses."""
     utm_crs = locations.estimate_utm_crs()
     locations = locations.to_crs(utm_crs)
 
-    stats_cfg: THATSStatsInputs
-
-    network_locations = add_thats_population_job_statistics(locations, stats_cfg)
+    network_locations = add_thats_population_job_statistics(locations, cast(THATSStatsPaths, stats_cfg))
     network_locations = overture.add_poi_counts(network_locations)
     network_locations = overture.add_land_uses(network_locations)
     network_locations = network_locations.set_index("loc_id")
@@ -204,7 +195,7 @@ def build_thats_network_graph(
     nodes, edges = c2g.contiguity_graph(network_locations, set_point_nodes=True)
 
     nodes = nodes.to_crs(CRS)
-    edges: gpd.GeoDataFrame = pd.concat([edges])
+    edges = cast(gpd.GeoDataFrame, pd.concat([edges]))
     edges = edges.to_crs(CRS)
 
     return nodes, edges
@@ -213,15 +204,13 @@ def build_thats_network_graph(
 def build_cmap_network_graph(
     locations: gpd.GeoDataFrame,
     overture: Overture,
-    stats_cfg: StatsInputs,
+    stats_cfg: StatsPaths,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Build the CMAP spatial contiguity graph enriched with census stats, POIs, and land uses."""
     utm_crs = locations.estimate_utm_crs()
     locations = locations.to_crs(utm_crs)
 
-    stats_cfg: CMAPStatsInputs
-
-    network_locations = add_cmap_population_job_statistics(locations, stats_cfg)
+    network_locations = add_cmap_population_job_statistics(locations, cast(CMAPStatsPaths, stats_cfg))
     network_locations = overture.add_poi_counts(network_locations)
     network_locations = overture.add_land_uses(network_locations)
     network_locations = network_locations.set_index("loc_id")
@@ -229,7 +218,7 @@ def build_cmap_network_graph(
     nodes, edges = c2g.contiguity_graph(network_locations, set_point_nodes=True)
 
     nodes = nodes.to_crs(CRS)
-    edges: gpd.GeoDataFrame = pd.concat([edges])
+    edges = cast(gpd.GeoDataFrame, pd.concat([edges]))
     edges = edges.to_crs(CRS)
 
     return nodes, edges
@@ -327,8 +316,9 @@ def create_spatial_demographics(data: NetworkData) -> tuple[torch.Tensor, torch.
 
 
 def create_home_distances(data, network_nodes: gpd.GeoDataFrame) -> torch.Tensor:
-    """Build a distance-from-home tensor over all network nodes for every user. Uses Euclidian distance between
-    centroids.
+    """Build a distance-from-home tensor over all network nodes for every user.
+
+    Uses Euclidean distance between centroids.
 
     Returns:
         Float tensor of shape ``[n_users, n_nodes, 1]``.
@@ -363,9 +353,11 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 
 
 def create_individual_demographics(data: NetworkData) -> torch.Tensor:
-    """Create the demographic tensor from NetworkData, returns a float32 tensor of shape ``[n_users, n_demo_features]``.
-    Columns follow ``data.demographic_columns``. If there are none (e.g. Geneva), returns a (n_users, 1) dummy tensor
-    of ones."""
+    """Create the demographic float32 tensor of shape ``[n_users, n_demo_features]`` from NetworkData.
+
+    Columns follow ``data.demographic_columns``. If there are none (e.g. TPG), returns a (n_users, 1) dummy tensor
+    of ones.
+    """
     if len(data.demographic_columns) == 0:
         return torch.ones((len(data.user_ids), 1), dtype=torch.float32)
 
@@ -375,8 +367,7 @@ def create_individual_demographics(data: NetworkData) -> torch.Tensor:
 
 
 def create_group_ids(data: NetworkData) -> torch.Tensor:
-    """Create a tensor of numeric ``group_id``s matching the ``hh_id`` household IDs for each user in the dataset.
-    Shape ``[n_users]``"""
+    """Create a tensor of numeric ``group_id``s matching the ``hh_id`` household IDs, shape ``[n_users]``."""
     group_ids = data.users_df.select("hh_id").unique(maintain_order=True).with_row_index(name="group_id")
     user_groups = data.users_df.select("user_id", "hh_id").join(group_ids, on="hh_id", how="left")
     assert user_groups["user_id"].equals(data.user_ids)
@@ -419,115 +410,14 @@ def convert_to_torch(
     return network_graph, spatial_features, spatial_labels, demographics, distances, hh_ids
 
 
-def load_pyg_graphs(
-    network_data: NetworkData,
-    network_nodes: gpd.GeoDataFrame,
-    network_edges: gpd.GeoDataFrame,
-    cfg: DataConfig,
-    project_root: Path | None = None,
-    name: str = "Graphs",
-):
-    """Load a list of per-user PyG graphs from pickle cache, building and caching on first call."""
-    dataset_path = get_project_root(project_root) / cfg.paths.pyg_datasets / f"{name}.pickle"
-
-    if dataset_path.exists():
-        with open(dataset_path, "rb") as f:
-            return pickle.load(f)
-
-    graphs = convert_to_pyg_graphs(network_data, network_nodes, network_edges)
-
-    dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(dataset_path, "wb") as f:
-        pickle.dump(graphs, f)
-
-    return graphs
-
-
-def convert_to_pyg_graphs(
-    network_data: NetworkData,
-    network_nodes: gpd.GeoDataFrame,
-    network_edges: gpd.GeoDataFrame,
-):
-    """Build one annotated PyG graph per user in parallel using ``joblib``."""
-    visits = network_data.location_visits
-    home_locations = network_data.home_locations
-    work_locations = network_data.work_locations
-    edu_locations = network_data.edu_locations
-
-    def build_graph(user_id: str):
-        return build_user_pyg_graph(
-            user_id,
-            network_nodes,
-            network_edges,
-            visits,
-            home_locations,
-            work_locations,
-            edu_locations,
-        )
-
-    print("Starting graph generation... Total: ", len(network_data.user_ids))
-
-    parallel = Parallel(n_jobs=-1, verbose=1)
-    graphs = parallel(delayed(build_graph)(user_id) for user_id in network_data.user_ids)
-
-    print("Graph generation finished.")
-
-    return graphs
-
-
-def build_user_pyg_graph(
-    user_id: str,
-    network_nodes: gpd.GeoDataFrame,
-    network_edges: gpd.GeoDataFrame,
-    location_visits: pl.DataFrame,
-    home_locations: pl.DataFrame,
-    work_locations: pl.DataFrame,
-    edu_locations: pl.DataFrame,
-):
-    """Build a single user's PyG graph with user-specific indicators and positional encodings.
-
-    Applies random-walk PE (length 20) and Laplacian eigenvector PE (k=8) transforms.
-    """
-    indiv_nodes = add_user_cols(
-        user_id,
-        network_nodes,
-        location_visits,
-        home_locations,
-        work_locations,
-        edu_locations,
-    )
-    node_feature_cols = [col for col in indiv_nodes.columns if col not in COLS_EXCLUDED_FROM_FEATURES]
-
-    indiv_graph = c2g.gdf_to_pyg(
-        indiv_nodes,
-        network_edges,
-        node_feature_cols=node_feature_cols,
-        node_label_cols=["is_visited"],
-        edge_feature_cols=["weight"],
-        keep_geom=False,
-        device="cpu",
-    )
-
-    indiv_graph.user_id = user_id
-
-    if indiv_graph.num_nodes != len(network_nodes):
-        raise ValueError(f"Invalid graph number of nodes {len(indiv_nodes)} for {user_id=}.")
-
-    transforms = T.Compose([
-        T.AddRandomWalkPE(walk_length=20, attr_name=None),
-        T.AddLaplacianEigenvectorPE(k=8, attr_name=None),
-    ])
-
-    return transforms(indiv_graph)
-
-
 def load_data(cfg: DataConfig, project_root: Path | None = None):
+    """Load the survey, network graph and per-user tensors for the dataset named in ``cfg``."""
     if cfg.name == "THATS":
         cfg = cast(THATSDataConfig, cfg)
         return _load_thats_data(cfg, project_root)
-    elif cfg.name == "GenevaTPG":
-        cfg = cast(GenevaDataConfig, cfg)
-        return _load_geneva_data(cfg, project_root)
+    elif cfg.name == "TPG":
+        cfg = cast(TPGDataConfig, cfg)
+        return _load_tpg_data(cfg, project_root)
     elif cfg.name == "CMAP":
         cfg = cast(CMAPDataConfig, cfg)
         return _load_cmap_data(cfg, project_root)
@@ -542,9 +432,9 @@ def _load_thats_data(cfg: THATSDataConfig, project_root: Path | None = None):
     return data, network_nodes, network_edges
 
 
-def _load_geneva_data(cfg: GenevaDataConfig, project_root: Path | None = None):
-    data = GenevaData.load(cfg, project_root).with_filter("subsector")
-    network_nodes, network_edges = load_gva_network_graph(data, cfg, project_root)
+def _load_tpg_data(cfg: TPGDataConfig, project_root: Path | None = None):
+    data = TPGData.load(cfg, project_root).with_filter("subsector")
+    network_nodes, network_edges = load_tpg_network_graph(data, cfg, project_root)
 
     return data, network_nodes, network_edges
 

@@ -23,8 +23,8 @@ from activitygraphs.ml.training import PER_USER_STAGE
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = PROJECT_ROOT / "reports/figures/progress"
 
-RUNS = {"cmap": ("CMAP", 9), "geneva": ("GenevaTPG", 5)}
-PANEL_TITLES = {"cmap": "CMAP (Chicago)", "geneva": "Geneva"}
+RUNS = {"cmap": ("CMAP", 9), "tpg": ("TPG", 5)}
+PANEL_TITLES = {"cmap": "CMAP (Chicago)", "tpg": "TPG (Geneva)"}
 
 GNN = "GATSkip-8-res-hpe-dist"
 MLP = "MLP-dist"

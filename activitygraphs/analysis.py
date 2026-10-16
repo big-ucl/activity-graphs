@@ -1,4 +1,5 @@
-"""Analysis of experiment outputs: seed spreads, paired model comparisons, hop bands, distance bands, home-zone density
+"""Analysis of experiment outputs: seed spreads, paired model comparisons, hop bands, distance bands, home-zone density.
+
   - Distribution of result metrics between seeds/runs;
   - Comparison of models paired up by users;
   - Metrics per hop-band
@@ -24,7 +25,6 @@ from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
 from activitygraphs.ml.training import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
-
 
 # Baseline model representing node popularity.
 POPULARITY_MODEL = "VisitFrequency"
@@ -86,7 +86,7 @@ def load_run(report_data_path: str | Path, name: str, run: int | None = None) ->
 
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
-        name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
+        name: Dataset name used in filename, e.g. ``"TPG"``.
         run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
 
     Returns:
@@ -168,7 +168,7 @@ def load_report_run(
 
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
-        name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
+        name: Dataset name used in filename, e.g. ``"TPG"``.
         run: Run number of the main run.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
 
@@ -280,8 +280,9 @@ def paired_comparison(
 
 
 def _restrict_to_realised_size(per_user_results: pl.DataFrame, min_size: int) -> pl.DataFrame:
-    """Keep only the test users whose realised set (incl. home node) has at least ``min_size`` nodes. Rows that are not
-    per-user rows (the aggregate and score-vector stages) are not affected.
+    """Keep only the test users whose realised set (incl. home node) has at least ``min_size`` nodes.
+
+    Rows that are not per-user rows (the aggregate and score-vector stages) are not affected.
     """
     is_aggregate_stage = pl.col("stage") != PER_USER_STAGE
     is_realised_size_large_enough = pl.col(REALISED_SIZE_COLUMN) >= min_size
@@ -292,8 +293,8 @@ def _restrict_to_realised_size(per_user_results: pl.DataFrame, min_size: int) ->
 def _num_scored_dropped_users(aggregate_results: pl.DataFrame) -> tuple[int, int]:
     """Number of test users that were scored and dropped."""
     return (
-        int(aggregate_results[SCORED_USERS_COLUMN].drop_nulls().first()),
-        int(aggregate_results[DROPPED_USERS_COLUMN].drop_nulls().first()),
+        int(cast(int, aggregate_results[SCORED_USERS_COLUMN].drop_nulls().first())),
+        int(cast(int, aggregate_results[DROPPED_USERS_COLUMN].drop_nulls().first())),
     )
 
 
@@ -331,8 +332,10 @@ def realised_size_summary(per_user_results: pl.DataFrame, n_dropped: int) -> pl.
 
 
 def per_user_metric_summary(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
-    """Mean +- sd over training seeds of a per-user metric, one row per model (per-user counterpart of
-    ``aggregate_metrics``), for reading the headline on a subset of the test users (e.g. where``|RG_i| >= 3``).
+    """Mean +- sd over training seeds of a per-user metric, one row per model.
+
+    The per-user counterpart of ``aggregate_metrics``, for reading the headline on a subset of the test users (e.g.
+    where ``|RG_i| >= 3``).
 
     Returns:
         Frame of ``name, n_users, n_seeds, mean, sd``, sorted by mean (descending).
@@ -354,8 +357,10 @@ def per_user_metric_summary(per_user_results: pl.DataFrame, metric: str) -> pl.D
 
 
 def home_coverage_summary(per_user_results: pl.DataFrame) -> pl.DataFrame:
-    """Computes the proportion of test users with a home node that does not appear in the training set, one row for
-    ``home_seen_in_train=0`` and one row for ``home_seen_in_train=1``."""
+    """Computes the proportion of test users whose home node does not appear in the training set.
+
+    One row for ``home_seen_in_train=0`` and one row for ``home_seen_in_train=1``.
+    """
     users = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", "home_seen_in_train").unique()
 
     return (
@@ -374,8 +379,7 @@ def paired_comparison_by_home_coverage(
     n_bootstrap: int = 10_000,
     seed: int = 0,
 ) -> pl.DataFrame:
-    """Two separate runs of ``paired_comparison``, one on the test users with a home node seen in training and the other
-     on the test users with an unseen home.
+    """Run ``paired_comparison`` separately on test users with a home seen in training and with an unseen home.
 
     Returns:
         Frame of ``home_seen_in_train, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``.
@@ -397,8 +401,9 @@ def paired_comparison_by_home_coverage(
 
 
 def _average_metric_over_seeds(per_user: pl.DataFrame, metric: str) -> pl.DataFrame:
-    """Average the per-user metrics over that model's training seeds. Avoids inflating apparent sample size
-    of users (duplicate across seeds).
+    """Average the per-user metrics over that model's training seeds.
+
+    Avoids inflating the apparent sample size of users (duplicated across seeds).
 
     Returns:
         Frame of ``name, user_id, <metric>`` with one row per model and user.
@@ -458,8 +463,10 @@ def _diff_sd_per_seed(per_user_results: pl.DataFrame, model_name: str, reference
 
 
 def check_overfit_health(aggregate_results: pl.DataFrame, budget: int) -> pl.DataFrame:
-    """Checks to see if the models are capable of overfitting. Returns the best and final average recall on
-    the training set. If working, ``train_avg_recall@K`` should reach ~1.0.
+    """Checks to see if the models are capable of overfitting.
+
+    Returns the best and final average recall on the training set. If working, ``train_avg_recall@K`` should reach
+    ~1.0.
 
     Args:
         aggregate_results: Aggregate result frame of an ``overfit_health`` run.
@@ -488,8 +495,9 @@ def check_overfit_health(aggregate_results: pl.DataFrame, budget: int) -> pl.Dat
 
 
 def check_user_invariance(scores: np.ndarray, max_users: int = 200, seed: int = 0) -> float:
-    """Check if the model gives users different scores or not. Computes the pairwise Spearman correlation between test
-    users' score vectors.
+    """Check if the model gives users different scores or not.
+
+    Computes the pairwise Spearman correlation between test users' score vectors.
 
     If ~1.0, then the model ranks every user identically: collapsed to a single global ordering and is ignoring
     ``is_home``/distance/demographics. Computes at most ``max_users`` pairs, sampled from the test set.
@@ -508,8 +516,9 @@ def check_user_invariance(scores: np.ndarray, max_users: int = 200, seed: int = 
 
 
 def check_popularity_correlation(scores: np.ndarray, popularity: np.ndarray) -> float:
-    """Check if the models are just learning the global/per-home-zone popularity or if they are extracting signal
-    beyond that. Computes the Spearman between the user-averaged score vector and the training set popularity ranking.
+    """Check if the models are just learning the global/per-home-zone popularity or extract signal beyond it.
+
+    Computes the Spearman between the user-averaged score vector and the training set popularity ranking.
 
     If ~1.0, then the model outputs the popularity marginal. Can work for ``logit(p_n)`` or the scores from
     VisitFrequency since the two are monotonic transformations of the popularities.
@@ -544,8 +553,9 @@ def check_model_health(
     max_users: int = 200,
     seed: int = 0,
 ) -> pl.DataFrame:
-    """Performs three health checks to make sure each model are learning appropriately: 1) User invariance;
-    2) Popularity correlation; 3) Home node rank.
+    """Performs three health checks to make sure each model is learning appropriately.
+
+    The checks are 1) user invariance; 2) popularity correlation; 3) home node rank.
 
     Args:
         score_vectors: DataFrame of per-user score vectors from ``load_score_vectors``.
@@ -607,8 +617,10 @@ def check_model_health(
 
 
 def _score_matrix(score_vectors: pl.DataFrame, name: str, seed: int | None) -> np.ndarray:
-    """Extracts the ``[n_users, num_nodes]`` matrix of user scores output by one model ``name`` and seed ``seed`` pair.
-    Sorted in same order as the ``score_vectors`` frame."""
+    """Extracts the ``[n_users, num_nodes]`` matrix of user scores output by one model ``name`` and seed ``seed``.
+
+    Sorted in same order as the ``score_vectors`` frame.
+    """
     rows = score_vectors.filter(pl.col("name") == name)
     rows = rows.filter(pl.col("seed").is_null() if seed is None else pl.col("seed") == seed)
 
@@ -616,8 +628,10 @@ def _score_matrix(score_vectors: pl.DataFrame, name: str, seed: int | None) -> n
 
 
 def _row_ranks(scores: np.ndarray) -> np.ndarray:
-    """Computes the ranks of each row (corrected for ties) and z-scores them, so a dot product over nodes is a Spearman
-    correlation."""
+    """Computes the ranks of each row (corrected for ties) and z-scores them.
+
+    A dot product over nodes of the result is a Spearman correlation.
+    """
     row_ranks = rankdata(scores, axis=-1)
     centred_row_ranks = row_ranks - row_ranks.mean(axis=-1, keepdims=True)
 
@@ -651,6 +665,7 @@ def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFr
     Returns:
         Frame of ``name, stage, seed, user_id, band, contribution, n_band_pos``, one row per model, seed, user and band.
         ``contribution`` is how much the metric evaluated on only this band contributes to the overall metric value.
+
     Raises:
         KeyError: If ``metric`` has no per-positive value.
     """
@@ -1194,6 +1209,7 @@ def paired_comparison_by_k(
 
 def home_zone_summary(dataset: ActivityDataset, occupancy_thresholds: Sequence[int] | None = None) -> pl.DataFrame:
     """Density summary of a users-per-home-zone table (single row).
+
         - ``users_per_occupied_zone`` is the mean number of users per _occupied_ zone.
         - ``users_per_node`` is the mean number of users per zone.
         - ``p50/p90`` are the quantiles of the number of users per zone.
@@ -1203,7 +1219,6 @@ def home_zone_summary(dataset: ActivityDataset, occupancy_thresholds: Sequence[i
         One-row frame of ``n_users, n_nodes, n_occupied_zones, users_per_occupied_zone,
         users_per_node, p50, p90, max, share_users_ge_10/25/60``.
     """
-
     n_nodes = dataset.num_nodes
     home_nodes = dataset.spatial_features[:, :, dataset.is_home_spatial_idx].argmax(dim=1)
     occupancy_thresholds = (
@@ -1247,18 +1262,19 @@ def print_report(
     run: int | None = None,
     analysis: AnalysisConfig | None = None,
 ) -> None:
-    """Print results analyses for a run of the whole comparison experiment: aggregate results, paired comparison,
-    hop bands and distance bands.
+    """Print results analyses for a run of the whole comparison experiment.
+
+    Covers aggregate results, paired comparison, hop bands and distance bands.
 
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
-        name: Dataset name used in filename, e.g. ``"GenevaTPG"``.
+        name: Dataset name used in filename, e.g. ``"TPG"``.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
         distance_bands: Upper edges in km of the distance bands, for the band split and the within-band AUC.
         run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None.
     """
-    report_data_path: Path = Path(report_data_path)
+    report_data_path = Path(report_data_path)
     run = run if run is not None else _latest_run(report_data_path, name)
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
     aggregate, per_user = load_report_run(report_data_path, name, run, max_recall_k)

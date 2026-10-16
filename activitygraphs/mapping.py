@@ -48,6 +48,7 @@ def explore_locations_by_type(
     m: folium.Map | None = None,
     tiles: str = TILES,
 ) -> folium.Map:
+    """Plot locations on a folium map, coloured by location type."""
     check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
     if types is not None:
@@ -66,7 +67,7 @@ def explore_locations_by_type(
         m=m,
         color=colors,
         tiles=tiles,
-        tooltip=["loc_name", "loc_id", "type"],
+        tooltip=["loc_name", "loc_id", "type"],  # pyrefly: ignore[bad-argument-type]
         marker_kwds=marker_kwds,
         style_kwds=style_kwds,
         highlight_kwds=highlight_kwds,
@@ -80,6 +81,7 @@ def explore_locations_by_affluence(
     m: folium.Map | None = None,
     tiles: str = TILES,
 ) -> folium.Map:
+    """Plot locations on a folium map, sized and coloured by their number of visits."""
     check_schema(user_journeys_df, USER_JOURNEY_SCHEMA)
     check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
@@ -98,7 +100,7 @@ def explore_locations_by_affluence(
         tiles=tiles,
         scheme="NaturalBreaks",
         k=10,
-        tooltip=["loc_name", "num_visits"],
+        tooltip=["loc_name", "num_visits"],  # pyrefly: ignore[bad-argument-type]
         marker_kwds={"radius": 5},
     )
 
@@ -106,6 +108,7 @@ def explore_locations_by_affluence(
 def explore_pt_edges_by_mode(
     pt_edge_df: pl.DataFrame, locations_gdf: gpd.GeoDataFrame, m: folium.Map | None = None, tiles: str = TILES
 ):
+    """Plot public-transport edges on a folium map, coloured by mode."""
     pt_edge_df = check_schema(pt_edge_df, PT_EDGE_LIST_SCHEMA)
     locations_gdf = check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
@@ -141,7 +144,7 @@ def explore_pt_edges_by_mode(
         m=m,
         tiles=tiles,
         color=route_mode_colors,
-        tooltip=["route_mode", "travel_time_min", "route_attrs"],
+        tooltip=["route_mode", "travel_time_min", "route_attrs"],  # pyrefly: ignore[bad-argument-type]
         style_kwds={"weight": 3, "opacity": 0.5},
     )
 
@@ -153,6 +156,7 @@ def explore_walk_edges(
     tiles: str = TILES,
     walk_color: str = ROUTE_MODE_COLOUR_MAP[Mode.WALK],
 ) -> folium.Map:
+    """Plot walking edges on a folium map."""
     check_schema(walk_edge_df, WALK_EDGE_LIST_SCHEMA)
     check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
@@ -171,6 +175,7 @@ def explore_link_edges(
     tiles: str = TILES,
     link_color: str = ROUTE_MODE_COLOUR_MAP[Mode.OTHER],
 ) -> folium.Map:
+    """Plot link edges on a folium map in the link colour."""
     return explore_walk_edges(walk_edge_df, locations_gdf, m=m, tiles=tiles, walk_color=link_color)
 
 
@@ -181,6 +186,7 @@ def explore_transfer_edges(
     m: folium.Map | None = None,
     tiles: str = TILES,
 ) -> folium.Map:
+    """Plot transfer edges between distinct locations on a folium map."""
     check_schema(transfer_edge_df, TRANSFER_EDGE_LIST_SCHEMA)
     check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
@@ -212,6 +218,7 @@ def explore_transfer_edges(
 
 
 def add_legend_pane_to_map(m: folium.Map, legends: dict[str, tuple[str, dict[str, str]]]):
+    """Add a fixed legend pane with one section per entry of ``legends`` to the map."""
     legend_html = """
     <div style="
         position: fixed;
@@ -254,7 +261,7 @@ def add_legend_pane_to_map(m: folium.Map, legends: dict[str, tuple[str, dict[str
 
     legend_html += "</div>"
 
-    m.get_root().html.add_child(folium.Element(legend_html))
+    m.get_root().html.add_child(folium.Element(legend_html))  # pyrefly: ignore[missing-attribute]
 
 
 def _add_line_geometry_to_edge_df(edge_df: pl.DataFrame, locations_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -270,6 +277,8 @@ def _add_line_geometry_to_edge_df(edge_df: pl.DataFrame, locations_gdf: gpd.GeoD
     )
 
     points["geometry"] = points[["orig_geometry", "dest_geometry"]].apply(lambda x: LineString(x), axis=1)
-    edges = points.drop(columns=["orig_geometry", "dest_geometry"]).set_geometry("geometry", crs=CRS)
+    edges = gpd.GeoDataFrame(points.drop(columns=["orig_geometry", "dest_geometry"]), geometry="geometry", crs=CRS)
 
-    return edge_df.to_pandas().merge(edges, on=["orig_loc_id", "dest_loc_id"]).set_geometry("geometry", crs=CRS)
+    return gpd.GeoDataFrame(
+        edge_df.to_pandas().merge(edges, on=["orig_loc_id", "dest_loc_id"]), geometry="geometry", crs=CRS
+    )

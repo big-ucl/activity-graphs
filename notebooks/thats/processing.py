@@ -53,11 +53,11 @@ def _():
 @app.cell
 def _(
     ActivityDataset,
-    TorontoData,
+    THATSData,
     convert_to_torch,
     load_toronto_network_graph,
 ):
-    data = TorontoData.load(cfg.data, project_root).with_filter("subsector")
+    data = THATSData.load(cfg.data, project_root).with_filter("subsector")
 
     network_nodes, network_edges = load_toronto_network_graph(
         data, cfg.data, project_root

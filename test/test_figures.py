@@ -19,8 +19,8 @@ from activitygraphs.figures import (
     band_axis_labels,
     band_recall_chart,
     edges_within,
-    neighbours_of,
     map_figure,
+    neighbours_of,
     node_gdf,
     rank_percentile,
     rank_prominence,
@@ -214,7 +214,7 @@ def test_map_figure_keeps_the_map_area_whatever_keys_it_reserves(network_nodes):
     plain = map_figure(nodes, width=7.0)
     keyed = map_figure(nodes, width=7.0, legend_width=1.5, colour_bar_height=1.0)
 
-    for fig, ax, cax in (plain, keyed):
+    for fig, ax, _cax in (plain, keyed):
         assert ax.get_position().width * fig.get_figwidth() == pytest.approx(width)
         assert ax.get_position().height * fig.get_figheight() == pytest.approx(height)
 

@@ -3,6 +3,7 @@
 import abc
 from collections.abc import Iterable
 from typing import Self
+from urllib.parse import quote
 
 import geopandas as gpd
 import numpy as np
@@ -119,6 +120,7 @@ class OSRMRouter(Router):
         self.precision = precision
 
     def travel_times(self, edge_coords_df: pl.DataFrame):
+        """Return the OSRM travel time of each edge in ``edge_coords_df``."""
         check_schema(edge_coords_df, EDGE_COORDS_SCHEMA)
 
         locations = (
@@ -159,7 +161,7 @@ class OSRMRouter(Router):
             raise ValueError(f"Too many coordinates: {len(coordinates)}, maximum: {self.max_coordinates}")
 
         polyline = encode_coordinates(coordinates, self.precision)
-        polyline = requests.utils.quote(polyline, safe="")
+        polyline = quote(polyline, safe="")
         full_url = f"{self.url}/table/v1/{self.profile}/polyline({polyline})"
         response = requests.get(full_url)
 
@@ -184,6 +186,7 @@ class CachedRouter(Router):
         self.cache: dict[tuple[str, str], float] = {}
 
     def travel_times(self, edge_coords_df: pl.DataFrame) -> pl.DataFrame:
+        """Return the travel time of each edge, querying the wrapped router only for uncached edges."""
         check_schema(edge_coords_df, EDGE_COORDS_SCHEMA)
 
         cache_keys = pl.Series(self.cache.keys(), dtype=pl.List(pl.String)).implode()

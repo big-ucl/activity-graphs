@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 
 
 @dataclass
-class GTFSInputs:
+class GTFSPaths:
     """File names for a GTFS feed directory."""
 
     directory: str
@@ -29,7 +29,7 @@ class GTFSInputs:
 
 
 @dataclass
-class OvertureInputs:
+class OverturePaths:
     """File names for Overture Maps land-use and place data."""
 
     directory: str
@@ -38,7 +38,7 @@ class OvertureInputs:
 
 
 @dataclass
-class GenevaBoundaryInputs:
+class TPGBoundaryPaths:
     """File names for Geneva boundary shapefiles (subsectors, postcodes, boundaries)."""
 
     directory: str
@@ -51,7 +51,7 @@ class GenevaBoundaryInputs:
 
 
 @dataclass
-class THATSBoundaryInputs:
+class THATSBoundaryPaths:
     """File names for Toronto THATS boundary shapefiles (CMA, census tracts, dissemination areas)."""
 
     directory: str
@@ -62,7 +62,7 @@ class THATSBoundaryInputs:
 
 
 @dataclass
-class CMAPBoundaryInputs:
+class CMAPBoundaryPaths:
     """File names for CMAP MyDailyTravel boundary shapefiles (census tracts)."""
 
     directory: str
@@ -70,21 +70,21 @@ class CMAPBoundaryInputs:
 
 
 @dataclass
-class StatsInputs:
+class StatsPaths:
     """Base class for census statistics file config."""
 
     directory: str
 
 
 @dataclass
-class GenevaStatsInputs(StatsInputs):
+class TPGStatsPaths(StatsPaths):
     """Census statistics file config for Geneva (square grid of job and population data)."""
 
     file: str
 
 
 @dataclass
-class THATSStatsInputs(StatsInputs):
+class THATSStatsPaths(StatsPaths):
     """Census statistics file config for THATS (separate population and jobs CSVs)."""
 
     population: str
@@ -92,7 +92,7 @@ class THATSStatsInputs(StatsInputs):
 
 
 @dataclass
-class CMAPStatsInputs(StatsInputs):
+class CMAPStatsPaths(StatsPaths):
     """Census statistics file config for CMAP MyDailyTravel survey."""
 
     population: str
@@ -105,37 +105,27 @@ class CMAPStatsInputs(StatsInputs):
 
 
 @dataclass
-class Inputs:
+class SurveyPaths:
     """Base class for dataset raw-file inputs."""
 
     raw_journeys: str
-    overture: OvertureInputs
-    statistics: StatsInputs
+    overture: OverturePaths
+    statistics: StatsPaths
 
 
 @dataclass
-class LTDSInputs(Inputs):
-    """Raw file inputs for the LTDS survey."""
+class TPGPaths(SurveyPaths):
+    """Raw file paths for the TPG survey."""
 
-    raw_household: str
-    raw_person: str
-    raw_trip: str
-    raw_stage: str
+    boundaries: TPGBoundaryPaths
+    gtfs: GTFSPaths
 
 
 @dataclass
-class GenevaInputs(Inputs):
-    """Raw file inputs for the Geneva MTMC survey."""
-
-    boundaries: GenevaBoundaryInputs
-    gtfs: GTFSInputs
-
-
-@dataclass
-class THATSInputs(Inputs):
+class THATSPaths(SurveyPaths):
     """Raw file inputs for the Toronto THATS survey."""
 
-    boundaries: THATSBoundaryInputs
+    boundaries: THATSBoundaryPaths
 
     raw_person: str
     raw_household: str
@@ -143,10 +133,10 @@ class THATSInputs(Inputs):
 
 
 @dataclass
-class CMAPInputs(Inputs):
+class CMAPPaths(SurveyPaths):
     """Raw file inputs for the CMAP MyDailyTravel survey."""
 
-    boundaries: CMAPBoundaryInputs
+    boundaries: CMAPBoundaryPaths
 
     raw_person: str
     raw_household: str
@@ -180,37 +170,30 @@ class DataConfig:
     """Base dataset configuration: name, inputs, paths, and the distance bands the region is split into."""
 
     name: str
-    inputs: Inputs
+    inputs: SurveyPaths
     paths: DataPaths
     distance_bands: list[float]
 
 
 @dataclass
-class LTDSDataConfig(DataConfig):
-    """Dataset config for the LTDS survey."""
+class TPGDataConfig(DataConfig):
+    """Dataset config for the TPG survey."""
 
-    inputs: LTDSInputs
-
-
-@dataclass
-class GenevaDataConfig(DataConfig):
-    """Dataset config for the Geneva MTMC survey."""
-
-    inputs: GenevaInputs
+    inputs: TPGPaths  # pyrefly: ignore[bad-override-mutable-attribute]
 
 
 @dataclass
 class THATSDataConfig(DataConfig):
     """Dataset config for the Toronto THATS survey."""
 
-    inputs: THATSInputs
+    inputs: THATSPaths  # pyrefly: ignore[bad-override-mutable-attribute]
 
 
 @dataclass
 class CMAPDataConfig(DataConfig):
     """Dataset config for the Chicago CMAP MyDailyTravel 2022 survey."""
 
-    inputs: CMAPInputs
+    inputs: CMAPPaths  # pyrefly: ignore[bad-override-mutable-attribute]
 
 
 # ===================================================
@@ -273,7 +256,7 @@ class TrainConfig:
 
 @dataclass
 class AnalysisConfig:
-    """Result analysis configuration"""
+    """Result analysis configuration."""
 
     reference_model: str
     main_metric: str
@@ -294,24 +277,21 @@ class Config:
     analysis: AnalysisConfig
 
 
-# cs = ConfigStore.instance()
-# cs.store(name="ltds_config", node=Config)
-
-VALID_CONFIGS = Literal["ltds", "geneva", "thats", "cmap"]
+VALID_CONFIGS = Literal["tpg", "thats", "cmap"]
 
 
-def load_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "geneva") -> Config:
+def load_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -> Config:
     """Load Hydra config for the given dataset.
 
     Args:
         project_root: Repo root; the config dir is resolved as ``project_root/activitygraphs/conf``.
         verbose: Print the resolved YAML to stdout.
-        data: Dataset name, one of ``ltds``, ``geneva``, or ``thats``.
+        data: Dataset name, one of ``cmap``, ``thats``, or ``tpg``.
 
     Returns:
         Populated OmegaConf ``Config`` object.
     """
-    _config_dir = str(project_root / "activitygraphs/conf")
+    _config_dir = str((project_root / "activitygraphs/conf").resolve())
 
     with initialize_config_dir(version_base=None, config_dir=_config_dir):
         cfg = compose(config_name="config", overrides=[f"data={data}"])
@@ -319,4 +299,4 @@ def load_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "geneva"
     if verbose:
         print(f"Loaded config file \n{OmegaConf.to_yaml(cfg)}")
 
-    return cfg
+    return cast(Config, cfg)

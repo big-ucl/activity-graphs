@@ -1,9 +1,7 @@
 """Schema validation, geometry helpers, and I/O utilities."""
 
-from abc import ABC
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from pathlib import Path
-from typing import Hashable, TypeVar
 
 import geopandas as gpd
 import pandas as pd
@@ -14,17 +12,16 @@ from activitygraphs.base import CRS, EDGE_LIST_SCHEMA, LOCATIONS_SCHEMA
 from activitygraphs.config import DataConfig
 
 PandasSchema = Mapping[str, str]
-TDataFrame = TypeVar("TDataFrame", gpd.GeoDataFrame, pl.DataFrame)
-TSchema = TypeVar("TSchema", pl.Schema, PandasSchema)
 
 
 def get_project_root(project_root: Path | None = None) -> Path:
     """Return ``project_root`` if provided, otherwise ``Path(".")``."""
-    project_root: Path = project_root if project_root is not None else Path(".")
-    return project_root
+    return project_root if project_root is not None else Path(".")
 
 
-def check_schema(df: TDataFrame, schema: TSchema, ignore_extra_cols: bool = False) -> TDataFrame:
+def check_schema[TDataFrame: (gpd.GeoDataFrame, pl.DataFrame), TSchema: (pl.Schema, PandasSchema)](
+    df: TDataFrame, schema: TSchema, ignore_extra_cols: bool = False
+) -> TDataFrame:
     """Checks that a DataFrame matches provided Schema.
 
     Args:
@@ -38,7 +35,6 @@ def check_schema(df: TDataFrame, schema: TSchema, ignore_extra_cols: bool = Fals
     Returns:
         pl.DataFrame: the valid DataFrame
     """
-
     if isinstance(df, pl.DataFrame) and isinstance(schema, pl.Schema):
         return check_polars_schema(df, schema, ignore_extra_cols=ignore_extra_cols)
 
@@ -81,9 +77,10 @@ def check_geopandas_schema(gdf: gpd.GeoDataFrame, schema: PandasSchema, ignore_e
 
         raise ValueError(f"Columns do not match schema. \nGot: {sorted(schema.keys())}\nMissing columns: {missing}")
 
-    # noinspection PyTypeChecker
     mismatches = [
-        (col, dtype, schema[col]) for col, dtype in gdf.dtypes.items() if col in schema and dtypes_match(dtype, schema)
+        (col, dtype, schema[col])
+        for col, dtype in gdf.dtypes.items()
+        if col in schema and not dtypes_match(dtype, schema[col])
     ]
     if mismatches:
         errors = [f"\n\t`{col}`: got {dtype}, expected {expected}" for col, dtype, expected in mismatches]
@@ -105,8 +102,7 @@ def check_geometry_shapes(geometry: gpd.GeoSeries, *shapes: str) -> gpd.GeoSerie
 
 
 def check_shape(tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
-    """
-    Checks that a Tensor has a given shape, ignores size of dimension if size is set to -1.
+    """Checks that a Tensor has a given shape, ignores size of dimension if size is set to -1.
 
     Args:
         tensor (torch.Tensor): the tensor
@@ -121,7 +117,7 @@ def check_shape(tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
     if len(tensor.shape) != len(shape):
         raise ValueError(f"Tensor has invalid number of dims, got shape {tensor.shape}, expected {shape}")
 
-    for i, (t, s) in enumerate(zip(tensor.shape, shape)):
+    for i, (t, s) in enumerate(zip(tensor.shape, shape, strict=True)):
         if t != s and s != -1:
             raise ValueError(
                 f"Tensor has invalid shape along dimension {i}, got shape {tensor.shape}, expected {shape}"
@@ -145,7 +141,7 @@ def convert_locations_to_point_geometry(locations_gdf: gpd.GeoDataFrame) -> gpd.
     return locations_gdf
 
 
-def extract_unique_loc_ids(*edge_dfs: TDataFrame) -> list[str]:
+def extract_unique_loc_ids[TDataFrame: (gpd.GeoDataFrame, pl.DataFrame)](*edge_dfs: TDataFrame) -> list[str]:
     """Collect all unique location IDs from the ``orig_loc_id`` and ``dest_loc_id`` columns of one or more edge DataFrames."""
     loc_dfs = []
     for edge_df in edge_dfs:
@@ -172,7 +168,7 @@ def convert_excel_to_parquet(data_path: Path, *files: Path) -> list[Path]:
     return new_files
 
 
-def read_from_parquet(path: Path, schema: dict = None) -> pl.DataFrame:
+def read_from_parquet(path: Path, schema: dict | None = None) -> pl.DataFrame:
     """Read a parquet file into a Polars DataFrame with optional schema overrides."""
     schema = {} if schema is None else schema
 
@@ -197,12 +193,12 @@ def add_lon_lat_from_centroid(
     return gdf.drop(columns=["centroid"])
 
 
-class DataFrameStore(ABC):
+class DataFrameStore:
     """Mixin that provides a standard cache-directory layout for concrete ``NetworkData`` subclasses."""
 
     @classmethod
     def _dirs(cls, cfg: DataConfig, project_root: Path | None = None, name: str | None = None) -> tuple[Path, Path]:
-        project_root: Path = project_root if project_root is not None else Path(".")
+        project_root = project_root if project_root is not None else Path(".")
         suffix = "" if name is None else f"-{name}"
         data_dir = project_root / cfg.paths.processed / f"{cls.__name__}{suffix}"
 
@@ -226,9 +222,11 @@ def invert_mapping(mapping: dict[Hashable, list[Hashable]]) -> dict[Hashable, Ha
 def bands_to_midpoint_map(
     bands: dict[Hashable, tuple[float, float]], round_mid: bool = True
 ) -> dict[Hashable, float | int]:
-    """Converts a map of band labels to their low and high points (e.g. income bands) to a map of band labels to their midpoints.
-    Rounds to nearest integer if ``round_mid`` is ``True``."""
-    midpoints = {band: (low + high) / 2 for band, (low, high) in bands.items()}
+    """Converts a map of band labels to their low and high points (e.g. income bands) to band midpoints.
+
+    Rounds to nearest integer if ``round_mid`` is ``True``.
+    """
+    midpoints: dict[Hashable, float | int] = {band: (low + high) / 2 for band, (low, high) in bands.items()}
     if round_mid:
         midpoints = {k: round(v) for k, v in midpoints.items()}
 

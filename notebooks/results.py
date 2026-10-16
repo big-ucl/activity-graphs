@@ -33,7 +33,7 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    dataset_dropdown = mo.ui.dropdown(["cmap", "geneva"], value="cmap", label="Dataset:")
+    dataset_dropdown = mo.ui.dropdown(["cmap", "tpg"], value="cmap", label="Dataset:")
     dataset_dropdown
     return (dataset_dropdown,)
 

@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - data: geneva
+  - data: tpg
 
 paths:
   reports: reports

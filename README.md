@@ -17,8 +17,8 @@ to setup the project and install dependencies.
 ## Usage
 
 ```bash
-uv run activity-graphs                       # full comparison run, default dataset (Geneva)
-uv run activity-graphs data=geneva           # switch dataset (geneva, thats)
+uv run activity-graphs                       # full comparison run, default dataset (TPG)
+uv run activity-graphs data=cmap             # switch dataset (tpg, cmap, thats)
 
 uv run activity-graphs train.fast_dev_run=true      # single batch test run
 uv run activity-graphs train.loss.type=bce          # loss: bpr (default) or bce
@@ -34,7 +34,7 @@ Once a run has finished, report its results:
 
 ```bash
 uv run report-results                                     # analyse the latest run of the default dataset
-uv run report-results data=geneva analysis.run=3          # a specific dataset and run number
+uv run report-results data=tpg analysis.run=3             # a specific dataset and run number
 uv run report-results analysis.reference_model=MLP-dist   # change reference model for comparisons
 ```
 
@@ -70,7 +70,7 @@ activitygraphs/
   analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
   network.py               # Abstraction for travel data (NetworkData)
   dataprocessing.py        # Graph construction and pytorch tensor building
-  data/                    # Per-dataset loaders (geneva, toronto, ...)
+  data/                    # Per-dataset loaders (tpg, thats, cmap)
   conf/                    # Hydra configs (root + per-dataset)
   ml/                      # PyG dataset, Lightning module, training, models, losses, metrics, baselines
 test/                      # pytest suite

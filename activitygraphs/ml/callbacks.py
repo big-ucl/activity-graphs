@@ -1,7 +1,9 @@
+"""Lightning callbacks for debugging overfit runs and collecting per-epoch metrics."""
+
 import lightning as L
 import torch
-import torch_geometric as pyg
 
+from activitygraphs.ml.batch import UserBatch
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 
 
@@ -9,8 +11,9 @@ class OverfitDebugCallback(L.Callback):
     """Prints stats on the first batch and output stats on the last epoch's first batch."""
 
     def on_train_batch_start(
-        self, trainer: L.Trainer, pl_module: L.LightningModule, batch: pyg.data.Batch, batch_idx: int
+        self, trainer: L.Trainer, pl_module: L.LightningModule, batch: UserBatch, batch_idx: int
     ) -> None:
+        """Print input statistics on the first epoch and output statistics on the last."""
         if batch_idx != 0:
             return
 
@@ -46,6 +49,7 @@ class EpochMetricsCollector(L.Callback):
         self.rows: list[dict] = []
 
     def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Record the epoch's train and validation metrics as one row."""
         if trainer.sanity_checking:
             return
 
@@ -56,6 +60,7 @@ class EpochMetricsCollector(L.Callback):
             self.rows.append({"stage": "fit", "epoch": trainer.current_epoch, **metrics})
 
     def on_test_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Record the test metrics as one row."""
         # Collect on `on_test_end`, not `on_test_epoch_end`: callback hooks run before the
         # LightningModule's `on_test_epoch_end`, which is where the Retrieval* ranking metrics are
         # logged. Reading at epoch-end would capture only the per-batch test_bce.

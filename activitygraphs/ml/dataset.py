@@ -14,20 +14,13 @@ import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as T
 from omegaconf import OmegaConf
-from sklearn.model_selection import train_test_split, GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
-from torch_geometric.data.data import BaseData
-from tqdm import tqdm
 
 from activitygraphs.config import Config
 from activitygraphs.dataprocessing import SPATIAL_FEATURE_NAMES, convert_to_torch, load_data
 from activitygraphs.ml.metrics import compute_home_hop_distance
 from activitygraphs.utils import get_project_root
-
-# Full-`x` column index of `is_home` in the legacy GenevaDataset pickles only.
-# The main ActivityDataset path derives this from the data (see ActivityDataset.is_home_col_idx).
-_LEGACY_IS_HOME_COL_IDX = 37
-
 
 type Fingerprint = dict
 
@@ -35,34 +28,6 @@ type Fingerprint = dict
 def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
     """Boolean mask over the rows of ``x``, ``True`` at each user's own home node."""
     return (x[..., is_home_idx] > 0.0).bool()
-
-
-class GenevaDataset(pyg.data.InMemoryDataset):
-    """Legacy in-memory dataset: wraps a list of per-user PyG graphs loaded from a pickle file."""
-
-    def __init__(self, dataset_path: Path):
-        super().__init__()
-
-        print("Loading dataset...")
-
-        with open(dataset_path, "rb") as f:
-            graphs = pickle.load(f)
-
-        print(f"Loaded {len(graphs)} graphs. Applying transforms...")
-
-        self._graphs = graphs
-
-        print("Transforms applied.")
-
-    @property
-    def num_classes(self):
-        return 1  # self._infer_num_classes(self._graphs[0].y)
-
-    def len(self) -> int:
-        return len(self._graphs)
-
-    def get(self, idx: int):
-        return self._graphs[idx]
 
 
 class ActivityDataset(pyg.data.Dataset):
@@ -103,7 +68,7 @@ class ActivityDataset(pyg.data.Dataset):
         self._group_ids_in = group_ids
 
         super().__init__(root, transform, pre_transform, pre_filter)
-        del (
+        del (  # pyrefly: ignore[unsupported-delete]
             self._network_graph_in,
             self._spatial_features_in,
             self._spatial_labels_in,
@@ -126,6 +91,13 @@ class ActivityDataset(pyg.data.Dataset):
             num_bad = int((home_counts != 1).sum())
             raise ValueError(f"{num_bad} users do not have exactly one home node. Expected one per user.")
 
+        if (
+            self.network_graph.x is None
+            or self.network_graph.edge_index is None
+            or self.network_graph.edge_attr is None
+        ):
+            raise ValueError("Network graph must have node features, an edge index and edge features.")
+
         # Check that the graph actually has nodes
         num_nodes = self.network_graph.num_nodes
         if num_nodes is None:
@@ -136,9 +108,24 @@ class ActivityDataset(pyg.data.Dataset):
         self._is_scaled: bool = False
 
     @property
+    def network_x(self) -> torch.Tensor:
+        """Network node features, ``[num_nodes, num_network_features]``."""
+        return cast(torch.Tensor, self.network_graph.x)
+
+    @property
+    def network_edge_index(self) -> torch.Tensor:
+        """Network edge list, ``[2, num_edges]``."""
+        return cast(torch.Tensor, self.network_graph.edge_index)
+
+    @property
+    def network_edge_attr(self) -> torch.Tensor:
+        """Network edge features, ``[num_edges, num_edge_features]``."""
+        return cast(torch.Tensor, self.network_graph.edge_attr)
+
+    @property
     def num_network_features(self) -> int:
         """Number of network node-feature columns (those preceding the spatial block in ``x``)."""
-        return self.network_graph.x.shape[1]
+        return self.network_x.shape[1]
 
     @property
     def is_home_spatial_idx(self) -> int:
@@ -153,7 +140,7 @@ class ActivityDataset(pyg.data.Dataset):
     @cached_property
     def home_hop_distance(self) -> np.ndarray:
         """All-pairs hop distance matrix (over spatial adjacency graph) ``[num_nodes, num_nodes]`` for the network graph."""
-        return compute_home_hop_distance(self.network_graph.edge_index, self.num_nodes)
+        return compute_home_hop_distance(self.network_edge_index, self.num_nodes)
 
     @cached_property
     def median_realised_size(self) -> int:
@@ -163,16 +150,20 @@ class ActivityDataset(pyg.data.Dataset):
 
     @property
     def raw_file_names(self) -> list[str]:
+        """No raw files: the dataset is built from in-memory tensors."""
         return []
 
     @property
     def processed_file_names(self) -> list[str]:
+        """Names of the cached tensor files."""
         return self.PROCESSED_FILE_NAMES
 
     def download(self) -> None:
+        """Do nothing: there is nothing to download."""
         pass
 
     def process(self):
+        """Apply the pre-transform to the network graph and write all tensors to the cache."""
         graph = self._network_graph_in
         sf = self._spatial_features_in
         sl = self._spatial_labels_in
@@ -216,14 +207,16 @@ class ActivityDataset(pyg.data.Dataset):
         torch.save(group_ids, processed_dir / "group_ids.pt")
 
     def len(self) -> int:
+        """Return the number of users."""
         return self.num_individuals
 
-    def get(self, i: int) -> pyg.data.Data:
-        if not 0 <= i < self.num_individuals:
-            raise IndexError(f"Index {i} out of range for {self.num_individuals} individuals.")
+    def get(self, idx: int) -> pyg.data.Data:
+        """Return user ``idx``'s graph: shared network features joined with the user's features and labels."""
+        if not 0 <= idx < self.num_individuals:
+            raise IndexError(f"Index {idx} out of range for {self.num_individuals} individuals.")
 
-        network_x = self.network_graph.x
-        spatial_x = self.spatial_features[i]
+        network_x = self.network_x
+        spatial_x = self.spatial_features[idx]
 
         # Cast spatial features to same type as network graph features if mismatch
         if spatial_x.dtype != network_x.dtype:
@@ -231,22 +224,22 @@ class ActivityDataset(pyg.data.Dataset):
 
         # Create new individual-annotated network graph
         full_x = torch.cat([network_x, spatial_x], dim=1)
-        y = self.spatial_labels[i]
-        graph_x = self.demographics[i]
-        edge_index = self.network_graph.edge_index
-        edge_attr = self.network_graph.edge_attr
+        y = self.spatial_labels[idx]
+        graph_x = self.demographics[idx]
+        edge_index = self.network_edge_index
+        edge_attr = self.network_edge_attr
 
         data = pyg.data.Data(x=full_x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
         # Unsqueeze so batching works
         data.graph_x = graph_x.unsqueeze(0)
-        data.user_id = torch.tensor([i], dtype=torch.long)
+        data.user_id = torch.tensor([idx], dtype=torch.long)
 
         # Per-user distance-from-home
-        data.distances = self.distances[i].to(full_x.dtype)
+        data.distances = self.distances[idx].to(full_x.dtype)
 
         # Carry over any extra attributes from the network graph (pos, etc.)
-        for key, value in self.network_graph:
+        for key, value in self.network_graph:  # pyrefly: ignore[not-iterable]
             if key in ("x", "edge_index", "edge_attr", "y"):
                 continue
 
@@ -268,11 +261,13 @@ class FittedScalers:
     fingerprint: Fingerprint
 
     def save(self, path: Path) -> None:
+        """Pickle the scalers to ``path``."""
         with path.open("wb") as f:
             pickle.dump(self, f)
 
     @staticmethod
     def load(path: Path) -> "FittedScalers":
+        """Load scalers pickled by ``save``."""
         with path.open("rb") as f:
             return pickle.load(f)
 
@@ -351,7 +346,7 @@ def load_or_build_dataset(
 
         return ActivityDataset(
             str(dataset_path),
-            network_graph,
+            cast(pyg.data.Data, network_graph),
             spatial_features,
             spatial_labels,
             demographics,
@@ -433,11 +428,11 @@ def fit_scalers(
     """
     # Network node features: no need to separate between train and test, the network is the same.
     network_scaler = StandardScaler()
-    network_scaler.fit(dataset.network_graph.x.numpy())
+    network_scaler.fit(dataset.network_x.numpy())
 
     # Network edge attributes: same as above
     edge_scaler = StandardScaler()
-    edge_scaler.fit(dataset.network_graph.edge_attr.numpy())
+    edge_scaler.fit(dataset.network_edge_attr.numpy())
 
     # Spatial features: individual-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
     spatial_train = dataset.spatial_features[train_idx]
@@ -477,10 +472,10 @@ def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
     if dataset._is_scaled:
         raise RuntimeError("apply_scalers called twice on the same ActivityDataset")
 
-    x = dataset.network_graph.x.numpy()
+    x = dataset.network_x.numpy()
     dataset.network_graph.x = torch.from_numpy(scalers.network_features.transform(x)).float()
 
-    ea = dataset.network_graph.edge_attr.numpy()
+    ea = dataset.network_edge_attr.numpy()
     dataset.network_graph.edge_attr = torch.from_numpy(scalers.network_edges.transform(ea)).float()
 
     if scalers.spatial is not None:
@@ -520,77 +515,3 @@ def dataset_fingerprint(cfg: Config, dataset: ActivityDataset) -> Fingerprint:
         "n_groups": len(dataset.group_ids.unique()),
         "data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest(),
     }
-
-
-def load_gva_dataset(
-    cfg: Config, test_size: float, seed: int, project_root: Path | None = None, graphs_name: str = "Graphs"
-) -> tuple[GenevaDataset, GenevaDataset]:
-    project_root: Path = get_project_root(project_root)
-
-    pyg_path = project_root / cfg.data.paths.pyg_datasets
-    graphs_path = pyg_path / f"{graphs_name}.pickle"
-
-    train_path = pyg_path / "train.pickle"
-    test_path = pyg_path / "test.pickle"
-
-    if train_path.exists() and test_path.exists():
-        print(f"Loading {pyg_path} dataset...")
-
-        with open(train_path, "rb") as f:
-            train_dataset: GenevaDataset = pickle.load(f)
-
-        with open(test_path, "rb") as f:
-            test_dataset: GenevaDataset = pickle.load(f)
-
-        return train_dataset, test_dataset
-
-    print(f"Loading {graphs_path} graph list and building dataset...")
-
-    dataset = GenevaDataset(graphs_path)
-    train_indices, test_indices = train_test_split(range(len(dataset)), test_size=test_size, random_state=seed)
-
-    # noinspection PyTypeChecker
-    train_dataset: GenevaDataset = dataset[train_indices]
-    # noinspection PyTypeChecker
-    test_dataset: GenevaDataset = dataset[test_indices]
-
-    print(f"Train size: {len(train_dataset)}. Splitting dataset: ")
-
-    num_features = train_dataset[0].x.shape[1]
-    non_home_cols = [i for i in range(num_features) if i != _LEGACY_IS_HOME_COL_IDX]
-
-    train_x = torch.cat([g.x[:, non_home_cols] for g in train_dataset]).numpy()
-    train_edge_attr = torch.cat([g.edge_attr for g in train_dataset]).numpy()
-
-    x_scaler = StandardScaler()
-    x_scaler.fit(train_x)
-
-    e_scaler = StandardScaler()
-    e_scaler.fit(train_edge_attr)
-
-    print("Fitted scalers. Processing dataset:")
-
-    # Transform both splits
-    for g in tqdm(train_dataset):
-        replace_scaled_features(g, e_scaler, x_scaler, non_home_cols)
-
-    for g in tqdm(test_dataset):
-        replace_scaled_features(g, e_scaler, x_scaler, non_home_cols)
-
-    print("Writing processed datasets")
-
-    with open(train_path, "wb") as f:
-        pickle.dump(train_dataset, f)
-
-    with open(test_path, "wb") as f:
-        pickle.dump(test_dataset, f)
-
-    print("Done.")
-
-    return train_dataset, test_dataset
-
-
-def replace_scaled_features(g: BaseData, e_scaler: StandardScaler, x_scaler: StandardScaler, non_home_cols: list[int]):
-    """Scale ``g.x`` (excluding ``is_home``) and ``g.edge_attr`` in-place using the provided scalers."""
-    g.x[:, non_home_cols] = torch.tensor(x_scaler.transform(g.x[:, non_home_cols].numpy()), dtype=torch.float)
-    g.edge_attr = torch.tensor(e_scaler.transform(g.edge_attr.numpy()), dtype=torch.float)

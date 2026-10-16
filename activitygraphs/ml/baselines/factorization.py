@@ -51,6 +51,10 @@ class HomeZoneMFBaseline(torch.nn.Module):
         best_epoch: Epoch whose factors are kept.
     """
 
+    scores: torch.Tensor
+    val_avg_recall: float
+    best_epoch: int
+
     def __init__(
         self,
         num_nodes: int,
@@ -75,13 +79,12 @@ class HomeZoneMFBaseline(torch.nn.Module):
         self.weight_decay = weight_decay
         self.eval_every = eval_every
         self.seed = seed
-        self.scores = None
-        self.val_avg_recall = None
-        self.best_epoch = None
 
     def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
-        """Fit the factors by BPR on the home-pooled training visit counts, keeping the epoch whose validation
-        ``avg_recall`` is highest."""
+        """Fit the factors by BPR on the home-pooled training visit counts, keeping the best validation epoch.
+
+        The best epoch is the one whose validation ``avg_recall`` is highest.
+        """
         train = extract_per_user_tensors(train_loader, self.is_home_idx)
         val = extract_per_user_tensors(val_loader, self.is_home_idx)
 
@@ -135,6 +138,9 @@ class HomeZoneMFBaseline(torch.nn.Module):
 
         return float(avg_recall.mean())
 
-    def forward(self, x, edge_index, edge_attr=None, batch=None):
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the fitted home-by-node score of each node, shape ``(num_nodes, 1)``."""
         homes = graph_home_indices(x, batch, self.is_home_idx)
         return self.scores.to(x.device)[homes, graph_node_indices(x, batch)].unsqueeze(1)

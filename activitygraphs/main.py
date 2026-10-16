@@ -14,7 +14,7 @@ from activitygraphs.experiments import (
 )
 
 cs = ConfigStore.instance()
-cs.store(name="geneva_config", node=Config)
+cs.store(name="tpg_config", node=Config)
 
 EXPERIMENTS = {
     "comparison": comparison_experiment,
@@ -27,6 +27,7 @@ EXPERIMENTS = {
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: Config):
+    """Run the experiment selected by ``train.experiment``."""
     if cfg.train.experiment not in EXPERIMENTS:
         raise ValueError(f"train.experiment must be one of {sorted(EXPERIMENTS)}, got {cfg.train.experiment}")
 
@@ -36,6 +37,7 @@ def main(cfg: Config):
 
 @hydra.main(version_base=None, config_path="conf", config_name="report")
 def report_results(cfg: Config):
+    """Print the results report for a recorded run."""
     print_report(
         cfg.paths.reports_data,
         cfg.data.name,

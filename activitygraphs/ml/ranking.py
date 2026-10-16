@@ -4,12 +4,8 @@
 ``clip``, so they accept torch tensors and numpy arrays alike.
 """
 
-from typing import TypeVar
-
 import numpy as np
 import torch
-
-Array = TypeVar("Array", torch.Tensor, np.ndarray)
 
 
 def positive_rank_stats(
@@ -81,7 +77,7 @@ def positive_band_auc(
     return auc, n_negatives
 
 
-def expected_recall_at_k(n_higher: Array, n_tied: Array, k: int | Array) -> Array:
+def expected_recall_at_k[Array: (torch.Tensor, np.ndarray)](n_higher: Array, n_tied: Array, k: int | Array) -> Array:
     """Compute the tie-aware top-k hit fraction of each positive.
 
     Args:
@@ -96,7 +92,7 @@ def expected_recall_at_k(n_higher: Array, n_tied: Array, k: int | Array) -> Arra
     return ((k - n_higher) / (n_tied + 1)).clip(0, 1)
 
 
-def average_recall(n_higher: Array, n_tied: Array, budget: int) -> Array:
+def average_recall[Array: (torch.Tensor, np.ndarray)](n_higher: Array, n_tied: Array, budget: int) -> Array:
     """Compute the mean of ``expected_recall_at_k`` over ``k = 1..budget`` for each positive.
 
     Args:

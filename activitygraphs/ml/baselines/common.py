@@ -63,7 +63,7 @@ def non_home_mask(per_user_tensors: PerUserTensors) -> torch.Tensor:
 
 def graph_node_indices(x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
     """Return, for each node, its within-graph index, ``[num_nodes]``."""
-    ptr = torch.zeros(batch.max().item() + 2, dtype=torch.long, device=batch.device)
+    ptr = torch.zeros(int(batch.max()) + 2, dtype=torch.long, device=batch.device)
     ptr[1:] = batch.bincount().cumsum(0)
     return torch.arange(x.shape[0], device=x.device) - ptr[batch]
 

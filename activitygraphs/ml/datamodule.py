@@ -13,12 +13,13 @@ from activitygraphs.ml.popularity import popularity_logit
 
 
 def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tensor:
-    """Compute the per-node visit popularity logit over the training dataset. logit(p_n), where p_n is the
-    home-excluded train visit rate of node n. Shape [num_nodes].
+    """Compute the per-node visit popularity logit over the training dataset, shape [num_nodes].
+
+    logit(p_n), where p_n is the home-excluded train visit rate of node n.
 
     Same per-node rate as VisitFrequencyBaseline, injected into the ML model outputs to see if they learn anything
-    beyond the "general" popularity signal."""
-
+    beyond the "general" popularity signal.
+    """
     idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
     labels = train_dataset.spatial_labels[idx].squeeze(-1)
     home_idx = train_dataset.spatial_features[idx, :, train_dataset.is_home_spatial_idx].argmax(dim=1)
@@ -27,9 +28,7 @@ def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tens
 
 
 def _compute_home_coverage(train_dataset: ActivityDataset, test_dataset: ActivityDataset) -> pl.DataFrame:
-    """Compute, for each user in the _test_ dataset, 1) their home node and 2) whether any training user also has a home
-    there."""
-
+    """Compute each _test_ user's home node and whether any training user also has a home there."""
     # Index of the home node of every user in the survey: [n_users].
     home_node_idx = train_dataset.spatial_features[:, :, train_dataset.is_home_spatial_idx].argmax(dim=1)
 
@@ -83,6 +82,7 @@ class ActivityDataModule(L.LightningDataModule):
         self._home_coverage: pl.DataFrame | None = None
 
     def setup(self, stage: str | None = None) -> None:
+        """Load the splits, scalers, popularity logits and home coverage once."""
         if self._train_dataset is not None:
             return
 
@@ -97,49 +97,58 @@ class ActivityDataModule(L.LightningDataModule):
         self._home_coverage = _compute_home_coverage(self._train_dataset, self._test_dataset)
 
     def train_dataloader(self) -> pyg.loader.DataLoader:
+        """Return a shuffled loader over the training split."""
         assert self._train_dataset is not None
         return pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8)
 
     def val_dataloader(self) -> pyg.loader.DataLoader:
+        """Return a loader over the validation split."""
         assert self._val_dataset is not None
         return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size, num_workers=8)
 
     def test_dataloader(self) -> pyg.loader.DataLoader:
+        """Return a loader over the test split."""
         assert self._test_dataset is not None
         return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size, num_workers=8)
 
     @property
     def train_dataset(self) -> ActivityDataset:
+        """The training split."""
         if self._train_dataset is None:
             raise RuntimeError("Call setup() before accessing train_dataset.")
         return self._train_dataset
 
     @property
     def val_dataset(self) -> ActivityDataset:
+        """The validation split."""
         if self._val_dataset is None:
             raise RuntimeError("Call setup() before accessing val_dataset.")
         return self._val_dataset
 
     @property
     def test_dataset(self) -> ActivityDataset:
+        """The test split."""
         if self._test_dataset is None:
             raise RuntimeError("Call setup() before accessing test_dataset.")
         return self._test_dataset
 
     @property
     def scalers(self) -> FittedScalers:
+        """The scalers fitted on the training split."""
         if self._scalers is None:
             raise RuntimeError("Call setup() before accessing scalers.")
         return self._scalers
 
     @property
     def pop_logit(self) -> torch.Tensor:
+        """The train-split popularity logit of each node."""
         if self._pop_logit is None:
             raise RuntimeError("Call setup() before accessing pop_logit.")
         return self._pop_logit
 
     @property
     def home_coverage(self) -> pl.DataFrame:
+        """Per-home training-user counts, used to stratify results by home coverage."""
         if self._home_coverage is None:
             raise RuntimeError("Call setup() before accessing home_coverage.")
         return self._home_coverage
