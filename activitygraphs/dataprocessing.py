@@ -268,7 +268,7 @@ def add_user_cols(
     return network_nodes
 
 
-def create_spatial_demographics(data: NetworkData) -> tuple[torch.Tensor, torch.Tensor]:
+def build_spatial_demographics(data: NetworkData) -> tuple[torch.Tensor, torch.Tensor]:
     """Build per-user spatial feature and label tensors over all network nodes.
 
     Returns:
@@ -315,7 +315,7 @@ def create_spatial_demographics(data: NetworkData) -> tuple[torch.Tensor, torch.
     return spatial_features, spatial_labels
 
 
-def create_home_distances(data, network_nodes: gpd.GeoDataFrame) -> torch.Tensor:
+def build_home_distances(data, network_nodes: gpd.GeoDataFrame) -> torch.Tensor:
     """Build a distance-from-home tensor over all network nodes for every user.
 
     Uses Euclidean distance between centroids.
@@ -352,7 +352,7 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 # =========================================
 
 
-def create_individual_demographics(data: NetworkData) -> torch.Tensor:
+def build_individual_demographics(data: NetworkData) -> torch.Tensor:
     """Create the demographic float32 tensor of shape ``[n_users, n_demo_features]`` from NetworkData.
 
     Columns follow ``data.demographic_columns``. If there are none (e.g. TPG), returns a (n_users, 1) dummy tensor
@@ -366,7 +366,7 @@ def create_individual_demographics(data: NetworkData) -> torch.Tensor:
     return torch.tensor(indiv_demographics.to_numpy(), dtype=torch.float32)
 
 
-def create_group_ids(data: NetworkData) -> torch.Tensor:
+def build_group_ids(data: NetworkData) -> torch.Tensor:
     """Create a tensor of numeric ``group_id``s matching the ``hh_id`` household IDs, shape ``[n_users]``."""
     group_ids = data.users_df.select("hh_id").unique(maintain_order=True).with_row_index(name="group_id")
     user_groups = data.users_df.select("user_id", "hh_id").join(group_ids, on="hh_id", how="left")
@@ -380,7 +380,7 @@ def create_group_ids(data: NetworkData) -> torch.Tensor:
 # =========================================
 
 
-def convert_to_torch(
+def build_tensors(
     data: NetworkData, network_nodes: gpd.GeoDataFrame, network_edges: gpd.GeoDataFrame
 ) -> tuple[pyg.data.Data | pyg.data.HeteroData, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert network graph and network data into PyG and tensor form.
@@ -391,10 +391,10 @@ def convert_to_torch(
         per-user labels ``[n_users, n_nodes, 1]``, individual demographics ``[n_users, n_demo]``,
         per-user distance-from-home ``[n_users, n_nodes, 1], and per-user group/hh-ids ``[n_users]``.
     """
-    spatial_features, spatial_labels = create_spatial_demographics(data)
-    demographics = create_individual_demographics(data)
-    distances = create_home_distances(data, network_nodes)
-    hh_ids = create_group_ids(data)
+    spatial_features, spatial_labels = build_spatial_demographics(data)
+    demographics = build_individual_demographics(data)
+    distances = build_home_distances(data, network_nodes)
+    hh_ids = build_group_ids(data)
 
     node_feature_cols = [col for col in network_nodes.columns if col not in COLS_EXCLUDED_FROM_FEATURES]
 
@@ -410,36 +410,36 @@ def convert_to_torch(
     return network_graph, spatial_features, spatial_labels, demographics, distances, hh_ids
 
 
-def load_data(cfg: DataConfig, project_root: Path | None = None):
-    """Load the survey, network graph and per-user tensors for the dataset named in ``cfg``."""
+def load_survey_and_graph(cfg: DataConfig, project_root: Path | None = None):
+    """Load the survey and its network graph for the dataset named in ``cfg``."""
     if cfg.name == "THATS":
         cfg = cast(THATSDataConfig, cfg)
-        return _load_thats_data(cfg, project_root)
+        return _load_thats_survey_and_graph(cfg, project_root)
     elif cfg.name == "TPG":
         cfg = cast(TPGDataConfig, cfg)
-        return _load_tpg_data(cfg, project_root)
+        return _load_tpg_survey_and_graph(cfg, project_root)
     elif cfg.name == "CMAP":
         cfg = cast(CMAPDataConfig, cfg)
-        return _load_cmap_data(cfg, project_root)
+        return _load_cmap_survey_and_graph(cfg, project_root)
 
     raise ValueError(f"Unknown Dataset {cfg.name}")
 
 
-def _load_thats_data(cfg: THATSDataConfig, project_root: Path | None = None):
+def _load_thats_survey_and_graph(cfg: THATSDataConfig, project_root: Path | None = None):
     data = THATSData.load(cfg, project_root).with_filter("subsector")
     network_nodes, network_edges = load_thats_network_graph(data, cfg, project_root)
 
     return data, network_nodes, network_edges
 
 
-def _load_tpg_data(cfg: TPGDataConfig, project_root: Path | None = None):
+def _load_tpg_survey_and_graph(cfg: TPGDataConfig, project_root: Path | None = None):
     data = TPGData.load(cfg, project_root).with_filter("subsector")
     network_nodes, network_edges = load_tpg_network_graph(data, cfg, project_root)
 
     return data, network_nodes, network_edges
 
 
-def _load_cmap_data(cfg: CMAPDataConfig, project_root: Path | None = None):
+def _load_cmap_survey_and_graph(cfg: CMAPDataConfig, project_root: Path | None = None):
     data = CMAPData.load(cfg, project_root).with_filter("subsector")
     network_nodes, network_edges = load_cmap_network_graph(data, cfg, project_root)
 

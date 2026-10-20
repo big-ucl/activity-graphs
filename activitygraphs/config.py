@@ -1,4 +1,4 @@
-"""Hydra/OmegaConf dataclass config tree and ``load_config`` helper."""
+"""Hydra/OmegaConf dataclass config tree and ``read_config`` helper."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -280,8 +280,8 @@ class Config:
 VALID_CONFIGS = Literal["tpg", "thats", "cmap"]
 
 
-def load_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -> Config:
-    """Load Hydra config for the given dataset.
+def read_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -> Config:
+    """Read the Hydra config for the given dataset.
 
     Args:
         project_root: Repo root; the config dir is resolved as ``project_root/activitygraphs/conf``.

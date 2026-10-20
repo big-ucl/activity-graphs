@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from activitygraphs.config import VALID_CONFIGS, Config, load_config
+from activitygraphs.config import VALID_CONFIGS, Config, read_config
 from activitygraphs.utils import get_project_root
 
 
@@ -20,7 +20,7 @@ def load_or_skip() -> Callable:
 
     def load[T](data: VALID_CONFIGS, build: Callable[[Config, Path], T]) -> T:
         root = get_project_root()
-        cfg = load_config(root, verbose=False, data=data)
+        cfg = read_config(root, verbose=False, data=data)
         try:
             return build(cfg, root)
         except FileNotFoundError as exc:

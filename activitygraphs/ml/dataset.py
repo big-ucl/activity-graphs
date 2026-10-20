@@ -1,4 +1,4 @@
-"""ActivityDataset, FittedScalers, and the ``load_dataset`` entry point for the ML pipeline."""
+"""ActivityDataset, FittedScalers, and the ``load_splits`` entry point for the ML pipeline."""
 
 import hashlib
 import json
@@ -18,7 +18,7 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 
 from activitygraphs.config import Config
-from activitygraphs.dataprocessing import SPATIAL_FEATURE_NAMES, convert_to_torch, load_data
+from activitygraphs.dataprocessing import SPATIAL_FEATURE_NAMES, build_tensors, load_survey_and_graph
 from activitygraphs.ml.metrics import compute_home_hop_distance
 from activitygraphs.utils import get_project_root
 
@@ -266,13 +266,13 @@ class FittedScalers:
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path: Path) -> "FittedScalers":
-        """Load scalers pickled by ``save``."""
+    def read(path: Path) -> "FittedScalers":
+        """Read scalers pickled by ``save``."""
         with path.open("rb") as f:
             return pickle.load(f)
 
 
-def load_dataset(
+def load_splits(
     cfg: Config,
     val_size: float,
     test_size: float,
@@ -298,7 +298,7 @@ def load_dataset(
         # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
     ])
 
-    dataset = load_or_build_dataset(
+    dataset = load_dataset(
         cfg, project_root=project_root, pre_transform=positional_encodings_transforms, **build_kwargs
     )
 
@@ -310,7 +310,7 @@ def load_dataset(
 
     scalers = None
     if scalers_cache.exists():
-        scalers = FittedScalers.load(scalers_cache)
+        scalers = FittedScalers.read(scalers_cache)
 
     if scalers is None or scalers.fingerprint != fingerprint:
         scalers = fit_scalers(
@@ -328,7 +328,7 @@ def load_dataset(
     )
 
 
-def load_or_build_dataset(
+def load_dataset(
     cfg: Config,
     project_root: Path | None = None,
     **build_kwargs,
@@ -338,8 +338,8 @@ def load_or_build_dataset(
     dataset_path = project_root / cfg.data.paths.pyg_datasets
 
     if not all((dataset_path / file).exists() for file in ActivityDataset.PROCESSED_FILE_NAMES):
-        data, network_nodes, network_edges = load_data(cfg.data, project_root)
-        network_graph, spatial_features, spatial_labels, demographics, distances, group_ids = convert_to_torch(
+        data, network_nodes, network_edges = load_survey_and_graph(cfg.data, project_root)
+        network_graph, spatial_features, spatial_labels, demographics, distances, group_ids = build_tensors(
             data, network_nodes, network_edges
         )
         dataset_path = project_root / cfg.data.paths.pyg_datasets

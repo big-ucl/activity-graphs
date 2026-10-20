@@ -172,7 +172,7 @@ class CMAPData(NetworkData, DataFrameStore):
     def load(cls, cfg: CMAPDataConfig, project_root: Path | None = None, name: str | None = None) -> "CMAPData":
         """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
-        cmap_inputs = load_files(cfg, project_root)
+        cmap_inputs = read_tables(cfg, project_root)
 
         if data_dir.exists():
             locations_gdf = gpd.read_parquet(data_dir / "locations_gdf.parquet")
@@ -196,7 +196,7 @@ class CMAPData(NetworkData, DataFrameStore):
         self._users_df.write_parquet(data_dir / "users_df.parquet")
 
 
-def load_files(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPTables:
+def read_tables(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPTables:
     """Read the raw CMAP trip, person and household files and the census-tract boundaries."""
     project_root = get_project_root(project_root)
 

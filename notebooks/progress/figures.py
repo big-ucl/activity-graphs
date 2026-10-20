@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 from activitygraphs import analysis, figures
-from activitygraphs.config import load_config
+from activitygraphs.config import read_config
 from activitygraphs.figures import DASHED, DOTTED, SOLID, ModelStyle
 from activitygraphs.ml.training import PER_USER_STAGE
 
@@ -72,12 +72,12 @@ HIGHLIGHT_WIDTH = 0.8
 def load(dataset: str):
     """The config, per-user results, score vectors and home distances of a dataset's pinned run."""
     name, run = RUNS[dataset]
-    cfg = load_config(PROJECT_ROOT, verbose=False, data=dataset)
+    cfg = read_config(PROJECT_ROOT, verbose=False, data=dataset)
     reports = PROJECT_ROOT / cfg.paths.reports_data
 
-    _, per_user = analysis.load_report_run(reports, name, run, cfg.train.max_recall_k)
-    scores = analysis.load_score_vectors(reports, name, run)
-    distances = analysis.load_home_distances(reports, name, run)
+    _, per_user = analysis.read_report_run(reports, name, run, cfg.train.max_recall_k)
+    scores = analysis.read_score_vectors(reports, name, run)
+    distances = analysis.read_home_distances(reports, name, run)
 
     return cfg, per_user, scores, distances
 

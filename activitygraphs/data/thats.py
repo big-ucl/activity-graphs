@@ -208,7 +208,7 @@ class THATSData(NetworkData, DataFrameStore):
     def load(cls, cfg: THATSDataConfig, project_root: Path | None = None, name: str | None = None) -> "THATSData":
         """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
-        thats_inputs = load_files(cfg, project_root)
+        thats_inputs = read_tables(cfg, project_root)
 
         if data_dir.exists():
             locations_gdf = gpd.read_parquet(data_dir / "locations_gdf.parquet")
@@ -234,7 +234,7 @@ class THATSData(NetworkData, DataFrameStore):
         self._users_df.write_parquet(data_dir / "users_df.parquet")
 
 
-def load_files(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSTables:
+def read_tables(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSTables:
     """Read all raw Toronto files (journeys, persons, households, activities, boundaries) into a ``THATSTables`` container."""
     project_root = get_project_root(project_root)
 

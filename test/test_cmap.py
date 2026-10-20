@@ -24,7 +24,7 @@ from activitygraphs.data.cmap import (
     build_cmap_locations,
     build_cmap_users,
 )
-from activitygraphs.dataprocessing import create_group_ids, create_individual_demographics
+from activitygraphs.dataprocessing import build_group_ids, build_individual_demographics
 from activitygraphs.network import NA
 
 IN_REGION_TRACTS = ["17031000100", "17031000200", "17043000100"]
@@ -328,7 +328,7 @@ class TestCMAPDataViews:
         assert cmap_data.users_df["user_id"].to_list() == ["1", "2", "3"]
 
     def test_user_ids_match_users_df_order(self, cmap_data):
-        # create_group_ids and the demographics tensor are both aligned positionally on this.
+        # build_group_ids and the demographics tensor are both aligned positionally on this.
         assert cmap_data.user_ids.to_list() == cmap_data.users_df["user_id"].to_list()
 
     def test_home_locations_cover_every_user(self, cmap_data):
@@ -344,7 +344,7 @@ class TestCMAPDataViews:
         # hh_id lives on users_df for the grouped split; it is an identifier, not a feature.
         assert "hh_id" not in cmap_data.demographic_columns
 
-        demographics = create_individual_demographics(cmap_data)
+        demographics = build_individual_demographics(cmap_data)
         assert demographics.shape == (len(cmap_data.user_ids), len(cmap_data.demographic_columns))
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_data):
@@ -353,7 +353,7 @@ class TestCMAPDataViews:
         assert cmap_data.demographic_columns == DEMOGRAPHIC_COLUMNS
 
     def test_group_ids_are_shared_by_co_residents_only(self, cmap_data):
-        group_ids = create_group_ids(cmap_data)
+        group_ids = build_group_ids(cmap_data)
 
         assert group_ids.shape == (len(cmap_data.user_ids),)
         assert group_ids[0] == group_ids[1]  # persons 1 and 2 share household 1
@@ -362,7 +362,7 @@ class TestCMAPDataViews:
     def test_group_ids_are_stable_across_rebuilds(self, cmap_data, boundaries_ct):
         # polars unique() does not maintain order by default; an unstable labelling would silently
         # change the split for a fixed seed on every cache rebuild.
-        assert create_group_ids(cmap_data).tolist() == create_group_ids(cmap_data).tolist()
+        assert build_group_ids(cmap_data).tolist() == build_group_ids(cmap_data).tolist()
 
 
 @pytest.mark.integration

@@ -129,7 +129,7 @@ class TPGData(NetworkData, DataFrameStore):
     def load(cls, cfg: TPGDataConfig, project_root: Path | None = None, name: str | None = None) -> "TPGData":
         """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
-        tpg_tables = load_files(cfg, project_root)
+        tpg_tables = read_tables(cfg, project_root)
 
         if data_dir.exists():
             locations_gdf = gpd.read_parquet(data_dir / "locations_gdf.parquet")
@@ -151,7 +151,7 @@ class TPGData(NetworkData, DataFrameStore):
         self.user_journeys_df.write_parquet(data_dir / "user_journeys_df.parquet")
 
 
-def load_files(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTables:
+def read_tables(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTables:
     """Read all raw TPG files (journeys, boundaries, GTFS) into a ``TPGTables`` container."""
 
     def parse_gtfs_date(*cols: str) -> pl.Expr:

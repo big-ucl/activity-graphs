@@ -86,7 +86,7 @@ def build_pt_layer_edges(
     )
 
     active_stop_times = filter_active_stop_times(locations_df, gtfs)
-    pt_trips = create_pt_trip_df(active_stop_times)
+    pt_trips = build_pt_trip_df(active_stop_times)
     headways_df = compute_avg_headways(pt_trips, gtfs, edge_ids)
 
     pt_edge_df = pt_trips.group_by(edge_ids).agg(
@@ -106,7 +106,7 @@ def build_pt_layer_edges(
     if drop_null_headways:
         pt_edge_df = pt_edge_df.drop_nulls("avg_headway_min")
 
-    transfer_edge_df = create_transfer_edges(pt_edge_df, locations_df, gtfs)
+    transfer_edge_df = build_transfer_edges(pt_edge_df, locations_df, gtfs)
 
     return check_schema(pt_edge_df, PT_EDGE_LIST_SCHEMA), check_schema(transfer_edge_df, TRANSFER_EDGE_LIST_SCHEMA)
 
@@ -124,7 +124,7 @@ def filter_active_stop_times(locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl
     )
 
 
-def create_pt_trip_df(active_stop_times: pl.LazyFrame) -> pl.LazyFrame:
+def build_pt_trip_df(active_stop_times: pl.LazyFrame) -> pl.LazyFrame:
     """Join consecutive stop-time pairs into origin-destination trip segments with dwell and travel times."""
     join_cols = ["trip_id", "service_id", "route_id"]
     departures = active_stop_times.select(*join_cols, pl.exclude(join_cols).name.prefix("orig_"))
@@ -209,7 +209,7 @@ def add_route_attributes_to_edges(edge_df: pl.DataFrame, gtfs: GTFSTables, pt_no
     return edge_df.join(active_routes_df, on="route_id")
 
 
-def create_transfer_edges(pt_edge_df: pl.DataFrame, locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl.DataFrame:
+def build_transfer_edges(pt_edge_df: pl.DataFrame, locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl.DataFrame:
     """Build transfer edges within PT stops (route-to-route) and between PT stops (transfer-node to transfer-node) from GTFS transfer times."""
     transfer_route_id = PARENT_STOP_ROUTE_ID
 

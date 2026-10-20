@@ -1,4 +1,4 @@
-"""ActivityDataModule: LightningDataModule wrapping the load_dataset pipeline."""
+"""ActivityDataModule: LightningDataModule wrapping the load_splits pipeline."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ import torch
 import torch_geometric as pyg
 
 from activitygraphs.config import Config
-from activitygraphs.ml.dataset import ActivityDataset, FittedScalers, load_dataset
+from activitygraphs.ml.dataset import ActivityDataset, FittedScalers, load_splits
 from activitygraphs.ml.popularity import popularity_logit
 
 
@@ -43,9 +43,9 @@ def _compute_home_coverage(train_dataset: ActivityDataset, test_dataset: Activit
 
 
 class ActivityDataModule(L.LightningDataModule):
-    """LightningDataModule wrapping ``load_dataset`` for activity graph prediction.
+    """LightningDataModule wrapping ``load_splits`` for activity graph prediction.
 
-    Calls ``load_dataset`` on first ``setup()``, builds PyG DataLoaders, and exposes the
+    Calls ``load_splits`` on first ``setup()``, builds PyG DataLoaders, and exposes the
     train-split popularity logits and the home coverage of the test users.
 
     Args:
@@ -86,7 +86,7 @@ class ActivityDataModule(L.LightningDataModule):
         if self._train_dataset is not None:
             return
 
-        self._train_dataset, self._val_dataset, self._test_dataset, self._scalers = load_dataset(
+        self._train_dataset, self._val_dataset, self._test_dataset, self._scalers = load_splits(
             self.cfg, self.val_size, self.test_size, self.seed, self.project_root
         )
 

@@ -41,7 +41,7 @@ def _():
 
 @app.cell
 def _():
-    cfg, per_user, score_vectors, home_distances, n_nodes = heart.load_run()
+    cfg, per_user, score_vectors, home_distances, n_nodes = heart.read_run()
     nodes, network_edges = heart.load_network(cfg)
     out_path = heart.out_dir(cfg)
 

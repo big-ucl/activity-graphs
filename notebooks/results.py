@@ -2,7 +2,7 @@ from pathlib import Path
 
 import marimo
 
-from activitygraphs.analysis import load_score_vectors
+from activitygraphs.analysis import read_score_vectors
 
 __generated_with = "0.23.8"
 app = marimo.App(width="medium")
@@ -63,11 +63,11 @@ def _(dataset_str, mo):
     import altair as alt
     import polars as pl
 
-    from activitygraphs.config import load_config
+    from activitygraphs.config import read_config
     from pathlib import Path
 
     project_root = Path(mo.notebook_dir().parent)
-    cfg = load_config(project_root, data=dataset_str)
+    cfg = read_config(project_root, data=dataset_str)
     return alt, cfg, pl, project_root
 
 
@@ -99,19 +99,19 @@ def _(pl):
 
 @app.cell
 def _():
-    from activitygraphs.analysis import POPULARITY_MODEL, R_PRECISION_COLUMN, load_report_run, load_run
+    from activitygraphs.analysis import POPULARITY_MODEL, R_PRECISION_COLUMN, read_report_run, read_run
     from activitygraphs.analysis import _latest_run as latest_run
 
-    return POPULARITY_MODEL, R_PRECISION_COLUMN, latest_run, load_report_run, load_run
+    return POPULARITY_MODEL, R_PRECISION_COLUMN, latest_run, read_report_run, read_run
 
 
 @app.cell
-def _(cfg, latest_run, load_report_run, project_root, run):
+def _(cfg, latest_run, read_report_run, project_root, run):
     reports_data_path = project_root / cfg.paths.reports_data
     max_recall_k = cfg.train.max_recall_k
     report_run = latest_run(reports_data_path, cfg.data.name) if run is None else run
 
-    aggregate_results, per_user_results = load_report_run(
+    aggregate_results, per_user_results = read_report_run(
         reports_data_path, cfg.data.name, report_run, max_recall_k
     )
     return (
@@ -960,7 +960,7 @@ def _(mo):
 @app.cell
 def _(cfg, report_run, reports_data_path):
     path = Path(reports_data_path)
-    scores = load_score_vectors(path, cfg.data.name, report_run)
+    scores = read_score_vectors(path, cfg.data.name, report_run)
     score_vectors = scores
     score_vectors
     return (score_vectors,)
@@ -988,10 +988,10 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, load_run, overfit_run, max_recall_k, reports_data_path):
+def _(cfg, read_run, overfit_run, max_recall_k, reports_data_path):
     from activitygraphs.analysis import check_overfit_health
 
-    _aggregate_results, _ = load_run(reports_data_path, cfg.data.name, run=overfit_run)
+    _aggregate_results, _ = read_run(reports_data_path, cfg.data.name, run=overfit_run)
 
     overfit_health = check_overfit_health(_aggregate_results, max_recall_k)
     overfit_health
@@ -1009,9 +1009,9 @@ def _(mo):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.ml.dataset import load_or_build_dataset
+    from activitygraphs.ml.dataset import load_dataset
 
-    dataset = load_or_build_dataset(cfg, project_root)
+    dataset = load_dataset(cfg, project_root)
     return (dataset,)
 
 

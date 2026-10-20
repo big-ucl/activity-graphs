@@ -201,7 +201,7 @@ def user_scores(score_vectors: pl.DataFrame, name: str, user_id: int, seed: int 
     """One user's score vector for one model, as an array over nodes in PyG node order.
 
     Args:
-        score_vectors: Score vectors from ``load_score_vectors``.
+        score_vectors: Score vectors from ``read_score_vectors``.
         name: Model name.
         user_id: Test user to pull.
         seed: Training seed; ``None`` selects the seedless baseline rows.

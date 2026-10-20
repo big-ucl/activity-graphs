@@ -6,11 +6,11 @@ app = marimo.App(width="medium")
 with app.setup:
     import marimo as mo
 
-    from activitygraphs.config import load_config
+    from activitygraphs.config import read_config
     from pathlib import Path
 
     project_root = Path(mo.notebook_dir().parent.parent)
-    cfg = load_config(project_root, data="toronto")
+    cfg = read_config(project_root, data="toronto")
 
 
 @app.cell
@@ -30,14 +30,14 @@ def _():
 @app.cell
 def _():
     from activitygraphs.data.thats import THATSData
-    from activitygraphs.dataprocessing import load_thats_network_graph, convert_to_torch
+    from activitygraphs.dataprocessing import load_thats_network_graph, build_tensors
 
     from activitygraphs.ml.dataset import ActivityDataset
 
     return (
         ActivityDataset,
         THATSData,
-        convert_to_torch,
+        build_tensors,
         load_thats_network_graph,
     )
 
@@ -54,7 +54,7 @@ def _():
 def _(
     ActivityDataset,
     THATSData,
-    convert_to_torch,
+    build_tensors,
     load_toronto_network_graph,
 ):
     data = THATSData.load(cfg.data, project_root).with_filter("subsector")
@@ -63,7 +63,7 @@ def _(
         data, cfg.data, project_root
     )
 
-    network_graph, spatial_features, spatial_labels, demographics, distances = convert_to_torch(data, network_nodes, network_edges)
+    network_graph, spatial_features, spatial_labels, demographics, distances = build_tensors(data, network_nodes, network_edges)
 
     dataset_path = project_root / cfg.data.paths.pyg_datasets
 

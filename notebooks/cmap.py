@@ -13,19 +13,19 @@ def _():
     import polars as pl
     import geopandas as gpd
 
-    from activitygraphs.config import load_config
+    from activitygraphs.config import read_config
     from pathlib import Path
 
     project_root = Path(mo.notebook_dir().parent)
-    cfg = load_config(project_root, data="cmap")
+    cfg = read_config(project_root, data="cmap")
     return cfg, mo, project_root
 
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.data.cmap import load_files
+    from activitygraphs.data.cmap import read_tables
 
-    inputs = load_files(cfg.data, project_root)
+    inputs = read_tables(cfg.data, project_root)
     return
 
 
@@ -43,9 +43,9 @@ def _(mo):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.dataprocessing import load_data
+    from activitygraphs.dataprocessing import load_survey_and_graph
 
-    cmap_data, network_nodes, network_edges = load_data(cfg.data, project_root)
+    cmap_data, network_nodes, network_edges = load_survey_and_graph(cfg.data, project_root)
     return network_edges, network_nodes
 
 
@@ -62,9 +62,9 @@ def _(network_edges, network_nodes):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.ml.dataset import load_or_build_dataset
+    from activitygraphs.ml.dataset import load_dataset
 
-    tensors = load_or_build_dataset(cfg, project_root)
+    tensors = load_dataset(cfg, project_root)
     return (tensors,)
 
 

@@ -30,14 +30,14 @@ from activitygraphs.analysis import (
     distance_band_recall_table,
     home_zone_summary,
     lift_over_reference,
-    load_run,
-    load_score_vectors,
     paired_comparison,
     paired_comparison_by_band,
     paired_comparison_by_k,
     paired_distance_band_recall,
     paired_within_band_auc,
     per_user_metric_summary,
+    read_run,
+    read_score_vectors,
     realised_size_summary,
     recall_at_ks,
     recall_curve,
@@ -133,11 +133,11 @@ class TestLoading:
         make_aggregate().head(1).write_parquet(tmp_path / "TPG-results-2.parquet")
         make_per_user().head(1).write_parquet(tmp_path / "TPG-per-user-2.parquet")
 
-        aggregate, per_user = load_run(tmp_path, "TPG")
+        aggregate, per_user = read_run(tmp_path, "TPG")
         assert aggregate.height == 1
         assert per_user.height == 1
 
-        aggregate, per_user = load_run(tmp_path, "TPG", run=1)
+        aggregate, per_user = read_run(tmp_path, "TPG", run=1)
         assert aggregate.height == 4
         assert per_user.height == 9
 
@@ -149,14 +149,14 @@ class TestLoadScoreVectors:
         make_aggregate().write_parquet(tmp_path / "TPG-results-2.parquet")
         make_score_vectors([[0.2, 0.8], [0.3, 0.7]]).write_parquet(tmp_path / "TPG-scores-2.parquet")
 
-        assert load_score_vectors(tmp_path, "TPG").height == 2
-        assert load_score_vectors(tmp_path, "TPG", run=1)["scores"].to_list() == [[0.1, 0.9]]
+        assert read_score_vectors(tmp_path, "TPG").height == 2
+        assert read_score_vectors(tmp_path, "TPG", run=1)["scores"].to_list() == [[0.1, 0.9]]
 
     def test_raises_when_the_run_saved_no_score_vectors(self, tmp_path):
         make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
 
         with pytest.raises(FileNotFoundError, match="save_score_vectors"):
-            load_score_vectors(tmp_path, "TPG")
+            read_score_vectors(tmp_path, "TPG")
 
 
 class TestUserInvariance:

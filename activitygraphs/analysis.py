@@ -81,8 +81,8 @@ DEFAULT_ANALYSIS = AnalysisConfig(
 # =========================================
 
 
-def load_run(report_data_path: str | Path, name: str, run: int | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Load the aggregate and per-user result frames of a run.
+def read_run(report_data_path: str | Path, name: str, run: int | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Read the aggregate and per-user result frames of a run.
 
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
@@ -101,8 +101,8 @@ def load_run(report_data_path: str | Path, name: str, run: int | None = None) ->
     return aggregate_results, per_user_result
 
 
-def load_score_vectors(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
-    """Load the full per-user score vectors of a run: ``name, seed, user_id, scores``."""
+def read_score_vectors(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
+    """Read the full per-user score vectors of a run: ``name, seed, user_id, scores``."""
     path = Path(report_data_path)
     run = _latest_run(path, name) if run is None else run
     scores_path = path / f"{name}-scores-{run}.parquet"
@@ -113,8 +113,8 @@ def load_score_vectors(report_data_path: str | Path, name: str, run: int | None 
     return pl.read_parquet(scores_path).filter(pl.col("stage") == SCORE_VECTOR_STAGE)
 
 
-def load_home_distances(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
-    """Load each test user's distance from home to every node of a run: ``user_id, distances``, in metres."""
+def read_home_distances(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
+    """Read each test user's distance from home to every node of a run: ``user_id, distances``, in metres."""
     path = Path(report_data_path)
     run = _latest_run(path, name) if run is None else run
 
@@ -127,7 +127,7 @@ def with_ranking_metrics(per_user_results: pl.DataFrame, budget: int) -> pl.Data
     """Add the per-user ``avg_recall`` and per-positive ``pos_avg_recall`` columns, derived from the stored rank counts.
 
     Args:
-        per_user_results: Per-user results frame from ``load_run``.
+        per_user_results: Per-user results frame from ``read_run``.
         budget: Largest rank cutoff ``K`` of ``avg_recall@K``.
 
     Returns:
@@ -161,10 +161,10 @@ def _positive_average_recall(positives: pl.DataFrame, budget: int) -> pl.Series:
     )
 
 
-def load_report_run(
+def read_report_run(
     report_data_path: str | Path, name: str, run: int, max_recall_k: int
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Load a run for reporting with the aggregate results and the per-user ``avg_recall``.
+    """Read a run for reporting, with the aggregate results and the per-user ``avg_recall``.
 
     Args:
         report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
@@ -175,7 +175,7 @@ def load_report_run(
     Returns:
         Tuple ``(aggregate_results, per_user_results)``.
     """
-    aggregate, per_user = load_run(report_data_path, name, run)
+    aggregate, per_user = read_run(report_data_path, name, run)
     return aggregate, with_ranking_metrics(per_user, max_recall_k)
 
 
@@ -558,8 +558,8 @@ def check_model_health(
     The checks are 1) user invariance; 2) popularity correlation; 3) home node rank.
 
     Args:
-        score_vectors: DataFrame of per-user score vectors from ``load_score_vectors``.
-        per_user_results: Per-user results frame from ``load_run``.
+        score_vectors: DataFrame of per-user score vectors from ``read_score_vectors``.
+        per_user_results: Per-user results frame from ``read_run``.
         popularity_model: Model whose score vector stands in for the train popularity ordering.
         max_users: max number of user pairs for correlation tests.
         seed: seed for the ``max_users`` subsample.
@@ -659,7 +659,7 @@ def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFr
     """Split each user's per-user ``metric`` into the contributions of the positives in each hop band.
 
     Args:
-        per_user_results: Per-user results frame from ``load_report_run``.
+        per_user_results: Per-user results frame from ``read_report_run``.
         metric: A per-user metric with a per-positive value in ``POSITIVE_VALUE_COLUMNS``.
 
     Returns:
@@ -848,8 +848,8 @@ def distance_band_recall(
     """Each user's per-user ``avg_recall`` split by the distance band from home of each positive.
 
     Args:
-        per_user_results: Per-user results frame from ``load_report_run``.
-        home_distances: Per-user distances from home from ``load_home_distances``.
+        per_user_results: Per-user results frame from ``read_report_run``.
+        home_distances: Per-user distances from home from ``read_home_distances``.
         bands: Upper band edges in km.
 
     Returns:
@@ -942,9 +942,9 @@ def within_band_auc(
     """Each user's mean AUC against the unvisited nodes of a distance band, over their positives in that band.
 
     Args:
-        per_user_results: Per-user results frame from ``load_report_run``.
-        score_vectors: Per-user score vectors from ``load_score_vectors``.
-        home_distances: Per-user distances from home from ``load_home_distances``.
+        per_user_results: Per-user results frame from ``read_report_run``.
+        score_vectors: Per-user score vectors from ``read_score_vectors``.
+        home_distances: Per-user distances from home from ``read_home_distances``.
         bands: Upper band edges in km.
 
     Returns:
@@ -1277,7 +1277,7 @@ def print_report(
     report_data_path = Path(report_data_path)
     run = run if run is not None else _latest_run(report_data_path, name)
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
-    aggregate, per_user = load_report_run(report_data_path, name, run, max_recall_k)
+    aggregate, per_user = read_report_run(report_data_path, name, run, max_recall_k)
 
     n_scored, n_dropped = _num_scored_dropped_users(aggregate)
     metric = analysis.per_user_metric
@@ -1321,7 +1321,7 @@ def print_report(
         print(f"\n-- paired per-user {metric} by hop band of each positive, vs {reference} --")
         print(paired_comparison_by_band(per_user, reference, metric))
 
-        by_distance = distance_band_recall(per_user, load_home_distances(report_data_path, name, run), distance_bands)
+        by_distance = distance_band_recall(per_user, read_home_distances(report_data_path, name, run), distance_bands)
 
         print(f"\n-- per-user {metric} by distance band of each positive, edges {distance_bands} km, avg over seeds --")
         print(distance_band_recall_table(by_distance))
@@ -1336,8 +1336,8 @@ def print_report(
         print(paired_comparison_by_home_coverage(per_user, reference, metric))
 
         if (report_data_path / f"{name}-scores-{run}.parquet").exists():
-            scores = load_score_vectors(report_data_path, name, run)
-            home_distances = load_home_distances(report_data_path, name, run)
+            scores = read_score_vectors(report_data_path, name, run)
+            home_distances = read_home_distances(report_data_path, name, run)
             band_auc = within_band_auc(per_user, scores, home_distances, distance_bands)
 
             print(f"\n-- AUC within each positive's distance band, edges {distance_bands} km, avg over seeds --")
