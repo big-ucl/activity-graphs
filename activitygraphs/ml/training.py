@@ -11,15 +11,12 @@ import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
+from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.ml.baselines.gravity import unscale_distances
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.datamodule import ActivityDataModule
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.losses import Loss
-
-PER_USER_STAGE = "test_user"
-SCORE_VECTOR_STAGE = "test_scores"
-HOME_DISTANCE_STAGE = "test_distances"
 
 
 def home_distance_frame(datamodule: ActivityDataModule) -> pl.DataFrame:

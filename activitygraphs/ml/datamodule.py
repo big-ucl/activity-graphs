@@ -21,8 +21,8 @@ def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tens
     beyond the "general" popularity signal.
     """
     idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
-    labels = train_dataset.spatial_labels[idx].squeeze(-1)
-    home_idx = train_dataset.spatial_features[idx, :, train_dataset.is_home_spatial_idx].argmax(dim=1)
+    labels = train_dataset.visit_labels[idx].squeeze(-1)
+    home_idx = train_dataset.user_node_features[idx, :, train_dataset.is_home_user_node_idx].argmax(dim=1)
 
     return popularity_logit(labels, home_idx)
 
@@ -30,7 +30,7 @@ def _compute_node_popularity_logit(train_dataset: ActivityDataset) -> torch.Tens
 def _compute_home_coverage(train_dataset: ActivityDataset, test_dataset: ActivityDataset) -> pl.DataFrame:
     """Compute each _test_ user's home node and whether any training user also has a home there."""
     # Index of the home node of every user in the survey: [n_users].
-    home_node_idx = train_dataset.spatial_features[:, :, train_dataset.is_home_spatial_idx].argmax(dim=1)
+    home_node_idx = train_dataset.user_node_features[:, :, train_dataset.is_home_user_node_idx].argmax(dim=1)
 
     train_idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
     test_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
@@ -50,8 +50,8 @@ class ActivityDataModule(L.LightningDataModule):
 
     Args:
         cfg: Hydra config containing dataset paths.
-        val_size: Fraction of individuals reserved for validation.
-        test_size: Fraction of individuals reserved for testing.
+        val_size: Fraction of users reserved for validation.
+        test_size: Fraction of users reserved for testing.
         seed: Random seed for the train/validation split.
         batch_size: Number of graphs per DataLoader batch.
         project_root: Optional override for the project root path.

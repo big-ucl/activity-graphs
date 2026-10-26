@@ -35,7 +35,7 @@ def make_graphs(
         x = torch.zeros(n_nodes, 2)
         x[home, IS_HOME_IDX] = 1.0
         graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=user_labels.float().unsqueeze(-1))
-        graph.graph_x = torch.zeros(1, 1)
+        graph.user_attr = torch.zeros(1, 1)
         graph.distances = torch.from_numpy(scaler.transform(user_distances.reshape(-1, 1).numpy())).float()
         graphs.append(graph)
     return graphs

@@ -30,7 +30,7 @@ NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
 IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
 # Column of the per-user ``is_home`` indicator in the synthetic ``x``, mirroring the real dataset,
-# where the spatial block starts with ``is_home`` (see ``ActivityDataset.is_home_col_idx``).
+# where the user node block starts with ``is_home`` (see ``ActivityDataset.is_home_col_idx``).
 IS_HOME_IDX = 0
 HOME_NODE = 0
 
@@ -42,9 +42,9 @@ def chain_hop_distance(num_nodes: int = 8) -> torch.Tensor:
 
 
 def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
-    """Return a synthetic PyG Batch with binary node labels, demographics, and unique user ids.
+    """Return a synthetic PyG Batch with binary node labels, user attributes, and unique user ids.
 
-    Each graph carries ``graph_x`` so ``extract_features`` exercises the demographics path;
+    Each graph carries ``user_attr`` so ``extract_features`` exercises the user attribute path;
     feature width is ``NUM_NODE_FEATURES + NUM_DEMO_FEATURES`` (== IN_CHANNELS). Node ``HOME_NODE``
     of every graph is that user's home and is labelled visited, as it always is in the real data.
     """
@@ -68,7 +68,7 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
             y=y,
             user_id=torch.tensor([start_user_id + g], dtype=torch.long),
         )
-        data.graph_x = torch.rand(1, NUM_DEMO_FEATURES, generator=rng)
+        data.user_attr = torch.rand(1, NUM_DEMO_FEATURES, generator=rng)
         graphs.append(data)
     return pyg.data.Batch.from_data_list(graphs)
 
@@ -599,7 +599,7 @@ def fake_dataset(num_features: int = 6, num_demo: int = 3, num_dist: int = 1) ->
     """Minimal stand-in exposing the attributes extracted_features_dim reads."""
     return types.SimpleNamespace(
         num_features=num_features,
-        demographics=torch.zeros(1, num_demo),
+        user_attributes=torch.zeros(1, num_demo),
         distances=torch.zeros(1, num_dist),
     )
 

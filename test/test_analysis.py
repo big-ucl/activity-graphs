@@ -45,9 +45,9 @@ from activitygraphs.analysis import (
     within_band_auc,
     within_band_auc_table,
 )
+from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.ml.lightning_module import ActivityGraphModule
 from activitygraphs.ml.models import NodeMLP
-from activitygraphs.ml.training import PER_USER_STAGE, SCORE_VECTOR_STAGE
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"
@@ -89,18 +89,18 @@ def make_per_user() -> pl.DataFrame:
 class FakeDataset:
     """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``ActivityDataset``."""
 
-    spatial_features: torch.Tensor
+    user_node_features: torch.Tensor
     num_nodes: int
-    is_home_spatial_idx: int
+    is_home_user_node_idx: int
 
 
 def make_dataset(home_nodes: list[int], n_nodes: int = 3, is_home_idx: int = 1) -> FakeDataset:
     """Dataset whose ``is_home`` column peaks at ``home_nodes[i]`` for user ``i``."""
-    spatial = torch.zeros(len(home_nodes), n_nodes, is_home_idx + 1)
+    user_node = torch.zeros(len(home_nodes), n_nodes, is_home_idx + 1)
     for user, node in enumerate(home_nodes):
-        spatial[user, node, is_home_idx] = 1.0
+        user_node[user, node, is_home_idx] = 1.0
 
-    return FakeDataset(spatial_features=spatial, num_nodes=n_nodes, is_home_spatial_idx=is_home_idx)
+    return FakeDataset(user_node_features=user_node, num_nodes=n_nodes, is_home_user_node_idx=is_home_idx)
 
 
 def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:
@@ -893,7 +893,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
         y = (torch.rand(num_nodes, 1, generator=generator) < 0.2).float()
         y[0] = 1.0
         graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
-        graph.graph_x = torch.zeros(1, 1)
+        graph.user_attr = torch.zeros(1, 1)
         graph.user_id = torch.tensor([user])
         graphs.append(graph)
 

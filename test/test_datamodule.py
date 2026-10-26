@@ -21,9 +21,9 @@ def datamodule(load_or_skip) -> ActivityDataModule:
 
 
 class TestActivityDataModule:
-    def test_split_covers_all_individuals(self, datamodule):
-        # Subsets share the full (unsliced) spatial_labels tensor, so shape[0] is the total count.
-        total = datamodule.train_dataset.spatial_labels.shape[0]
+    def test_split_covers_all_users(self, datamodule):
+        # Subsets share the full (unsliced) visit_labels tensor, so shape[0] is the total count.
+        total = datamodule.train_dataset.visit_labels.shape[0]
         n_split = len(datamodule.train_dataset) + len(datamodule.val_dataset) + len(datamodule.test_dataset)
         assert n_split == total
 

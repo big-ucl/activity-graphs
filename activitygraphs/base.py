@@ -1,4 +1,4 @@
-"""Enums (Mode, Purpose) and Polars/GeoPandas schemas shared across all modules."""
+"""Enums (Mode, Purpose), Polars/GeoPandas schemas and the results stage names shared across all modules."""
 
 from enum import StrEnum
 
@@ -120,3 +120,7 @@ TRANSFER_EDGE_LIST_SCHEMA = pl.Schema({
     "travel_time_min": pl.Float64,
 })
 CRS = "EPSG:4326"
+
+PER_USER_STAGE = "test_user"
+SCORE_VECTOR_STAGE = "test_scores"
+HOME_DISTANCE_STAGE = "test_distances"

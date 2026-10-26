@@ -20,11 +20,11 @@ import polars as pl
 import torch
 from scipy.stats import rankdata, wilcoxon
 
+from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
 from activitygraphs.ml.dataset import ActivityDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
-from activitygraphs.ml.training import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 
 # Baseline model representing node popularity.
 POPULARITY_MODEL = "VisitFrequency"
@@ -1220,7 +1220,7 @@ def home_zone_summary(dataset: ActivityDataset, occupancy_thresholds: Sequence[i
         users_per_node, p50, p90, max, share_users_ge_10/25/60``.
     """
     n_nodes = dataset.num_nodes
-    home_nodes = dataset.spatial_features[:, :, dataset.is_home_spatial_idx].argmax(dim=1)
+    home_nodes = dataset.user_node_features[:, :, dataset.is_home_user_node_idx].argmax(dim=1)
     occupancy_thresholds = (
         DEFAULT_ANALYSIS.occupancy_thresholds if occupancy_thresholds is None else occupancy_thresholds
     )

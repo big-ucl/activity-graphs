@@ -15,9 +15,9 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 from activitygraphs import analysis, figures
+from activitygraphs.base import PER_USER_STAGE
 from activitygraphs.config import read_config
 from activitygraphs.figures import DASHED, DOTTED, SOLID, ModelStyle
-from activitygraphs.ml.training import PER_USER_STAGE
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

@@ -25,7 +25,12 @@ from activitygraphs.surveys.cmap import (
     build_cmap_survey,
     build_cmap_users,
 )
-from activitygraphs.tensors.build import build_group_ids, build_individual_demographics
+from activitygraphs.tensors.build import (
+    build_group_ids,
+    build_home_indicator,
+    build_user_attributes,
+    build_visit_labels,
+)
 
 IN_REGION_TRACTS = ["17031000100", "17031000200", "17043000100"]
 OUT_OF_REGION_TRACT = "17099000100"  # LaSalle county, outside the CMAP 7-county region
@@ -328,7 +333,7 @@ class TestCMAPSurveyViews:
         assert cmap_survey.users_df["user_id"].to_list() == ["1", "2", "3"]
 
     def test_user_ids_match_users_df_order(self, cmap_survey):
-        # build_group_ids and the demographics tensor are both aligned positionally on this.
+        # build_group_ids and the user attributes tensor are both aligned positionally on this.
         assert cmap_survey.user_ids.to_list() == cmap_survey.users_df["user_id"].to_list()
 
     def test_home_locations_cover_every_user(self, cmap_survey):
@@ -337,15 +342,15 @@ class TestCMAPSurveyViews:
 
     def test_every_users_df_column_is_a_feature_or_an_identifier(self, cmap_survey):
         # Fails the moment a column is added to build_cmap_users without being classified, which is
-        # the only way hh_id (or any other identifier) could reach the demographics tensor.
+        # the only way hh_id (or any other identifier) could reach the user attributes tensor.
         assert set(cmap_survey.demographic_columns) | IDENTIFIER_COLUMNS == set(cmap_survey.users_df.columns)
 
-    def test_hh_id_never_reaches_the_demographics_tensor(self, cmap_survey):
+    def test_hh_id_never_reaches_the_user_attributes_tensor(self, cmap_survey):
         # hh_id lives on users_df for the grouped split; it is an identifier, not a feature.
         assert "hh_id" not in cmap_survey.demographic_columns
 
-        demographics = build_individual_demographics(cmap_survey)
-        assert demographics.shape == (len(cmap_survey.user_ids), len(cmap_survey.demographic_columns))
+        user_attributes = build_user_attributes(cmap_survey)
+        assert user_attributes.shape == (len(cmap_survey.user_ids), len(cmap_survey.demographic_columns))
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder
@@ -363,6 +368,26 @@ class TestCMAPSurveyViews:
         # polars unique() does not maintain order by default; an unstable labelling would silently
         # change the split for a fixed seed on every cache rebuild.
         assert build_group_ids(cmap_survey).tolist() == build_group_ids(cmap_survey).tolist()
+
+
+class TestUserNodeTensors:
+    def test_home_indicator_marks_each_users_home_only(self, cmap_survey):
+        is_home = build_home_indicator(cmap_survey).squeeze(-1)
+
+        assert is_home.tolist() == [[1, 0, 0], [1, 0, 0], [0, 1, 0]]
+
+    def test_visit_labels_over_every_purpose_mark_both_trip_ends(self, cmap_survey):
+        labels = build_visit_labels(cmap_survey, list(Purpose)).squeeze(-1)
+
+        assert labels.tolist() == [[1, 1, 0]] * 3
+
+    def test_visit_labels_keep_only_the_given_purposes(self, cmap_survey):
+        labels = build_visit_labels(cmap_survey, [Purpose.WORK_MAIN]).squeeze(-1)
+
+        assert labels.tolist() == [[0, 1, 0]] * 3
+
+    def test_visit_labels_without_purposes_are_empty(self, cmap_survey):
+        assert build_visit_labels(cmap_survey, []).sum() == 0
 
 
 @pytest.mark.integration

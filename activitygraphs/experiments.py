@@ -12,6 +12,7 @@ import polars as pl
 import torch
 
 from activitygraphs.analysis import check_overfit_health
+from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config
 from activitygraphs.ml.baselines import (
     ConditionalGravityBaseline,
@@ -30,9 +31,6 @@ from activitygraphs.ml.lightning_module import extracted_features_dim
 from activitygraphs.ml.losses import Loss, build_loss
 from activitygraphs.ml.models import FullyConnectedMLP, GATSkip, GraphTransformer, NodeMLP
 from activitygraphs.ml.training import (
-    HOME_DISTANCE_STAGE,
-    PER_USER_STAGE,
-    SCORE_VECTOR_STAGE,
     WandBParams,
     evaluate_baseline,
     home_distance_frame,

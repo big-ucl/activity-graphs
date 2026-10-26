@@ -402,7 +402,7 @@ class TestPerUserColumnsInModule:
         y[0] = 1.0
         y[3] = 1.0
         graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
-        graph.graph_x = torch.zeros(1, 2)  # demographics
+        graph.user_attr = torch.zeros(1, 2)
         graph.user_id = torch.tensor([0])
         return graph
 

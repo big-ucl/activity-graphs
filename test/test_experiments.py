@@ -6,6 +6,7 @@ import polars as pl
 import torch
 
 from activitygraphs import experiments
+from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.experiments import (
     ExperimentSetup,
     ModelSpec,
@@ -13,7 +14,7 @@ from activitygraphs.experiments import (
     run_model_specs,
     save_results,
 )
-from activitygraphs.ml.training import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE, WandBParams
+from activitygraphs.ml.training import WandBParams
 
 
 def make_setup(train_seeds: list[int], run_model=None) -> ExperimentSetup:

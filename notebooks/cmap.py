@@ -96,7 +96,7 @@ def _(cfg):
 @app.cell
 def _(datamodule):
     full_dataset = datamodule.train_dataset
-    full_dataset.spatial_features[:, :, full_dataset.is_home_spatial_idx].argmax(dim=1).shape
+    full_dataset.user_node_features[:, :, full_dataset.is_home_user_node_idx].argmax(dim=1).shape
     return
 
 

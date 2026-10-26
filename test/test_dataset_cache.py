@@ -14,13 +14,13 @@ from activitygraphs.ml.dataset import dataset_fingerprint, split_indices
 class FakeDataset:
     """Minimal stand-in exposing only what ``dataset_fingerprint`` and ``split_indices`` read."""
 
-    spatial_features: torch.Tensor
-    demographics: torch.Tensor
+    user_node_features: torch.Tensor
+    user_attributes: torch.Tensor
     num_nodes: int
     group_ids: torch.Tensor
 
     def __len__(self) -> int:
-        return self.demographics.shape[0]
+        return self.user_attributes.shape[0]
 
 
 def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_per_group: int = 1) -> FakeDataset:
@@ -31,8 +31,8 @@ def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_pe
     group_ids = torch.arange(n_users) // users_per_group
 
     return FakeDataset(
-        spatial_features=torch.zeros((n_users, n_nodes, 4)),
-        demographics=torch.zeros((n_users, n_demo)),
+        user_node_features=torch.zeros((n_users, n_nodes, 4)),
+        user_attributes=torch.zeros((n_users, n_demo)),
         num_nodes=n_nodes,
         group_ids=group_ids,
     )

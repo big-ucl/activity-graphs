@@ -21,7 +21,7 @@ from activitygraphs.config import Config
 from activitygraphs.graph import load_graph
 from activitygraphs.ml.metrics import compute_home_hop_distance
 from activitygraphs.surveys.registry import load_survey
-from activitygraphs.tensors import SPATIAL_FEATURE_NAMES, SurveyTensors, build_tensors
+from activitygraphs.tensors import USER_NODE_FEATURE_NAMES, SurveyTensors, build_tensors
 from activitygraphs.utils import get_project_root
 
 type Fingerprint = dict
@@ -33,18 +33,18 @@ def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
 
 
 class ActivityDataset(pyg.data.Dataset):
-    """Main PyG dataset for a travel survey: shared graph + per-user spatial features/labels + demographics.
+    """Main PyG dataset for a travel survey: shared graph + per-user node features/visit labels + user attributes.
 
     Stores the graph once and slices per-user tensors on ``get()`` call.
-    Each item returned by ``get(i)`` is a ``pyg.data.Data`` with ``x = [location_features || spatial_features[i]]``,
-    ``y = spatial_labels[i]``, and ``graph_x = demographics[i]``.
+    Each item returned by ``get(i)`` is a ``pyg.data.Data`` with ``x = [location_features || user_node_features[i]]``,
+    ``y = visit_labels[i]``, and ``user_attr = user_attributes[i]``.
     """
 
     PROCESSED_FILE_NAMES = [
         "pyg_graph.pt",
-        "spatial_features.pt",
-        "spatial_labels.pt",
-        "demographics.pt",
+        "user_node_features.pt",
+        "visit_labels.pt",
+        "user_attributes.pt",
         "distances.pt",
         "group_ids.pt",
     ]
@@ -64,14 +64,14 @@ class ActivityDataset(pyg.data.Dataset):
 
         processed_dir = Path(self.processed_dir)
         self.pyg_graph: pyg.data.Data = torch.load(processed_dir / "pyg_graph.pt", weights_only=False)
-        self.spatial_features: torch.Tensor = torch.load(processed_dir / "spatial_features.pt", weights_only=True)
-        self.spatial_labels: torch.Tensor = torch.load(processed_dir / "spatial_labels.pt", weights_only=True)
-        self.demographics: torch.Tensor = torch.load(processed_dir / "demographics.pt", weights_only=True)
+        self.user_node_features: torch.Tensor = torch.load(processed_dir / "user_node_features.pt", weights_only=True)
+        self.visit_labels: torch.Tensor = torch.load(processed_dir / "visit_labels.pt", weights_only=True)
+        self.user_attributes: torch.Tensor = torch.load(processed_dir / "user_attributes.pt", weights_only=True)
         self.distances: torch.Tensor = torch.load(processed_dir / "distances.pt", weights_only=True)
         self.group_ids: torch.Tensor = torch.load(processed_dir / "group_ids.pt", weights_only=True)
 
         # Check that each user has one and only one home node
-        home_counts = self.spatial_features[:, :, self.is_home_spatial_idx].sum(dim=1)
+        home_counts = self.user_node_features[:, :, self.is_home_user_node_idx].sum(dim=1)
         if not torch.all(home_counts == 1):
             num_bad = int((home_counts != 1).sum())
             raise ValueError(f"{num_bad} users do not have exactly one home node. Expected one per user.")
@@ -84,7 +84,7 @@ class ActivityDataset(pyg.data.Dataset):
         if num_nodes is None:
             raise ValueError("Graph has `None` number of nodes")
 
-        self.num_individuals: int = self.demographics.size(0)
+        self.num_users: int = self.user_attributes.size(0)
         self.num_nodes: int = num_nodes
         self._is_scaled: bool = False
 
@@ -105,18 +105,18 @@ class ActivityDataset(pyg.data.Dataset):
 
     @property
     def num_location_features(self) -> int:
-        """Number of location node-feature columns (those preceding the spatial block in ``x``)."""
+        """Number of location node-feature columns (those preceding the user node block in ``x``)."""
         return self.location_x.shape[1]
 
     @property
-    def is_home_spatial_idx(self) -> int:
-        """Column index of ``is_home`` within the per-user spatial feature block."""
-        return SPATIAL_FEATURE_NAMES.index("is_home")
+    def is_home_user_node_idx(self) -> int:
+        """Column index of ``is_home`` within the per-user node feature block."""
+        return USER_NODE_FEATURE_NAMES.index("is_home")
 
     @property
     def is_home_col_idx(self) -> int:
         """Column index of ``is_home`` within the concatenated node feature matrix ``x``."""
-        return self.num_location_features + self.is_home_spatial_idx
+        return self.num_location_features + self.is_home_user_node_idx
 
     @cached_property
     def home_hop_distance(self) -> np.ndarray:
@@ -149,30 +149,30 @@ class ActivityDataset(pyg.data.Dataset):
             raise ValueError("First-time construction requires the survey tensors to be passed to init.")
 
         graph = self._tensors_in.pyg_graph
-        sf = self._tensors_in.spatial_features
-        sl = self._tensors_in.spatial_labels
-        demo = self._tensors_in.demographics
+        unf = self._tensors_in.user_node_features
+        vl = self._tensors_in.visit_labels
+        attr = self._tensors_in.user_attributes
         dist = self._tensors_in.distances
         group_ids = self._tensors_in.group_ids
 
-        num_sf_users, num_sf_nodes, _ = sf.shape
-        num_sl_users, num_sl_nodes, num_sl_labels = sl.shape
-        num_dm_users, _ = demo.shape
+        num_unf_users, num_unf_nodes, _ = unf.shape
+        num_vl_users, num_vl_nodes, num_vl_labels = vl.shape
+        num_attr_users, _ = attr.shape
         num_di_users, num_di_nodes, num_di_feat = dist.shape
         num_grp_users = group_ids.shape[0]
 
-        if not (graph.num_nodes == num_sf_nodes == num_sl_nodes == num_di_nodes):
+        if not (graph.num_nodes == num_unf_nodes == num_vl_nodes == num_di_nodes):
             raise ValueError(
-                f"Node count mismatch: graph has {graph.num_nodes}, spatial_features has {num_sf_nodes}, "
-                f"spatial_labels has {num_sl_nodes}, distances has {num_di_nodes}."
+                f"Node count mismatch: graph has {graph.num_nodes}, user_node_features has {num_unf_nodes}, "
+                f"visit_labels has {num_vl_nodes}, distances has {num_di_nodes}."
             )
-        if not (num_sf_users == num_sl_users == num_dm_users == num_di_users == num_grp_users):
+        if not (num_unf_users == num_vl_users == num_attr_users == num_di_users == num_grp_users):
             raise ValueError(
-                f"Individual count mismatch: spatial_features has {num_sf_users}, spatial_labels has {num_sl_users}, "
-                f"demographics has {num_dm_users}, distances has {num_di_users}."
+                f"User count mismatch: user_node_features has {num_unf_users}, visit_labels has {num_vl_users}, "
+                f"user_attributes has {num_attr_users}, distances has {num_di_users}."
             )
-        if num_sl_labels != 1:
-            raise ValueError(f"spatial_labels last dim must be 1, got {num_sl_labels}.")
+        if num_vl_labels != 1:
+            raise ValueError(f"visit_labels last dim must be 1, got {num_vl_labels}.")
         if num_di_feat != 1:
             raise ValueError(f"distances last dim must be 1, got {num_di_feat}.")
 
@@ -181,39 +181,39 @@ class ActivityDataset(pyg.data.Dataset):
 
         processed_dir = Path(self.processed_dir)
         torch.save(graph, processed_dir / "pyg_graph.pt")
-        torch.save(sf, processed_dir / "spatial_features.pt")
-        torch.save(sl, processed_dir / "spatial_labels.pt")
-        torch.save(demo, processed_dir / "demographics.pt")
+        torch.save(unf, processed_dir / "user_node_features.pt")
+        torch.save(vl, processed_dir / "visit_labels.pt")
+        torch.save(attr, processed_dir / "user_attributes.pt")
         torch.save(dist, processed_dir / "distances.pt")
         torch.save(group_ids, processed_dir / "group_ids.pt")
 
     def len(self) -> int:
         """Return the number of users."""
-        return self.num_individuals
+        return self.num_users
 
     def get(self, idx: int) -> pyg.data.Data:
         """Return user ``idx``'s graph: shared location features joined with the user's features and labels."""
-        if not 0 <= idx < self.num_individuals:
-            raise IndexError(f"Index {idx} out of range for {self.num_individuals} individuals.")
+        if not 0 <= idx < self.num_users:
+            raise IndexError(f"Index {idx} out of range for {self.num_users} users.")
 
         location_x = self.location_x
-        spatial_x = self.spatial_features[idx]
+        user_node_x = self.user_node_features[idx]
 
-        # Cast spatial features to same type as graph features if mismatch
-        if spatial_x.dtype != location_x.dtype:
-            spatial_x = spatial_x.to(location_x.dtype)
+        # Cast user node features to same type as graph features if mismatch
+        if user_node_x.dtype != location_x.dtype:
+            user_node_x = user_node_x.to(location_x.dtype)
 
-        # Create new individual-annotated graph
-        full_x = torch.cat([location_x, spatial_x], dim=1)
-        y = self.spatial_labels[idx]
-        graph_x = self.demographics[idx]
+        # Create new user-annotated graph
+        full_x = torch.cat([location_x, user_node_x], dim=1)
+        y = self.visit_labels[idx]
+        user_attr = self.user_attributes[idx]
         edge_index = self.edge_index
         edge_attr = self.edge_attr
 
         data = pyg.data.Data(x=full_x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
         # Unsqueeze so batching works
-        data.graph_x = graph_x.unsqueeze(0)
+        data.user_attr = user_attr.unsqueeze(0)
         data.user_id = torch.tensor([idx], dtype=torch.long)
 
         # Per-user distance-from-home
@@ -235,10 +235,10 @@ class FittedScalers:
 
     node_features: StandardScaler
     edge_features: StandardScaler
-    spatial: StandardScaler | None
-    demographics: StandardScaler
+    user_node_features: StandardScaler | None
+    user_attributes: StandardScaler
     distances: StandardScaler
-    exclude_spatial_cols: list[int]
+    exclude_user_node_cols: list[int]
     fingerprint: Fingerprint
 
     def save(self, path: Path) -> None:
@@ -295,7 +295,7 @@ def load_splits(
 
     if scalers is None or scalers.fingerprint != fingerprint:
         scalers = fit_scalers(
-            dataset, train_idx, exclude_spatial_cols=[dataset.is_home_spatial_idx], fingerprint=fingerprint
+            dataset, train_idx, exclude_user_node_cols=[dataset.is_home_user_node_idx], fingerprint=fingerprint
         )
         scalers.save(scalers_cache)
 
@@ -381,20 +381,20 @@ def fit_scalers(
     dataset: ActivityDataset,
     train_idx: list[int],
     fingerprint: Fingerprint,
-    exclude_spatial_cols: list[int],
-    exclude_demographic_cols: list[int] | None = None,
+    exclude_user_node_cols: list[int],
+    exclude_user_attribute_cols: list[int] | None = None,
 ) -> FittedScalers:
     """Fit ``StandardScaler`` instances on the training split of each feature group.
 
     Args:
         dataset: The full ``ActivityDataset`` (not yet scaled).
-        train_idx: Indices of training individuals.
-        exclude_spatial_cols: Column indices excluded from spatial scaler fitting (e.g. ``[is_home_spatial_idx]``).
-        exclude_demographic_cols: Column indices excluded from demographics scaler fitting.
+        train_idx: Indices of training users.
+        exclude_user_node_cols: Column indices excluded from user node scaler fitting (e.g. ``[is_home_user_node_idx]``).
+        exclude_user_attribute_cols: Column indices excluded from user attribute scaler fitting.
         fingerprint: Identity of the dataset being fitted on, stored for cache validation.
 
     Returns:
-        ``FittedScalers`` with one scaler per feature group (graph nodes, edges, spatial, demographics).
+        ``FittedScalers`` with one scaler per feature group (graph nodes, edges, user nodes, user attributes).
     """
     # Location node features: no need to separate between train and test, the graph is the same.
     node_scaler = StandardScaler()
@@ -404,24 +404,24 @@ def fit_scalers(
     edge_scaler = StandardScaler()
     edge_scaler.fit(dataset.edge_attr.numpy())
 
-    # Spatial features: individual-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
-    spatial_train = dataset.spatial_features[train_idx]
-    keep = [c for c in range(spatial_train.shape[-1]) if c not in exclude_spatial_cols]
-    spatial_scaler = None
+    # User node features: user-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
+    user_node_train = dataset.user_node_features[train_idx]
+    keep = [c for c in range(user_node_train.shape[-1]) if c not in exclude_user_node_cols]
+    user_node_scaler = None
     if keep:
-        spatial_flat = spatial_train[..., keep].reshape(-1, len(keep)).float().numpy()
-        spatial_scaler = StandardScaler()
-        spatial_scaler.fit(spatial_flat)
+        user_node_flat = user_node_train[..., keep].reshape(-1, len(keep)).float().numpy()
+        user_node_scaler = StandardScaler()
+        user_node_scaler.fit(user_node_flat)
 
-    # Demographics: individual-specific, fit only on train
-    demo_train = dataset.demographics[train_idx]
-    if exclude_demographic_cols:
-        keep = [c for c in range(demo_train.shape[-1]) if c not in exclude_demographic_cols]
-        demo_train = demo_train[..., keep]
-    demo_scaler = StandardScaler()
-    demo_scaler.fit(demo_train.float().numpy())
+    # User attributes: user-specific, fit only on train
+    attr_train = dataset.user_attributes[train_idx]
+    if exclude_user_attribute_cols:
+        keep = [c for c in range(attr_train.shape[-1]) if c not in exclude_user_attribute_cols]
+        attr_train = attr_train[..., keep]
+    attr_scaler = StandardScaler()
+    attr_scaler.fit(attr_train.float().numpy())
 
-    # Distance-from-home: individual-specific, fit only on train
+    # Distance-from-home: user-specific, fit only on train
     distances_train = dataset.distances[train_idx]
     distances_scaler = StandardScaler()
     distances_scaler.fit(distances_train.reshape(-1, distances_train.shape[-1]).float().numpy())
@@ -429,16 +429,16 @@ def fit_scalers(
     return FittedScalers(
         node_features=node_scaler,
         edge_features=edge_scaler,
-        spatial=spatial_scaler,
-        demographics=demo_scaler,
+        user_node_features=user_node_scaler,
+        user_attributes=attr_scaler,
         distances=distances_scaler,
-        exclude_spatial_cols=exclude_spatial_cols,
+        exclude_user_node_cols=exclude_user_node_cols,
         fingerprint=fingerprint,
     )
 
 
 def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
-    """Apply fitted scalers to the dataset in-place, transforming graph/spatial/demographic tensors."""
+    """Apply fitted scalers to the dataset in-place, transforming graph/user node/user attribute tensors."""
     if dataset._is_scaled:
         raise RuntimeError("apply_scalers called twice on the same ActivityDataset")
 
@@ -448,18 +448,18 @@ def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
     ea = dataset.edge_attr.numpy()
     dataset.pyg_graph.edge_attr = torch.from_numpy(scalers.edge_features.transform(ea)).float()
 
-    if scalers.spatial is not None:
-        sf = dataset.spatial_features.float()
-        n_cols = sf.shape[-1]
-        keep = [c for c in range(n_cols) if c not in scalers.exclude_spatial_cols]
-        flat = sf.reshape(-1, n_cols)[:, keep].numpy()
-        scaled_keep = torch.from_numpy(scalers.spatial.transform(flat)).float()
-        result = sf.reshape(-1, n_cols).clone()
+    if scalers.user_node_features is not None:
+        unf = dataset.user_node_features.float()
+        n_cols = unf.shape[-1]
+        keep = [c for c in range(n_cols) if c not in scalers.exclude_user_node_cols]
+        flat = unf.reshape(-1, n_cols)[:, keep].numpy()
+        scaled_keep = torch.from_numpy(scalers.user_node_features.transform(flat)).float()
+        result = unf.reshape(-1, n_cols).clone()
         result[:, keep] = scaled_keep
-        dataset.spatial_features = result.reshape(sf.shape)
+        dataset.user_node_features = result.reshape(unf.shape)
 
-    demo = dataset.demographics.float().numpy()
-    dataset.demographics = torch.from_numpy(scalers.demographics.transform(demo)).float()
+    attr = dataset.user_attributes.float().numpy()
+    dataset.user_attributes = torch.from_numpy(scalers.user_attributes.transform(attr)).float()
 
     dist = dataset.distances.float()
     shape = dist.shape
@@ -480,8 +480,8 @@ def dataset_fingerprint(cfg: Config, dataset: ActivityDataset) -> Fingerprint:
     return {
         "n_users": len(dataset),
         "n_nodes": dataset.num_nodes,
-        "n_spatial_cols": int(dataset.spatial_features.shape[-1]),
-        "n_demographic_cols": int(dataset.demographics.shape[-1]),
+        "n_user_node_cols": int(dataset.user_node_features.shape[-1]),
+        "n_user_attribute_cols": int(dataset.user_attributes.shape[-1]),
         "n_groups": len(dataset.group_ids.unique()),
         "data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest(),
     }

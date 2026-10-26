@@ -42,7 +42,7 @@ def extract_features(
      If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
      hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column for the home index.
 
-    If ``use_demographics`` is True, the per-graph user-specific demographics (``batch.graph_x``) are broadcast over
+    If ``use_demographics`` is True, the per-graph user attributes (``batch.user_attr``) are broadcast over
     nodes and concatenated.
 
     If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column.
@@ -58,7 +58,7 @@ def extract_features(
         x = torch.cat([x, home_pe], dim=-1)
 
     if use_demographics:
-        x = torch.cat([x, batch.graph_x[batch.batch]], dim=-1)
+        x = torch.cat([x, batch.user_attr[batch.batch]], dim=-1)
 
     if not full_info:
         return x
@@ -82,7 +82,7 @@ def extracted_features_dim(
     if use_home_pe:
         dim += n_bins
     if use_demographics:
-        dim += dataset.demographics.shape[1]
+        dim += dataset.user_attributes.shape[1]
     if full_info:
         dim += dataset.distances.shape[-1]
 
