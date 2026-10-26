@@ -1,0 +1,4 @@
+# @package _global_
+# use_demographics on/off on the best MLP and GNN, beside the baselines.
+experiment:
+  name: demographics_ablation

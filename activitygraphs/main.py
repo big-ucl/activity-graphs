@@ -27,11 +27,11 @@ EXPERIMENTS = {
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: Config):
-    """Run the experiment selected by ``train.experiment``."""
-    if cfg.train.experiment not in EXPERIMENTS:
-        raise ValueError(f"train.experiment must be one of {sorted(EXPERIMENTS)}, got {cfg.train.experiment}")
+    """Run the experiment selected by ``experiment.name``."""
+    if cfg.experiment.name not in EXPERIMENTS:
+        raise ValueError(f"experiment.name must be one of {sorted(EXPERIMENTS)}, got {cfg.experiment.name}")
 
-    experiment = EXPERIMENTS[cfg.train.experiment]
+    experiment = EXPERIMENTS[cfg.experiment.name]
     experiment(cfg)
 
 

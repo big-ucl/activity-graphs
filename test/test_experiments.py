@@ -9,6 +9,7 @@ import lightning as L
 import polars as pl
 import pytest
 import torch
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
@@ -26,17 +27,26 @@ from activitygraphs.experiments.runners import run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
 from activitygraphs.experiments.training import WandBParams
 from activitygraphs.experiments.variants import Variant, build_model, variant_hyperparams
+from activitygraphs.main import EXPERIMENTS
 from activitygraphs.ml.lightning_module import HOME_PE_BINS
 from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.utils import get_project_root
 
 STARTED = datetime(2026, 10, 26, 15, 30, 0)
+CONFIG_DIR = get_project_root() / "activitygraphs/conf"
+EXPERIMENT_CONFIGS = sorted((CONFIG_DIR / "experiment").glob("*.yaml"))
 
 
 @pytest.fixture(scope="module")
 def cfg() -> Config:
     return read_config(get_project_root(), verbose=False)
+
+
+def compose_with(*overrides: str) -> Config:
+    """The training config composed with ``overrides``, as the command line would compose it."""
+    with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR.resolve())):
+        return cast(Config, compose(config_name="config", overrides=list(overrides)))
 
 
 def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
@@ -168,6 +178,35 @@ class TestTrainerConfig:
         assert set(cfg.trainer) <= set(inspect.signature(L.Trainer.__init__).parameters)
 
 
+class TestExperimentConfigs:
+    @pytest.mark.parametrize("path", EXPERIMENT_CONFIGS, ids=lambda path: path.stem)
+    def test_every_experiment_config_names_a_runner(self, path):
+        assert OmegaConf.load(path).experiment.name in EXPERIMENTS
+
+    def test_comparison_is_the_default(self, cfg):
+        assert cfg.experiment.name == "comparison"
+
+    def test_overfit_health_sets_what_the_check_reads(self):
+        cfg = compose_with("experiment=overfit_health")
+
+        assert cfg.experiment.name == "overfit_health"
+        assert cfg.trainer.overfit_batches > 0
+        assert cfg.train.log_train_ranking is True
+        assert len(cfg.train.train_seeds) == 1
+
+    def test_the_command_line_overrides_an_experiment_setting(self):
+        cfg = compose_with("experiment=depth_sweep", "experiment.depths=[3]")
+
+        assert cfg.experiment.depths == [3]
+
+    def test_overfit_health_rejects_a_run_that_does_not_overfit(self, monkeypatch):
+        cfg = compose_with("experiment=overfit_health", "trainer.overfit_batches=0")
+        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: pytest.fail("set up a run"))
+
+        with pytest.raises(ValueError, match="overfit_batches"):
+            runners.overfit_health_experiment(cfg)
+
+
 class TestArchitectureRegistry:
     @pytest.mark.parametrize("path", sorted((get_project_root() / "activitygraphs/conf/model").glob("*.yaml")))
     def test_every_model_config_names_a_registered_architecture(self, path):
@@ -294,7 +333,7 @@ class TestDepthSweep:
         monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
 
         run_cfg = types.SimpleNamespace(
-            train=types.SimpleNamespace(depths=depths),
+            experiment=types.SimpleNamespace(depths=depths),
             paths=types.SimpleNamespace(reports="reports"),
             data=types.SimpleNamespace(name="CMAP"),
         )

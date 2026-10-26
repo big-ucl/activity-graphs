@@ -93,7 +93,7 @@ def per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFr
 class WandBParams:
     """W&B logging identity shared by every run of one experiment invocation.
 
-    ``experiment`` is the name of the experiment that produced the run (``cfg.train.experiment``).
+    ``experiment`` is the name of the experiment that produced the run (``cfg.experiment.name``).
     It is carried into the group, the tags and the logged hyperparameters, so a run can be traced
     back to the experiment it belongs to from any of the three places W&B lets you filter on.
 

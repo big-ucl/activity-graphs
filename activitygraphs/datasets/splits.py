@@ -1,6 +1,7 @@
 """Split strategies, each assigning every user of a dataset to the train, validation or test split, and the split cache."""
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -8,6 +9,8 @@ from typing import Protocol
 from sklearn.model_selection import GroupShuffleSplit
 
 from activitygraphs.datasets.dataset import Fingerprint, VisitDataset
+
+log = logging.getLogger(__name__)
 
 type SplitIndices = tuple[list[int], list[int], list[int]]
 
@@ -93,7 +96,7 @@ def load_split_indices(
         if cached_indices.get("fingerprint") == fingerprint:
             return cached_indices["train"], cached_indices["val"], cached_indices["test"]
 
-        print(f"Cached indices at `{cache_path.name}` do not match fingerprint, re-splitting.")
+        log.info("Cached indices at `%s` do not match fingerprint, re-splitting.", cache_path.name)
 
     train_idx, val_idx, test_idx = split.split(dataset, seed)
 

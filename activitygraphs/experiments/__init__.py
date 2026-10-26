@@ -1,4 +1,4 @@
-"""[Stage 6: dataset -> trained models -> results] This package runs the experiments ``train.experiment`` selects.
+"""[Stage 6: dataset -> trained models -> results] This package runs the experiments ``experiment.name`` selects.
 
 It is split into the following modules:
   - ``runners``: one function per experiment, each a list of variants trained beside the baselines, and the

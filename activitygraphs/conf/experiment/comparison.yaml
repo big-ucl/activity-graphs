@@ -1,0 +1,4 @@
+# @package _global_
+# Comparison between the ML architectures, beside the baselines.
+experiment:
+  name: comparison

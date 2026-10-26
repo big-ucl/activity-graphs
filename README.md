@@ -34,8 +34,8 @@ uv run activity-graphs train.loss.neg_sampler=hard  # hard near-home BPR negativ
 uv run activity-graphs train.wandb=false            # disable Weights & Biases logging
 
 uv run activity-graphs train.train_seeds=[1,2,3]    # repeat every model for each training seed
-uv run activity-graphs train.experiment=depth_sweep # sweep GATSkip depth instead of comparing architectures
-uv run activity-graphs train.experiment=depth_sweep train.depths=[2,4,8]
+uv run activity-graphs experiment=depth_sweep       # sweep GATSkip depth instead of comparing architectures
+uv run activity-graphs experiment=depth_sweep experiment.depths=[2,4,8]
 ```
 
 Once a run has finished, report its results:
@@ -54,7 +54,7 @@ uv run report-results analysis.reference_model=MLP-dist   # change reference mod
 
 Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line.
 
-`train.experiment` selects what to run:
+`experiment=<name>` (a file of `activitygraphs/conf/experiment/`) selects what to run:
 
 - `comparison` (default) trains the GNN variants (GATSkip, GraphTransformer, MLP)
   against frequency baselines,

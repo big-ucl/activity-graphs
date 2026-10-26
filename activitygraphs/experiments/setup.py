@@ -103,9 +103,9 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         use_wandb=cfg.train.wandb,
         project=cfg.train.wandb_project,
         entity=cfg.train.wandb_entity,
-        group=f"{cfg.data.name}-{cfg.train.experiment}-{started:{TIMESTAMP_FORMAT}}",
+        group=f"{cfg.data.name}-{cfg.experiment.name}-{started:{TIMESTAMP_FORMAT}}",
         dataset_name=cfg.data.name,
-        experiment=cfg.train.experiment,
+        experiment=cfg.experiment.name,
         config=run_config(cfg),
         run_dir=None if run_dir is None else str(run_dir),
     )

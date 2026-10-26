@@ -4,6 +4,9 @@ defaults:
   - model@models.mlp: mlp
   - model@models.gat: gat
   - model@models.gps: gps
+  # The experiment to run, one of `conf/experiment/`: comparison, depth_sweep, demographics_ablation, overfit_health,
+  # baselines.
+  - experiment: comparison
 
 paths:
   reports: reports
@@ -29,14 +32,6 @@ train:
   split_seed: 42
   # Training seeds; each model is trained once per entry. Use several to measure run-to-run spread.
   train_seeds: [ 42, 43, 44 ]
-
-  # comparison = comparison between ML architectures;
-  # depth_sweep = GATSkip receptive-field sweep over `depths`;
-  # demographics_ablation = use_demographics on/off on best MLP and GNN; overfit_health = single batch fit;
-  # baselines = compare only the baselines, no learned models.
-  experiment: comparison
-  # GATSkip message-passing depths for the depth sweep (a NodeMLP depth-0 anchor is always included).
-  depths: [ 2, 4, 8 ]
 
   # DataLoader settings of every split.
   loader:

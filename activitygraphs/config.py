@@ -273,9 +273,6 @@ class TrainConfig:
     split_seed: int
     train_seeds: list[int]
 
-    experiment: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
-    depths: list[int]
-
     loader: LoaderConfig
     val_size: float
     test_size: float
@@ -297,6 +294,28 @@ class TrainConfig:
     wandb_entity: str | None
 
     loss: LossConfig
+
+
+@dataclass
+class ExperimentConfig:
+    """Config for the experiment to run, from the ``experiment`` config group.
+
+    Attributes:
+        name: Key of the experiment's runner in ``main.EXPERIMENTS``.
+    """
+
+    name: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
+
+
+@dataclass
+class DepthSweepConfig(ExperimentConfig):
+    """Config for the GATSkip depth sweep.
+
+    Attributes:
+        depths: GATSkip message-passing depths swept.
+    """
+
+    depths: list[int]
 
 
 @dataclass
@@ -382,6 +401,7 @@ class Config:
     paths: OutputPaths
     trainer: TrainerConfig
     train: TrainConfig
+    experiment: ExperimentConfig
     models: dict[str, ModelConfig]
     analysis: AnalysisConfig
 

@@ -1,16 +1,19 @@
-"""Top-level experiment runners: the experiments ``train.experiment`` selects, each a list of variants and baselines."""
+"""Top-level experiment runners: the experiments ``experiment.name`` selects, each a list of variants and baselines."""
 
-import copy
+import logging
+from typing import cast
 
 import lightning as L
 import polars as pl
 
 from activitygraphs.analysis import check_overfit_health
-from activitygraphs.config import Config
+from activitygraphs.config import Config, DepthSweepConfig
 from activitygraphs.experiments.results import save_results
 from activitygraphs.experiments.setup import ExperimentSetup, setup_experiment, with_overrides
 from activitygraphs.experiments.training import train_and_evaluate_model
 from activitygraphs.experiments.variants import Variant, build_model
+
+log = logging.getLogger(__name__)
 
 
 def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.DataFrame]:
@@ -75,13 +78,13 @@ def comparison_experiment(cfg: Config):
 
 
 def depth_sweep_experiment(cfg: Config):
-    """Sweep number of message passing layers of the GATSkip (with HPE and home distance) over ``cfg.train.depths``."""
+    """Sweep number of message passing layers of the GATSkip (with HPE and home distance) over ``cfg.experiment.depths``."""
     setup = setup_experiment(cfg)
     gat = setup.models["gat"]
 
     variants = [Variant(setup.models["mlp"], full_info=True, extra_hyperparams={"depth": 0})]
 
-    for depth in cfg.train.depths:
+    for depth in cast(DepthSweepConfig, cfg.experiment).depths:
         gat_at_depth = with_overrides(gat, {"num_gcn_layers": depth})
         variants.append(Variant(gat_at_depth, full_info=True, use_home_pe=True, extra_hyperparams={"depth": depth}))
 
@@ -123,16 +126,16 @@ def demographics_ablation_experiment(cfg: Config):
 def overfit_health_experiment(cfg: Config):
     """Check if each architecture can overfit on a single batch.
 
-    Forces ``trainer.overfit_batches`` and requires ``train.log_train_ranking``, since the check is read entirely off
-    ``train_avg_recall@K``. A healthy model drives ``train_avg_recall@K`` to ~1.0 on a batch it has memorised; failure
-    is capacity or optimisation rather than data, and invalidates every downstream reading. Runs one seed and no
-    baselines.
+    Requires ``trainer.overfit_batches > 0`` and ``train.log_train_ranking``, both set by
+    ``conf/experiment/overfit_health.yaml``, since the check is read entirely off ``train_avg_recall@K``. A healthy
+    model drives ``train_avg_recall@K`` to ~1.0 on a batch it has memorised; failure is capacity or optimisation rather
+    than data, and invalidates every downstream reading. Runs no baselines.
+
+    Raises:
+        ValueError: ``trainer.overfit_batches`` is 0 or ``train.log_train_ranking`` is off.
     """
-    cfg = copy.deepcopy(cfg)
-    cfg.train.experiment = "overfit_health"
-    cfg.train.log_train_ranking = True
-    cfg.trainer.overfit_batches = max(1, cfg.trainer.overfit_batches)
-    cfg.train.train_seeds = cfg.train.train_seeds[:1]
+    if cfg.trainer.overfit_batches == 0 or not cfg.train.log_train_ranking:
+        raise ValueError("overfit_health needs trainer.overfit_batches > 0 and train.log_train_ranking=true.")
 
     setup = setup_experiment(cfg, with_baselines=False)
 
@@ -150,8 +153,9 @@ def overfit_health_experiment(cfg: Config):
     save_results(setup.run_dir, results, setup.home_distances)
 
     with pl.Config(tbl_rows=-1, float_precision=4):
-        print(f"\n-- overfit health: best train_avg_recall@{cfg.train.max_recall_k} on the memorised batch --")
-        print(check_overfit_health(results, cfg.train.max_recall_k))
+        health = str(check_overfit_health(results, cfg.train.max_recall_k))
+
+    log.info("Overfit health: best train_avg_recall@%d on the memorised batch\n%s", cfg.train.max_recall_k, health)
 
 
 def baselines_experiment(cfg: Config):

@@ -1,0 +1,11 @@
+# @package _global_
+# Single-batch fit of each architecture, read off `train_avg_recall@K`. One seed, no baselines.
+experiment:
+  name: overfit_health
+
+trainer:
+  overfit_batches: 1
+
+train:
+  train_seeds: [ 42 ]
+  log_train_ranking: true

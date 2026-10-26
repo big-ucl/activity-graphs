@@ -1,0 +1,4 @@
+# @package _global_
+# The baselines alone, no learned models.
+experiment:
+  name: baselines
