@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import lightning as L
 import polars as pl
@@ -12,28 +11,12 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.datasets import VisitDataModule, VisitDataset
+from activitygraphs.datasets import VisitDataModule
 from activitygraphs.ml.baselines.gravity import unscale_distances
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import Loss
-from activitygraphs.ml.popularity import popularity_logit
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
-
-
-def node_popularity_logit(train_dataset: VisitDataset) -> torch.Tensor:
-    """Compute the per-node visit popularity logit over the training dataset, shape [num_nodes].
-
-    logit(p_n), where p_n is the home-excluded train visit rate of node n.
-
-    Same per-node rate as VisitFrequencyBaseline, injected into the ML model outputs to see if they learn anything
-    beyond the "general" popularity signal.
-    """
-    idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
-    labels = train_dataset.visit_labels[idx].squeeze(-1)
-    home_idx = train_dataset.user_node_features[idx, :, train_dataset.is_home_user_node_idx].argmax(dim=1)
-
-    return popularity_logit(labels, home_idx)
 
 
 def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
@@ -225,7 +208,6 @@ def train_and_evaluate_model(
     verbose: int = 1,
     name: str | None = None,
     lr: float = 0.01,
-    reg: str | None = None,
     full_info: bool = False,
     use_demographics: bool = True,
     run_dir: Path | None = None,
@@ -233,7 +215,6 @@ def train_and_evaluate_model(
     overfit_batches: int = 0,
     weight_decay: float = 1e-4,
     schedule_lr: bool = False,
-    pop_mode: Literal["none", "offset", "feature"] = "none",
     use_home_pe: bool = False,
     store_score_vectors: bool = False,
     log_train_ranking: bool = True,
@@ -257,7 +238,6 @@ def train_and_evaluate_model(
         verbose: Non-zero enables the Lightning progress bar.
         name: Experiment name used for logging and checkpoint directory.
         lr: Initial learning rate.
-        reg: Optional regularisation; ``"l1"`` adds L1 weight penalty.
         full_info: Passed to ``extract_features`` to optionally include home/distance features.
         use_demographics: concatenate the per-user demographics onto the node features.
         run_dir: Run directory. Checkpoints are written to ``checkpoints/<run name>/`` (``best.ckpt``,
@@ -266,8 +246,6 @@ def train_and_evaluate_model(
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
         weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
-        pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
-            features to the model.
         use_home_pe: if true, add home-anchored positional encodings to features
         store_score_vectors: retain each test user's full per-node score vector.
         log_train_ranking: log ``train_avg_recall@K`` on the training batches.
@@ -292,13 +270,10 @@ def train_and_evaluate_model(
 
     datamodule.setup()
 
-    pop_logit = node_popularity_logit(datamodule.train_dataset) if pop_mode != "none" else None
-
     lit_model = RankingModule(
         model=model,
         lr=lr,
         loss=loss,
-        reg=reg,
         full_info=full_info,
         use_demographics=use_demographics,
         max_recall_k=max_recall_k,
@@ -307,8 +282,6 @@ def train_and_evaluate_model(
         schedule_lr=schedule_lr,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
-        pop_logit=pop_logit,
-        pop_mode=pop_mode,
         use_home_pe=use_home_pe,
         compile_model=compile_model,
         store_score_vectors=store_score_vectors,

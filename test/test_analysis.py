@@ -46,6 +46,7 @@ from activitygraphs.analysis import (
 )
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.ml.lightning_module import RankingModule
+from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import NodeMLP
 from activitygraphs.runs import PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 
@@ -880,6 +881,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
     module = RankingModule(
         model=NodeMLP(num_layers=2, in_channels=3, hidden_channels=8, out_channels=1),
         lr=1e-3,
+        loss=BCELoss,
         is_home_idx=0,
         home_hop_distance=(idx[:, None] - idx[None, :]).abs().float(),
         max_recall_k=budget,

@@ -16,7 +16,7 @@ from torchmetrics.classification import BinaryCalibrationError
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.dataset import VisitDataset, is_home_node_mask
-from activitygraphs.ml.losses import BCELoss, Loss
+from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
 HOME_PE_BINS = 8
@@ -27,7 +27,6 @@ def extract_features(
     full_info: bool,
     is_home_idx: int,
     use_demographics: bool = True,
-    pop_logit: torch.Tensor | None = None,
     home_hop_distance: torch.Tensor | None = None,
     home_pe_bins: int = HOME_PE_BINS,
 ) -> torch.Tensor:
@@ -35,9 +34,6 @@ def extract_features(
 
     Starts with ``batch.x`` (which already contains the location features and the per-user
     ``is_home`` indicator).
-
-     If ``pop_logit`` is provided, the ``VisitFrequencyBaseline`` popularity logits for each node are appended
-    (``1`` column) is appended.
 
      If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
      hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column for the home index.
@@ -48,10 +44,6 @@ def extract_features(
     If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column.
     """
     x = batch.x
-
-    if pop_logit is not None:
-        pop_logit_col = create_pop_logit_column(pop_logit, batch, standardize=True)
-        x = torch.cat([x, pop_logit_col], dim=-1)
 
     if home_hop_distance is not None:
         home_pe = create_home_distance_encoding(batch, home_hop_distance, is_home_idx, n_bins=home_pe_bins)
@@ -70,15 +62,12 @@ def extracted_features_dim(
     dataset: VisitDataset,
     use_demographics: bool = True,
     full_info: bool = False,
-    use_pop_feature: bool = False,
     use_home_pe: bool = False,
     n_bins: int = HOME_PE_BINS,
 ) -> int:
     """Output width of extract_features for this dataset, given the same flags."""
     dim = dataset.num_features
 
-    if use_pop_feature:
-        dim += 1
     if use_home_pe:
         dim += n_bins
     if use_demographics:
@@ -87,18 +76,6 @@ def extracted_features_dim(
         dim += dataset.distances.shape[-1]
 
     return dim
-
-
-def create_pop_logit_column(pop_logit: torch.Tensor, batch: UserBatch, standardize: bool):
-    """Per-node popularity logit aligned to the nodes in `batch`, shape [num_nodes, 1].
-
-    `standardize` z-scores it over the node vector (for the pop-logit-as-input-feature variant).
-    """
-    pop_logit_col = pop_logit[_compute_node_index_within_graph(batch, pop_logit.device)]
-    if standardize:
-        pop_logit_col = (pop_logit_col - pop_logit.mean()) / pop_logit.std().clamp(min=1e-6)
-
-    return pop_logit_col.unsqueeze(-1)
 
 
 def _compute_node_index_within_graph(batch: UserBatch, device: torch.device) -> torch.Tensor:
@@ -165,16 +142,14 @@ class EvaluationTensors:
 class RankingModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
 
-    Handles BCE or BPR training, optional L1 regularisation, and per-epoch ranking metrics.
+    Handles BCE or BPR training and per-epoch ranking metrics.
     Models must implement ``forward(x, edge_index, edge_attr, batch) -> logits``.
 
     Args:
         model: Any ``nn.Module`` with the GNN forward signature.
         lr: Initial learning rate for AdamW.
+        loss: ``Loss`` instance.
         is_home_idx: Column index of ``is_home`` in the node feature matrix.
-        loss: ``Loss`` instance. Defaults to BCE if none.
-        reg: Optional regularisation type; only ``"l1"`` is supported.
-        lambda_reg: L1 coefficient (ignored when ``reg`` is None).
         full_info: If True, augment node features with home indicator and distances.
         use_demographics: concatenate the per-user demographics onto the node features.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
@@ -183,9 +158,6 @@ class RankingModule(L.LightningModule):
         schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
         home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix, read for the per-positive hop
             distances and the home-anchored positional encodings.
-        pop_logit: Logits of global per-node visit frequencies.
-        pop_mode: "none"=do not inject ``pop_logits``; "offset"=inject in the loss function, "feature"=inject as
-            features to the model.
         use_home_pe: use home-anchored positional encodings in features, default False.
         home_pe_bins: number of bins for the RBF expansion of the home PEs, default ``HOME_PE_BINS``.
         compile_model: torch.compile the inner NN, default False.
@@ -196,25 +168,20 @@ class RankingModule(L.LightningModule):
 
     model: torch.nn.Module
     home_hop_distance: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
-    pop_logit: torch.Tensor | None
 
     def __init__(
         self,
         model: torch.nn.Module,
         lr: float,
+        loss: Loss,
         is_home_idx: int,
         home_hop_distance: np.ndarray | torch.Tensor,
         max_recall_k: int,
         recall_ks: Sequence[int],
-        loss: Loss | None = None,
-        reg: str | None = None,
-        lambda_reg: float = 0.01,
         full_info: bool = False,
         use_demographics: bool = True,
         weight_decay: float = 1e-4,
         schedule_lr: bool = False,
-        pop_logit: torch.Tensor | None = None,
-        pop_mode: Literal["none", "offset", "feature"] = "none",
         use_home_pe: bool = False,
         home_pe_bins: int = HOME_PE_BINS,
         compile_model: bool = False,
@@ -222,12 +189,10 @@ class RankingModule(L.LightningModule):
         log_train_ranking: bool = True,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "loss", "home_hop_distance", "pop_logit"])
+        self.save_hyperparameters(ignore=["model", "loss", "home_hop_distance"])
         self.model = model
         self.lr = lr
-        self.loss = loss if loss is not None else BCELoss
-        self.reg = reg
-        self.lambda_reg = lambda_reg
+        self.loss = loss
         self.full_info = full_info
         self.use_demographics = use_demographics
         self.max_recall_k = max_recall_k
@@ -261,18 +226,6 @@ class RankingModule(L.LightningModule):
 
         # Full per-node score vector of each test user, kept only when `store_score_vectors` is set.
         self.per_user_score_vectors: list[list[float]] = []
-
-        # Training: Population logits injection
-        if pop_mode not in ("none", "offset", "feature"):
-            raise ValueError(f"pop_mode must be none|offset|feature, got {pop_mode}")
-        if pop_mode != "none" and pop_logit is None:
-            raise ValueError(f"pop_mode must be none|offset, got {pop_mode}")
-
-        self.pop_mode = pop_mode
-        if pop_logit is not None:
-            self.register_buffer("pop_logit", pop_logit, persistent=False)
-        else:
-            self.pop_logit = None
 
         # Training: Home-anchored positional encodings injection
         self.use_home_pe = use_home_pe
@@ -310,10 +263,6 @@ class RankingModule(L.LightningModule):
         """Compute and log the training loss for one batch."""
         out = self.compute_logits(batch)
         loss = self.loss.loss_fn(out, batch)
-
-        if self.reg == "l1":
-            l1_norm = sum(p.abs().sum() for p in self.model.parameters())
-            loss = loss + self.lambda_reg * l1_norm
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
 
@@ -462,8 +411,7 @@ class RankingModule(L.LightningModule):
         return optimizer
 
     def compute_logits(self, batch: UserBatch) -> torch.Tensor:
-        """Model logits for a batch, includes node-popularity feature column or offset if configured."""
-        pop_logits = self.pop_logit if self.pop_mode == "feature" else None
+        """Model logits for a batch."""
         home_hop_distance = self.home_hop_distance if self.use_home_pe else None
 
         x = extract_features(
@@ -471,14 +419,7 @@ class RankingModule(L.LightningModule):
             self.full_info,
             self.is_home_idx,
             use_demographics=self.use_demographics,
-            pop_logit=pop_logits,
             home_hop_distance=home_hop_distance,
             home_pe_bins=self.home_pe_bins,
         )
-        out = self(x, batch.edge_index, batch.edge_attr, batch.batch)
-
-        if self.pop_mode == "offset":
-            assert self.pop_logit is not None
-            out = out + create_pop_logit_column(self.pop_logit, batch, standardize=False)
-
-        return out
+        return self(x, batch.edge_index, batch.edge_attr, batch.batch)

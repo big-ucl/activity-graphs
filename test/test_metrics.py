@@ -1,4 +1,4 @@
-"""Tests for the fully-connected baseline, hop distance, and ranking metrics."""
+"""Tests for hop distance and ranking metrics."""
 
 import pytest
 import torch
@@ -6,30 +6,13 @@ import torch_geometric as pyg
 
 from activitygraphs.datasets.dataset import compute_home_hop_distance
 from activitygraphs.ml.lightning_module import RankingModule
+from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
-from activitygraphs.ml.models import FullyConnectedMLP, NodeMLP
+from activitygraphs.ml.models import NodeMLP
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Path graph 0-1-2-3-4 (both directions): hop distance from node 0 is [0, 1, 2, 3, 4].
 PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 3]])
-
-
-class TestFullyConnectedMLP:
-    def test_forward_shape(self):
-        num_nodes, in_features, num_graphs = 4, 3, 2
-        model = FullyConnectedMLP(num_nodes, in_features, hidden_channels=8, num_layers=3, dropout=0.0)
-        x = torch.rand(num_graphs * num_nodes, in_features)
-        out = model(x, torch.zeros(2, 0, dtype=torch.long), None, None)
-        assert out.shape == (num_graphs * num_nodes, 1)
-
-    def test_rejects_wrong_node_count(self):
-        model = FullyConnectedMLP(num_nodes=4, in_features=3, hidden_channels=8)
-        x = torch.rand(5, 3)  # not a multiple of 4
-        try:
-            model(x, torch.zeros(2, 0, dtype=torch.long), None, None)
-            raise AssertionError("expected a ValueError for a non-multiple node count")
-        except ValueError:
-            pass
 
 
 class TestHomeHopDistance:
@@ -408,6 +391,7 @@ class TestPerUserColumnsInModule:
         module = RankingModule(
             model=model,
             lr=1e-3,
+            loss=BCELoss,
             home_hop_distance=hop,
             is_home_idx=0,
             max_recall_k=BUDGET,

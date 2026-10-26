@@ -14,6 +14,7 @@ from activitygraphs.ml.lightning_module import (
     extract_features,
     extracted_features_dim,
 )
+from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import NodeMLP
 
 MAX_RECALL_K = 50
@@ -75,8 +76,6 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
 
 
 def make_module(
-    reg: str | None = None,
-    lambda_reg: float = 0.01,
     schedule_lr: bool = False,
     store_score_vectors: bool = False,
 ) -> RankingModule:
@@ -84,8 +83,7 @@ def make_module(
     return RankingModule(
         model=model,
         lr=1e-3,
-        reg=reg,
-        lambda_reg=lambda_reg,
+        loss=BCELoss,
         schedule_lr=schedule_lr,
         store_score_vectors=store_score_vectors,
         is_home_idx=IS_HOME_IDX,
@@ -129,22 +127,6 @@ class TestTrainingStep:
         loss = module.training_step(make_batch(), 0)
         assert loss.ndim == 0
         assert loss.isfinite()
-
-    def test_l1_reg_increases_loss(self, monkeypatch):
-        """L1 regularisation with large lambda_reg must yield strictly higher loss."""
-        batch = make_batch(seed=1)
-
-        base = make_module(reg=None)
-        monkeypatch.setattr(base, "log", lambda *a, **kw: None)
-        loss_base = base.training_step(batch, 0).item()
-
-        module_l1 = make_module(reg="l1", lambda_reg=1.0)
-        # copy identical weights so the only difference is the L1 term
-        module_l1.model.load_state_dict(base.model.state_dict())
-        monkeypatch.setattr(module_l1, "log", lambda *a, **kw: None)
-        loss_l1 = module_l1.training_step(batch, 0).item()
-
-        assert loss_l1 > loss_base
 
 
 class TestValidationStep:
@@ -266,6 +248,7 @@ class TestUseDemographics:
         return RankingModule(
             model=model,
             lr=1e-3,
+            loss=BCELoss,
             use_demographics=use_demographics,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
@@ -298,6 +281,7 @@ class TestTrainRanking:
         return RankingModule(
             model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
             lr=1e-3,
+            loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
             max_recall_k=MAX_RECALL_K,
@@ -566,7 +550,7 @@ class TestCheckpoint:
 
         assert hparams["lr"] == 1e-3
         assert hparams["schedule_lr"] is True
-        assert not {"model", "loss", "home_hop_distance", "pop_logit"} & set(hparams)
+        assert not {"model", "loss", "home_hop_distance"} & set(hparams)
 
     def test_compiling_keeps_the_state_dict_keys(self):
         module = make_module()
@@ -591,7 +575,9 @@ class TestCheckpoint:
         )
 
         model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
-        reloaded = RankingModule.load_from_checkpoint(path, model=model, home_hop_distance=chain_hop_distance())
+        reloaded = RankingModule.load_from_checkpoint(
+            path, model=model, loss=BCELoss, home_hop_distance=chain_hop_distance()
+        )
 
         assert reloaded.schedule_lr is True
         for key, value in module.state_dict().items():
@@ -625,6 +611,7 @@ def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bin
     return RankingModule(
         model=model,
         lr=1e-3,
+        loss=BCELoss,
         home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
         max_recall_k=MAX_RECALL_K,
