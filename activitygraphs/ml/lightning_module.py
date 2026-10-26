@@ -362,15 +362,13 @@ class RankingModule(L.LightningModule):
 
         # Calibration metrics
         self.val_calibration.update(eval_tensors.probs, eval_tensors.target.long())
+        self.log("val_calibration_l1", self.val_calibration, on_step=False, on_epoch=True)
 
     def on_validation_epoch_end(self) -> None:
         """Log and reset the validation metrics."""
         self.log_dict(self.val_metrics.compute())
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
-
-        self.log("val_calibration_l1", self.val_calibration.compute())
-        self.val_calibration.reset()
 
     def test_step(self, batch: UserBatch, batch_idx: int) -> None:
         """Update the test metrics and collect per-user rankings and score vectors for one batch."""
@@ -395,6 +393,7 @@ class RankingModule(L.LightningModule):
 
         # Calibration metrics
         self.test_calibration.update(eval_tensors.probs, eval_tensors.target.long())
+        self.log("test_calibration_l1", self.test_calibration, on_step=False, on_epoch=True)
 
     def on_test_epoch_end(self) -> None:
         """Log and reset the test metrics and keep the per-user columns and score vectors."""
@@ -407,9 +406,6 @@ class RankingModule(L.LightningModule):
         self.per_user_columns = self.per_user_columns | self.test_per_user.positive_columns()
         self.per_user_score_vectors = self.test_per_user.score_vectors().cpu().tolist()
         self.test_per_user.reset()
-
-        self.log("test_calibration_l1", self.test_calibration.compute())
-        self.test_calibration.reset()
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Return AdamW, with a plateau LR scheduler when scheduling is on and not overfitting."""

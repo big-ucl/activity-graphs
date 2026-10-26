@@ -229,7 +229,7 @@ class GPSLayer(torch.nn.Module):
             attn_type="performer",
         )
 
-        self.conv.attn.forward = torch._dynamo.disable(
+        self.conv.attn.forward = torch.compiler.disable(
             self.conv.attn.forward
         )  # Disable compilation for Preformer attention
 

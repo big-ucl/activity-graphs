@@ -1,4 +1,4 @@
-"""Lightning callbacks for debugging overfit runs and collecting per-epoch metrics."""
+"""Lightning callback for debugging overfit runs."""
 
 import logging
 
@@ -43,33 +43,3 @@ class OverfitDebugCallback(L.Callback):
                 out.max().item(),
                 out.mean().item(),
             )
-
-
-class EpochMetricsCollector(L.Callback):
-    """Collects per-epoch fit metrics and a final test row as stage-tagged dicts.
-
-    Records one ``stage="fit"`` row per training epoch (``train_*``/``val_*`` metrics) and one
-    ``stage="test"`` row per test run (``test_*`` metrics), avoiding the CSV write-and-reparse.
-    """
-
-    def __init__(self) -> None:
-        self.rows: list[dict] = []
-
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Record the epoch's train and validation metrics as one row."""
-        if trainer.sanity_checking:
-            return
-
-        metrics = {
-            key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith(("train_", "val_"))
-        }
-        if metrics:
-            self.rows.append({"stage": "fit", "epoch": trainer.current_epoch, **metrics})
-
-    def on_test_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Record the test metrics as one row."""
-        # Collect on `on_test_end`, not `on_test_epoch_end`: callback hooks run before the
-        # LightningModule's `on_test_epoch_end`, which is where the Retrieval* ranking metrics are
-        # logged. Reading at epoch-end would capture only the per-batch test_bce.
-        metrics = {key: value.item() for key, value in trainer.callback_metrics.items() if key.startswith("test_")}
-        self.rows.append({"stage": "test", "epoch": None, **metrics})

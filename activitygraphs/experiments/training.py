@@ -16,8 +16,9 @@ from activitygraphs.config import Config
 from activitygraphs.datasets import VisitDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.ml.baselines.gravity import unscale_distances
-from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
+from activitygraphs.ml.callbacks import OverfitDebugCallback
 from activitygraphs.ml.lightning_module import RankingModule
+from activitygraphs.ml.loggers import MetricsLogger
 from activitygraphs.ml.losses import Loss
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
 
@@ -264,8 +265,7 @@ def train_and_evaluate_model(
 
     # Build the callbacks
 
-    collector = EpochMetricsCollector()
-    callbacks: list[L.Callback] = [collector, LearningRateMonitor(logging_interval="epoch")]
+    callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
 
     if run_dir is not None:
         callbacks.append(
@@ -305,9 +305,13 @@ def train_and_evaluate_model(
     else:
         logger = CSVLogger(save_dir=log_dir, name=run_name)
 
+    metrics_logger = MetricsLogger()
+
     # Create trainer and fit
 
-    trainer = L.Trainer(**cast(dict, OmegaConf.to_container(cfg.trainer)), logger=logger, callbacks=callbacks)
+    trainer = L.Trainer(
+        **cast(dict, OmegaConf.to_container(cfg.trainer)), logger=[logger, metrics_logger], callbacks=callbacks
+    )
 
     trainer.fit(lit_model, datamodule=datamodule)
 
@@ -320,7 +324,7 @@ def train_and_evaluate_model(
         if run_dir is not None:
             trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-        aggregate_results = aggregate_frame(collector.rows, name)
+        aggregate_results = aggregate_frame(metrics_logger.rows, name)
         per_user_results = per_user_frame(lit_model, name, datamodule.home_coverage)
         score_vectors = score_vector_frame(lit_model, name)
 

@@ -6,6 +6,7 @@ import lightning as L
 import pytest
 import torch
 import torch_geometric as pyg
+from torchmetrics import Metric
 
 from activitygraphs.ml.lightning_module import (
     HOME_PE_BINS,
@@ -107,10 +108,19 @@ def scored_nodes(batch: pyg.data.Batch, graph: int) -> torch.Tensor:
     return rows[rows != rows[HOME_NODE]]
 
 
+def metric_value(value):
+    """Return ``value``, computed if it is a ``Metric``, as Lightning logs it."""
+    return value.compute() if isinstance(value, Metric) else value
+
+
 def capture_logs(module: RankingModule, monkeypatch) -> dict:
-    """Patch ``self.log`` and ``self.log_dict`` (no Trainer attached) and collect everything logged."""
+    """Patch ``self.log`` and ``self.log_dict`` (no Trainer attached) and collect everything logged.
+
+    A logged ``Metric`` is computed when it is logged, which equals Lightning's epoch-end value once every batch has
+    been updated.
+    """
     logged: dict = {}
-    monkeypatch.setattr(module, "log", lambda key, val, **kw: logged.__setitem__(key, val))
+    monkeypatch.setattr(module, "log", lambda key, val, **kw: logged.__setitem__(key, metric_value(val)))
     monkeypatch.setattr(module, "log_dict", lambda mapping, **kw: logged.update(mapping))
     return logged
 

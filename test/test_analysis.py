@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 import torch
 import torch_geometric as pyg
+from torchmetrics import Metric
 
 from activitygraphs.analysis import (
     DROPPED_USERS_COLUMN,
@@ -891,7 +892,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
     module.compute_logits = lambda _batch: coarse_logits
 
     logged: dict = {}
-    module.log = lambda key, val, **kw: logged.__setitem__(key, val)
+    module.log = lambda key, val, **kw: logged.__setitem__(key, val.compute() if isinstance(val, Metric) else val)
     module.log_dict = lambda mapping, **kw: logged.update(mapping)
 
     with torch.no_grad():
