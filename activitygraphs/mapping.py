@@ -20,7 +20,7 @@ from activitygraphs.utils import check_schema, convert_locations_to_point_geomet
 
 LOCATION_TYPE_COLOR_MAP = {
     "na": "#570408",
-    "subsector": "#9f1853",
+    "zone": "#9f1853",
     "municipality_geneva": "#8a3ffc",
     "municipality_swiss": "#8a3ffc",
     "municipality_french": "#8a3ffc",
@@ -276,8 +276,8 @@ def _add_line_geometry_to_edge_df(edge_df: pl.DataFrame, locations_gdf: gpd.GeoD
         locs.add_prefix("dest_"), on="dest_loc_id"
     )
 
-    points["geometry"] = points[["orig_geometry", "dest_geometry"]].apply(lambda x: LineString(x), axis=1)
-    edges = gpd.GeoDataFrame(points.drop(columns=["orig_geometry", "dest_geometry"]), geometry="geometry", crs=CRS)
+    lines = [LineString(pair) for pair in zip(points["orig_geometry"], points["dest_geometry"], strict=True)]
+    edges = gpd.GeoDataFrame(points.drop(columns=["orig_geometry", "dest_geometry"]), geometry=lines, crs=CRS)
 
     return gpd.GeoDataFrame(
         edge_df.to_pandas().merge(edges, on=["orig_loc_id", "dest_loc_id"]), geometry="geometry", crs=CRS

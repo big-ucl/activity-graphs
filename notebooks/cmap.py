@@ -23,7 +23,7 @@ def _():
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.data.cmap import read_tables
+    from activitygraphs.surveys.cmap import read_tables
 
     inputs = read_tables(cfg.data, project_root)
     return
@@ -36,25 +36,27 @@ def _(mo):
     - added hh_id columns to user_id
     - days table is not needed
     - rolled hh level attributes to user-level table (de-normalised)
-    - num of observed days: always 1 => rolled into NetworkData for CMAP
+    - num of observed days: always 1 => rolled into SurveyData for CMAP
     """)
     return
 
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.dataprocessing import load_survey_and_graph
+    from activitygraphs.graph import load_graph
+    from activitygraphs.surveys.registry import load_survey
 
-    cmap_data, network_nodes, network_edges = load_survey_and_graph(cfg.data, project_root)
-    return network_edges, network_nodes
+    cmap_survey = load_survey(cfg.data, project_root).with_filter("zone")
+    nodes_gdf, edges_gdf = load_graph(cmap_survey, cfg.data, project_root)
+    return edges_gdf, nodes_gdf
 
 
 @app.cell
-def _(network_edges, network_nodes):
+def _(edges_gdf, nodes_gdf):
     from activitygraphs.mapping import explore_locations_by_type, explore_walk_edges
 
-    _m = network_nodes.explore()
-    _m = network_edges.explore(m=_m)
+    _m = nodes_gdf.explore()
+    _m = edges_gdf.explore(m=_m)
 
     _m
     return

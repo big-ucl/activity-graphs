@@ -1,9 +1,11 @@
-"""NetworkData class that wraps raw DataFrames from different travel surveys into a unified interface."""
+"""SurveyData class that wraps the tables of different travel surveys in one interface, and SurveyLoader."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import cached_property
-from typing import Self, TypeVar
+from pathlib import Path
+from typing import Self
 
 import geopandas as gpd
 import polars as pl
@@ -13,22 +15,17 @@ from activitygraphs.base import (
     CRS,
     LOCATIONS_SCHEMA,
     USER_JOURNEY_SCHEMA,
-    PTNodeType,
     Purpose,
 )
-from activitygraphs.routing import TravelTimeCalculator
+from activitygraphs.config import DataConfig
 from activitygraphs.utils import check_schema
 
 NA_LON, NA_LAT = 6.1709475192397605, 46.24348817355701
 NA, NA_SOURCE, NA_SINK = "NA", "NA_SOURCE", "NA_SINK"
 
-type PTLayerBuilder = Callable[[pl.DataFrame, PTNodeType], tuple[pl.DataFrame, pl.DataFrame]]
-type TravelTimeFactory = float | pl.Expr | pl.DataFrame | TravelTimeCalculator | Callable[[str, str], float]
-TDataFrame = TypeVar("TDataFrame", pl.DataFrame, gpd.GeoDataFrame)
 
-
-class NetworkData(ABC):
-    """Wrapper around survey DataFrames that provides a cached, filterable network view.
+class SurveyData(ABC):
+    """Wrapper around survey DataFrames that provides a cached, filterable view.
 
     Each dataset (TPG, THATS, CMAP) inherits from this class.
 
@@ -50,7 +47,7 @@ class NetworkData(ABC):
         Args:
             user_journeys_df: Journey legs conforming to ``USER_JOURNEY_SCHEMA``.
             locations_gdf: Locations conforming to ``LOCATIONS_SCHEMA``, sorted by ``loc_id``.
-            filters: Optional list of ``type`` values to restrict locations (e.g. ``["subsector"]``).
+            filters: Optional list of ``type`` values to restrict locations (e.g. ``["zone"]``).
         """
         locations_gdf = locations_gdf.sort_values("loc_id")
 
@@ -144,15 +141,17 @@ class NetworkData(ABC):
         """Return a new instance restricted to locations whose ``type`` is in ``loc_types``.
 
         Args:
-            loc_types: One or more location type strings (e.g. ``"subsector"``).
+            loc_types: One or more location type strings (e.g. ``"zone"``).
 
         Returns:
-            A new ``NetworkData`` of the same concrete type with the filter applied.
+            A new ``SurveyData`` of the same concrete type with the filter applied.
         """
         filters = [loc_types] if isinstance(loc_types, str) else loc_types
         return self._copy(filters)
 
-    def _filter_loc_types(self, df: TDataFrame, loc_id_col: str = "loc_id", filter_users: bool = False) -> TDataFrame:
+    def _filter_loc_types[TDataFrame: (pl.DataFrame, gpd.GeoDataFrame)](
+        self, df: TDataFrame, loc_id_col: str = "loc_id", filter_users: bool = False
+    ) -> TDataFrame:
         if self._type_filters is None:
             return df
 
@@ -219,6 +218,35 @@ class NetworkData(ABC):
         )
 
         return home_locations
+
+
+class DataFrameStore:
+    """Mixin that provides a standard cache-directory layout for concrete ``SurveyData`` subclasses."""
+
+    @classmethod
+    def _dirs(cls, cfg: DataConfig, project_root: Path | None = None, name: str | None = None) -> tuple[Path, Path]:
+        project_root = project_root if project_root is not None else Path(".")
+        suffix = "" if name is None else f"-{name}"
+        data_dir = project_root / cfg.paths.processed / f"{cls.__name__}{suffix}"
+
+        return project_root, data_dir
+
+
+@dataclass(frozen=True)
+class SurveyLoader[C: DataConfig, S]:
+    """Bundle of the survey-specific steps for loading a survey and building its graph.
+
+    Attributes:
+        load: Loads the survey from the ``processed`` cache, builds and caches it on a cache miss.
+        read_statistics: Reads the census statistics that enrich zone features.
+        add_statistics: Adds population and job densities to the zone locations.
+        build_extra_edges: Builds edges to add on top of the contiguity graph from its nodes (e.g. island zones); ``None`` adds none.
+    """
+
+    load: Callable[[C, Path | None], SurveyData]
+    read_statistics: Callable[[C, Path | None], S]
+    add_statistics: Callable[[gpd.GeoDataFrame, S], gpd.GeoDataFrame]
+    build_extra_edges: Callable[[gpd.GeoDataFrame], gpd.GeoDataFrame] | None = None
 
 
 def build_special_locations() -> gpd.GeoDataFrame:

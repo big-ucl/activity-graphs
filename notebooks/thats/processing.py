@@ -10,7 +10,7 @@ with app.setup:
     from pathlib import Path
 
     project_root = Path(mo.notebook_dir().parent.parent)
-    cfg = read_config(project_root, data="toronto")
+    cfg = read_config(project_root, survey="thats")
 
 
 @app.cell
@@ -29,16 +29,17 @@ def _():
 
 @app.cell
 def _():
-    from activitygraphs.data.thats import THATSData
-    from activitygraphs.dataprocessing import load_thats_network_graph, build_tensors
-
+    from activitygraphs.graph import load_graph
     from activitygraphs.ml.dataset import ActivityDataset
+    from activitygraphs.surveys.thats import THATSSurvey, read_tables
+    from activitygraphs.tensors import build_tensors
 
     return (
         ActivityDataset,
-        THATSData,
+        THATSSurvey,
         build_tensors,
-        load_thats_network_graph,
+        load_graph,
+        read_tables,
     )
 
 
@@ -53,22 +54,22 @@ def _():
 @app.cell
 def _(
     ActivityDataset,
-    THATSData,
+    THATSSurvey,
     build_tensors,
-    load_toronto_network_graph,
+    load_graph,
+    read_tables,
 ):
-    data = THATSData.load(cfg.data, project_root).with_filter("subsector")
+    survey = THATSSurvey.load(cfg.data, project_root).with_filter("zone")
+    tables = read_tables(cfg.data, project_root)
 
-    network_nodes, network_edges = load_toronto_network_graph(
-        data, cfg.data, project_root
-    )
+    nodes_gdf, edges_gdf = load_graph(survey, cfg.data, project_root)
 
-    network_graph, spatial_features, spatial_labels, demographics, distances = build_tensors(data, network_nodes, network_edges)
+    survey_tensors = build_tensors(survey, nodes_gdf, edges_gdf)
 
     dataset_path = project_root / cfg.data.paths.pyg_datasets
 
-    dataset = ActivityDataset(dataset_path, network_graph, spatial_features, spatial_labels, demographics, distances)
-    return data, dataset, network_edges, network_nodes
+    dataset = ActivityDataset(dataset_path, survey_tensors)
+    return dataset, edges_gdf, nodes_gdf, survey, tables
 
 
 @app.cell
@@ -127,11 +128,11 @@ def _(batch_index, logits, neg_restrict, pyg, torch, y):
 
 
 @app.cell
-def _(data, pl):
+def _(pl, survey, tables):
     cols = [f"THATS D{n}DS? = 1" for n in range(1, 8)]
-    obs = data.inputs.raw_person_df.select("person_id", pl.sum_horizontal(cols).alias("num_obs_days"), "THATS Number of Trips", span=pl.col("THATS Experiment start day") - pl.col("THATS Experiment end day"))
-    ttrips = data.user_journeys_df.group_by("user_id").agg(n_trip_days=pl.col("dep_day").n_unique().cast(pl.Int32))
-    locs = data.location_visits.group_by("user_id").agg(num_locs=pl.col("loc_id").n_unique())
+    obs = tables.raw_person_df.select("person_id", pl.sum_horizontal(cols).alias("num_obs_days"), "THATS Number of Trips", span=pl.col("THATS Experiment start day") - pl.col("THATS Experiment end day"))
+    ttrips = survey.user_journeys_df.group_by("user_id").agg(n_trip_days=pl.col("dep_day").n_unique().cast(pl.Int32))
+    locs = survey.location_visits.group_by("user_id").agg(num_locs=pl.col("loc_id").n_unique())
 
 
     res = ttrips.join(obs, left_on="user_id", right_on="person_id").with_columns(day_diff=pl.col("n_trip_days") - pl.col("num_obs_days")).join(locs, on="user_id")
@@ -181,14 +182,14 @@ def _(alt, res):
 
 
 @app.cell
-def _(data):
-    data.users_df
+def _(survey):
+    survey.users_df
     return
 
 
 @app.cell
-def _(data, pl):
-    data.user_journeys_df.group_by("user_id", maintain_order=True).agg(n_trip_days=pl.col("dep_day").unique())
+def _(survey, pl):
+    survey.user_journeys_df.group_by("user_id", maintain_order=True).agg(n_trip_days=pl.col("dep_day").unique())
     return
 
 
@@ -204,7 +205,7 @@ def _(dataset):
 def _():
     mo.md(r"""
     The PyG Dataset is composed of three objects:
-    1. network graph (PyG) - simple city2graph call on network_nodes & network_edges
+    1. graph (PyG) - simple city2graph call on nodes_gdf & edges_gdf
     2. user spatial features (Tensor, dim N_users x N_nodes x 1) - is_home indicator, to be concatenated with NG.x in dataset
     3. user features (Tensor, dim N_users x N_features) - socio-demographics about users, can be concatenated with each row of NG.x
     """)
@@ -220,17 +221,17 @@ def _():
 
 
 @app.cell
-def _(network_nodes):
+def _(nodes_gdf):
     select_node_col = mo.ui.dropdown(
-        list(network_nodes.columns), searchable=True, label="Column:"
+        list(nodes_gdf.columns), searchable=True, label="Column:"
     )
     return (select_node_col,)
 
 
 @app.cell
-def _(network_edges, network_nodes, select_node_col):
-    _nodes = network_nodes  # .set_geometry("original_geometry") #if toggle_polygons.value else indiv_nodes
-    _m = network_edges.explore(color="gray", tiles="Cartodb Positron")
+def _(edges_gdf, nodes_gdf, select_node_col):
+    _nodes = nodes_gdf  # .set_geometry("original_geometry") #if toggle_polygons.value else indiv_nodes
+    _m = edges_gdf.explore(color="gray", tiles="Cartodb Positron")
     _m = _nodes.explore(
         m=_m, column=select_node_col.value, marker_kwds={"radius": 5}
     )
@@ -260,7 +261,7 @@ def _():
 @app.cell
 def _():
     from activitygraphs.base import Mode
-    from activitygraphs.data.thats import MANUAL_MODE_MAP, MODE_MAP
+    from activitygraphs.surveys.thats import MANUAL_MODE_MAP, MODE_MAP
 
     return MANUAL_MODE_MAP, MODE_MAP, Mode
 
@@ -291,10 +292,10 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(data):
-    data.inputs.raw_journeys_df.select(
+def _(tables):
+    tables.raw_journeys_df.select(
         "predicted_modes", "manual_mode"
-    ).null_count() / len(data.inputs.raw_journeys_df)
+    ).null_count() / len(tables.raw_journeys_df)
     return
 
 
@@ -307,8 +308,8 @@ def _():
 
 
 @app.cell
-def _(alt, data, pl):
-    _mode_label_freq = data.inputs.raw_journeys_df.group_by("app_id").agg(
+def _(alt, pl, tables):
+    _mode_label_freq = tables.raw_journeys_df.group_by("app_id").agg(
         pct_labeled=pl.col("manual_mode").is_not_null().sum() / pl.len()
     )
 
@@ -460,13 +461,13 @@ def _(
     MANUAL_MODE_MAP,
     MODE_MAP,
     Mode,
-    data,
     drop_down_log_scale,
     pl,
     plot_enum_confusion_matrix,
+    tables,
 ):
     _mode_enum = [m for m in Mode if m not in [Mode.COACH]]
-    _df = data.inputs.raw_journeys_df.select(
+    _df = tables.raw_journeys_df.select(
         pl.col("predicted_modes").replace_strict(MODE_MAP, default=Mode.UNKNOWN),
         pl.col("manual_mode").replace_strict(
             MANUAL_MODE_MAP, default=Mode.UNKNOWN
@@ -496,16 +497,16 @@ def _():
 
 
 @app.cell
-def _(data):
-    from activitygraphs.data.thats import build_thats_activities
+def _(survey, tables):
+    from activitygraphs.surveys.thats import build_thats_activities
 
-    activs = build_thats_activities(data.inputs, data.user_journeys_df)
+    activs = build_thats_activities(tables, survey.user_journeys_df)
     print(activs.head())
     return
 
 
 @app.cell
-def _(data, pl):
+def _(survey, pl):
     def compare_trip_to_activity(
         activities: pl.DataFrame,
         trips: pl.DataFrame,
@@ -604,7 +605,7 @@ def _(data, pl):
         )
 
 
-    compared = compare_trip_to_activity(data.activities_df, data.user_journeys_df)
+    compared = compare_trip_to_activity(survey.activities_df, survey.user_journeys_df)
     compared
     return (compared,)
 
@@ -612,7 +613,7 @@ def _(data, pl):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    - What proportion of unlabled trip purposes actually have corresponding data
+    - What proportion of unlabled trip purposes actually have corresponding survey
     """)
     return
 
@@ -626,9 +627,9 @@ def _():
 
 
 @app.cell
-def _(data):
-    trips = data.user_journeys_df
-    activities = data.activities_df
+def _(survey):
+    trips = survey.user_journeys_df
+    activities = survey.activities_df
     return activities, trips
 
 

@@ -42,11 +42,11 @@ def _():
 @app.cell
 def _():
     cfg, per_user, score_vectors, home_distances, n_nodes = heart.read_run()
-    nodes, network_edges = heart.load_network(cfg)
+    nodes, edges_gdf = heart.read_graph(cfg)
     out_path = heart.out_dir(cfg)
 
     {"models": sorted(per_user["name"].unique().to_list()), "n_nodes": n_nodes}
-    return cfg, home_distances, n_nodes, network_edges, nodes, out_path, per_user, score_vectors
+    return cfg, home_distances, n_nodes, edges_gdf, nodes, out_path, per_user, score_vectors
 
 
 @app.cell(hide_code=True)
@@ -95,8 +95,8 @@ def _():
 
 
 @app.cell
-def _(home_node, n_zones, network_edges, nodes, out_path):
-    heart.graph_structure_figures(nodes, network_edges, home_node, out_path, zones_in_view=n_zones.value)
+def _(home_node, n_zones, edges_gdf, nodes, out_path):
+    heart.graph_structure_figures(nodes, edges_gdf, home_node, out_path, zones_in_view=n_zones.value)
     return
 
 

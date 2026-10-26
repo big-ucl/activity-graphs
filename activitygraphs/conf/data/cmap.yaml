@@ -1,5 +1,6 @@
 # @package data
 name: CMAP
+survey: cmap
 
 inputs:
   raw_journeys: trip_linked.csv

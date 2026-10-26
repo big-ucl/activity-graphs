@@ -110,13 +110,13 @@ class SurveyPaths:
 
     raw_journeys: str
     overture: OverturePaths
-    statistics: StatsPaths
 
 
 @dataclass
 class TPGPaths(SurveyPaths):
     """Raw file paths for the TPG survey."""
 
+    statistics: TPGStatsPaths
     boundaries: TPGBoundaryPaths
     gtfs: GTFSPaths
 
@@ -125,6 +125,7 @@ class TPGPaths(SurveyPaths):
 class THATSPaths(SurveyPaths):
     """Raw file inputs for the Toronto THATS survey."""
 
+    statistics: THATSStatsPaths
     boundaries: THATSBoundaryPaths
 
     raw_person: str
@@ -136,6 +137,7 @@ class THATSPaths(SurveyPaths):
 class CMAPPaths(SurveyPaths):
     """Raw file inputs for the CMAP MyDailyTravel survey."""
 
+    statistics: CMAPStatsPaths
     boundaries: CMAPBoundaryPaths
 
     raw_person: str
@@ -167,9 +169,10 @@ class DataPaths:
 
 @dataclass
 class DataConfig:
-    """Base dataset configuration: name, inputs, paths, and the distance bands the region is split into."""
+    """Base dataset configuration: name, survey loader key, inputs, paths, and the distance bands the region is split into."""
 
     name: str
+    survey: str
     inputs: SurveyPaths
     paths: DataPaths
     distance_bands: list[float]

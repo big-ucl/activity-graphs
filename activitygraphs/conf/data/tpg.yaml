@@ -1,5 +1,6 @@
 # @package data
 name: TPG
+survey: tpg
 
 inputs:
   raw_journeys: tpg_od.parquet

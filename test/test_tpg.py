@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from activitygraphs.data.tpg import LOCATION_REGEXES
+from activitygraphs.surveys.tpg import LOCATION_REGEXES
 
 
 @pytest.fixture

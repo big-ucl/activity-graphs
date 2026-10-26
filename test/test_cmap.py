@@ -10,22 +10,22 @@ import pytest
 from shapely.geometry import Polygon
 
 from activitygraphs.base import CRS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
-from activitygraphs.data.cmap import (
+from activitygraphs.surveys.base import NA
+from activitygraphs.surveys.cmap import (
     AGE_MIDPOINTS,
     DEMOGRAPHIC_COLUMNS,
     EXCLUDED_CENSUS_TRACTS,
     INCOME_MIDPOINTS_KUSD,
     MODE_MAP,
     PURPOSE_MAP,
-    CMAPData,
+    CMAPSurvey,
     CMAPTables,
-    build_cmap_data,
     build_cmap_journeys,
     build_cmap_locations,
+    build_cmap_survey,
     build_cmap_users,
 )
-from activitygraphs.dataprocessing import build_group_ids, build_individual_demographics
-from activitygraphs.network import NA
+from activitygraphs.tensors.build import build_group_ids, build_individual_demographics
 
 IN_REGION_TRACTS = ["17031000100", "17031000200", "17043000100"]
 OUT_OF_REGION_TRACT = "17099000100"  # LaSalle county, outside the CMAP 7-county region
@@ -137,9 +137,9 @@ class TestBuildLocations:
         assert NA in set(locations_gdf["loc_id"])
         assert locations_gdf.loc[locations_gdf["loc_id"] == NA, "type"].item() == "na"
 
-    def test_tracts_are_typed_as_subsectors(self, locations_gdf):
+    def test_tracts_are_typed_as_zones(self, locations_gdf):
         tracts = locations_gdf[locations_gdf["loc_id"] != NA]
-        assert set(tracts["type"]) == {"subsector"}
+        assert set(tracts["type"]) == {"zone"}
 
 
 class TestBuildJourneys:
@@ -306,7 +306,7 @@ class TestBuildUsers:
 
 
 @pytest.fixture
-def cmap_data(boundaries_ct) -> CMAPData:
+def cmap_survey(boundaries_ct) -> CMAPSurvey:
     persons = make_persons([
         {"person_id": 1, "hh_id": 1},
         {"person_id": 2, "hh_id": 1},  # co-resident of person 1
@@ -316,60 +316,60 @@ def cmap_data(boundaries_ct) -> CMAPData:
     households = make_households([
         {"hh_id": 1, "home_tract_2020": IN_REGION_TRACTS[0]},
         {"hh_id": 2, "home_tract_2020": IN_REGION_TRACTS[1]},
-        {"hh_id": 3, "home_tract_2020": OUT_OF_REGION_TRACT},  # filtered out by the subsector filter
+        {"hh_id": 3, "home_tract_2020": OUT_OF_REGION_TRACT},  # filtered out by the zone filter
     ])
     journeys = make_journeys([{"person_id": p, "linked_trip_id": p} for p in (1, 2, 3, 4)])
 
-    return build_cmap_data(CMAPTables(journeys, persons, households, boundaries_ct)).with_filter("subsector")
+    return build_cmap_survey(CMAPTables(journeys, persons, households, boundaries_ct)).with_filter("zone")
 
 
-class TestCMAPDataViews:
-    def test_users_without_an_in_region_home_are_filtered_out(self, cmap_data):
-        assert cmap_data.users_df["user_id"].to_list() == ["1", "2", "3"]
+class TestCMAPSurveyViews:
+    def test_users_without_an_in_region_home_are_filtered_out(self, cmap_survey):
+        assert cmap_survey.users_df["user_id"].to_list() == ["1", "2", "3"]
 
-    def test_user_ids_match_users_df_order(self, cmap_data):
+    def test_user_ids_match_users_df_order(self, cmap_survey):
         # build_group_ids and the demographics tensor are both aligned positionally on this.
-        assert cmap_data.user_ids.to_list() == cmap_data.users_df["user_id"].to_list()
+        assert cmap_survey.user_ids.to_list() == cmap_survey.users_df["user_id"].to_list()
 
-    def test_home_locations_cover_every_user(self, cmap_data):
-        assert cmap_data.home_locations["user_id"].sort().to_list() == cmap_data.user_ids.to_list()
-        assert cmap_data.home_locations["loc_id"].null_count() == 0
+    def test_home_locations_cover_every_user(self, cmap_survey):
+        assert cmap_survey.home_locations["user_id"].sort().to_list() == cmap_survey.user_ids.to_list()
+        assert cmap_survey.home_locations["loc_id"].null_count() == 0
 
-    def test_every_users_df_column_is_a_feature_or_an_identifier(self, cmap_data):
+    def test_every_users_df_column_is_a_feature_or_an_identifier(self, cmap_survey):
         # Fails the moment a column is added to build_cmap_users without being classified, which is
         # the only way hh_id (or any other identifier) could reach the demographics tensor.
-        assert set(cmap_data.demographic_columns) | IDENTIFIER_COLUMNS == set(cmap_data.users_df.columns)
+        assert set(cmap_survey.demographic_columns) | IDENTIFIER_COLUMNS == set(cmap_survey.users_df.columns)
 
-    def test_hh_id_never_reaches_the_demographics_tensor(self, cmap_data):
+    def test_hh_id_never_reaches_the_demographics_tensor(self, cmap_survey):
         # hh_id lives on users_df for the grouped split; it is an identifier, not a feature.
-        assert "hh_id" not in cmap_data.demographic_columns
+        assert "hh_id" not in cmap_survey.demographic_columns
 
-        demographics = build_individual_demographics(cmap_data)
-        assert demographics.shape == (len(cmap_data.user_ids), len(cmap_data.demographic_columns))
+        demographics = build_individual_demographics(cmap_survey)
+        assert demographics.shape == (len(cmap_survey.user_ids), len(cmap_survey.demographic_columns))
 
-    def test_demographic_column_order_is_declared_not_incidental(self, cmap_data):
+    def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder
         # would let a stale scaler cache be applied to the wrong columns.
-        assert cmap_data.demographic_columns == DEMOGRAPHIC_COLUMNS
+        assert cmap_survey.demographic_columns == DEMOGRAPHIC_COLUMNS
 
-    def test_group_ids_are_shared_by_co_residents_only(self, cmap_data):
-        group_ids = build_group_ids(cmap_data)
+    def test_group_ids_are_shared_by_co_residents_only(self, cmap_survey):
+        group_ids = build_group_ids(cmap_survey)
 
-        assert group_ids.shape == (len(cmap_data.user_ids),)
+        assert group_ids.shape == (len(cmap_survey.user_ids),)
         assert group_ids[0] == group_ids[1]  # persons 1 and 2 share household 1
         assert group_ids[2] != group_ids[0]
 
-    def test_group_ids_are_stable_across_rebuilds(self, cmap_data, boundaries_ct):
+    def test_group_ids_are_stable_across_rebuilds(self, cmap_survey, boundaries_ct):
         # polars unique() does not maintain order by default; an unstable labelling would silently
         # change the split for a fixed seed on every cache rebuild.
-        assert build_group_ids(cmap_data).tolist() == build_group_ids(cmap_data).tolist()
+        assert build_group_ids(cmap_survey).tolist() == build_group_ids(cmap_survey).tolist()
 
 
 @pytest.mark.integration
-class TestCMAPDataRoundTrip:
+class TestCMAPSurveyRoundTrip:
     @pytest.fixture
     def loaded(self, load_or_skip):
-        return load_or_skip("cmap", lambda cfg, root: CMAPData.load(cfg.data, root))
+        return load_or_skip("cmap", lambda cfg, root: CMAPSurvey.load(cfg.data, root))
 
     def test_persists_hh_id_through_the_cache(self, loaded):
         # save() must write the private _users_df; a public view without hh_id would break the
@@ -377,6 +377,6 @@ class TestCMAPDataRoundTrip:
         assert "hh_id" in loaded.users_df.columns
 
     def test_home_locations_cover_every_user(self, loaded):
-        data = loaded.with_filter("subsector")
+        survey = loaded.with_filter("zone")
 
-        assert data.home_locations["user_id"].sort().to_list() == data.user_ids.to_list()
+        assert survey.home_locations["user_id"].sort().to_list() == survey.user_ids.to_list()

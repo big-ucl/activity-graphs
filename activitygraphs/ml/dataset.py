@@ -18,8 +18,10 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 
 from activitygraphs.config import Config
-from activitygraphs.dataprocessing import SPATIAL_FEATURE_NAMES, build_tensors, load_survey_and_graph
+from activitygraphs.graph import load_graph
 from activitygraphs.ml.metrics import compute_home_hop_distance
+from activitygraphs.surveys.registry import load_survey
+from activitygraphs.tensors import SPATIAL_FEATURE_NAMES, SurveyTensors, build_tensors
 from activitygraphs.utils import get_project_root
 
 type Fingerprint = dict
@@ -31,15 +33,15 @@ def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
 
 
 class ActivityDataset(pyg.data.Dataset):
-    """Main PyG dataset for a travel survey: shared network graph + per-user spatial features/labels + demographics.
+    """Main PyG dataset for a travel survey: shared graph + per-user spatial features/labels + demographics.
 
-    Stores the network graph once and slices per-user tensors on ``get()`` call.
-    Each item returned by ``get(i)`` is a ``pyg.data.Data`` with ``x = [network_features || spatial_features[i]]``,
+    Stores the graph once and slices per-user tensors on ``get()`` call.
+    Each item returned by ``get(i)`` is a ``pyg.data.Data`` with ``x = [location_features || spatial_features[i]]``,
     ``y = spatial_labels[i]``, and ``graph_x = demographics[i]``.
     """
 
     PROCESSED_FILE_NAMES = [
-        "network_graph.pt",
+        "pyg_graph.pt",
         "spatial_features.pt",
         "spatial_labels.pt",
         "demographics.pt",
@@ -50,35 +52,18 @@ class ActivityDataset(pyg.data.Dataset):
     def __init__(
         self,
         root: str,
-        network_graph: pyg.data.Data | None = None,
-        spatial_features: torch.Tensor | None = None,
-        spatial_labels: torch.Tensor | None = None,
-        demographics: torch.Tensor | None = None,
-        distances: torch.Tensor | None = None,
-        group_ids: torch.Tensor | None = None,
+        tensors: SurveyTensors | None = None,
         transform: Callable | None = None,
         pre_transform: Callable | None = None,
         pre_filter: Callable | None = None,
     ):
-        self._network_graph_in = network_graph
-        self._spatial_features_in = spatial_features
-        self._spatial_labels_in = spatial_labels
-        self._demographics_in = demographics
-        self._distances_in = distances
-        self._group_ids_in = group_ids
+        self._tensors_in = tensors
 
         super().__init__(root, transform, pre_transform, pre_filter)
-        del (  # pyrefly: ignore[unsupported-delete]
-            self._network_graph_in,
-            self._spatial_features_in,
-            self._spatial_labels_in,
-            self._demographics_in,
-            self._distances_in,
-            self._group_ids_in,
-        )
+        del self._tensors_in  # pyrefly: ignore[unsupported-delete]
 
         processed_dir = Path(self.processed_dir)
-        self.network_graph: pyg.data.Data = torch.load(processed_dir / "network_graph.pt", weights_only=False)
+        self.pyg_graph: pyg.data.Data = torch.load(processed_dir / "pyg_graph.pt", weights_only=False)
         self.spatial_features: torch.Tensor = torch.load(processed_dir / "spatial_features.pt", weights_only=True)
         self.spatial_labels: torch.Tensor = torch.load(processed_dir / "spatial_labels.pt", weights_only=True)
         self.demographics: torch.Tensor = torch.load(processed_dir / "demographics.pt", weights_only=True)
@@ -91,41 +76,37 @@ class ActivityDataset(pyg.data.Dataset):
             num_bad = int((home_counts != 1).sum())
             raise ValueError(f"{num_bad} users do not have exactly one home node. Expected one per user.")
 
-        if (
-            self.network_graph.x is None
-            or self.network_graph.edge_index is None
-            or self.network_graph.edge_attr is None
-        ):
-            raise ValueError("Network graph must have node features, an edge index and edge features.")
+        if self.pyg_graph.x is None or self.pyg_graph.edge_index is None or self.pyg_graph.edge_attr is None:
+            raise ValueError("Graph must have node features, an edge index and edge features.")
 
         # Check that the graph actually has nodes
-        num_nodes = self.network_graph.num_nodes
+        num_nodes = self.pyg_graph.num_nodes
         if num_nodes is None:
-            raise ValueError("Network graph has `None` number of nodes")
+            raise ValueError("Graph has `None` number of nodes")
 
         self.num_individuals: int = self.demographics.size(0)
         self.num_nodes: int = num_nodes
         self._is_scaled: bool = False
 
     @property
-    def network_x(self) -> torch.Tensor:
-        """Network node features, ``[num_nodes, num_network_features]``."""
-        return cast(torch.Tensor, self.network_graph.x)
+    def location_x(self) -> torch.Tensor:
+        """Graph node features, ``[num_nodes, num_location_features]``."""
+        return cast(torch.Tensor, self.pyg_graph.x)
 
     @property
-    def network_edge_index(self) -> torch.Tensor:
-        """Network edge list, ``[2, num_edges]``."""
-        return cast(torch.Tensor, self.network_graph.edge_index)
+    def edge_index(self) -> torch.Tensor:
+        """Graph edge list, ``[2, num_edges]``."""
+        return cast(torch.Tensor, self.pyg_graph.edge_index)
 
     @property
-    def network_edge_attr(self) -> torch.Tensor:
-        """Network edge features, ``[num_edges, num_edge_features]``."""
-        return cast(torch.Tensor, self.network_graph.edge_attr)
+    def edge_attr(self) -> torch.Tensor:
+        """Graph edge features, ``[num_edges, num_edge_features]``."""
+        return cast(torch.Tensor, self.pyg_graph.edge_attr)
 
     @property
-    def num_network_features(self) -> int:
-        """Number of network node-feature columns (those preceding the spatial block in ``x``)."""
-        return self.network_x.shape[1]
+    def num_location_features(self) -> int:
+        """Number of location node-feature columns (those preceding the spatial block in ``x``)."""
+        return self.location_x.shape[1]
 
     @property
     def is_home_spatial_idx(self) -> int:
@@ -135,12 +116,12 @@ class ActivityDataset(pyg.data.Dataset):
     @property
     def is_home_col_idx(self) -> int:
         """Column index of ``is_home`` within the concatenated node feature matrix ``x``."""
-        return self.num_network_features + self.is_home_spatial_idx
+        return self.num_location_features + self.is_home_spatial_idx
 
     @cached_property
     def home_hop_distance(self) -> np.ndarray:
-        """All-pairs hop distance matrix (over spatial adjacency graph) ``[num_nodes, num_nodes]`` for the network graph."""
-        return compute_home_hop_distance(self.network_edge_index, self.num_nodes)
+        """All-pairs hop distance matrix (over spatial adjacency graph) ``[num_nodes, num_nodes]`` for the graph."""
+        return compute_home_hop_distance(self.edge_index, self.num_nodes)
 
     @cached_property
     def median_realised_size(self) -> int:
@@ -163,16 +144,16 @@ class ActivityDataset(pyg.data.Dataset):
         pass
 
     def process(self):
-        """Apply the pre-transform to the network graph and write all tensors to the cache."""
-        graph = self._network_graph_in
-        sf = self._spatial_features_in
-        sl = self._spatial_labels_in
-        demo = self._demographics_in
-        dist = self._distances_in
-        group_ids = self._group_ids_in
+        """Apply the pre-transform to the graph and write all tensors to the cache."""
+        if self._tensors_in is None:
+            raise ValueError("First-time construction requires the survey tensors to be passed to init.")
 
-        if graph is None or sf is None or sl is None or demo is None or dist is None or group_ids is None:
-            raise ValueError("First-time construction requires all components Tensors/Data to be passed to init.")
+        graph = self._tensors_in.pyg_graph
+        sf = self._tensors_in.spatial_features
+        sl = self._tensors_in.spatial_labels
+        demo = self._tensors_in.demographics
+        dist = self._tensors_in.distances
+        group_ids = self._tensors_in.group_ids
 
         num_sf_users, num_sf_nodes, _ = sf.shape
         num_sl_users, num_sl_nodes, num_sl_labels = sl.shape
@@ -182,7 +163,7 @@ class ActivityDataset(pyg.data.Dataset):
 
         if not (graph.num_nodes == num_sf_nodes == num_sl_nodes == num_di_nodes):
             raise ValueError(
-                f"Node count mismatch: network has {graph.num_nodes}, spatial_features has {num_sf_nodes}, "
+                f"Node count mismatch: graph has {graph.num_nodes}, spatial_features has {num_sf_nodes}, "
                 f"spatial_labels has {num_sl_nodes}, distances has {num_di_nodes}."
             )
         if not (num_sf_users == num_sl_users == num_dm_users == num_di_users == num_grp_users):
@@ -199,7 +180,7 @@ class ActivityDataset(pyg.data.Dataset):
             graph = self.pre_transform(graph)
 
         processed_dir = Path(self.processed_dir)
-        torch.save(graph, processed_dir / "network_graph.pt")
+        torch.save(graph, processed_dir / "pyg_graph.pt")
         torch.save(sf, processed_dir / "spatial_features.pt")
         torch.save(sl, processed_dir / "spatial_labels.pt")
         torch.save(demo, processed_dir / "demographics.pt")
@@ -211,23 +192,23 @@ class ActivityDataset(pyg.data.Dataset):
         return self.num_individuals
 
     def get(self, idx: int) -> pyg.data.Data:
-        """Return user ``idx``'s graph: shared network features joined with the user's features and labels."""
+        """Return user ``idx``'s graph: shared location features joined with the user's features and labels."""
         if not 0 <= idx < self.num_individuals:
             raise IndexError(f"Index {idx} out of range for {self.num_individuals} individuals.")
 
-        network_x = self.network_x
+        location_x = self.location_x
         spatial_x = self.spatial_features[idx]
 
-        # Cast spatial features to same type as network graph features if mismatch
-        if spatial_x.dtype != network_x.dtype:
-            spatial_x = spatial_x.to(network_x.dtype)
+        # Cast spatial features to same type as graph features if mismatch
+        if spatial_x.dtype != location_x.dtype:
+            spatial_x = spatial_x.to(location_x.dtype)
 
-        # Create new individual-annotated network graph
-        full_x = torch.cat([network_x, spatial_x], dim=1)
+        # Create new individual-annotated graph
+        full_x = torch.cat([location_x, spatial_x], dim=1)
         y = self.spatial_labels[idx]
         graph_x = self.demographics[idx]
-        edge_index = self.network_edge_index
-        edge_attr = self.network_edge_attr
+        edge_index = self.edge_index
+        edge_attr = self.edge_attr
 
         data = pyg.data.Data(x=full_x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
@@ -238,8 +219,8 @@ class ActivityDataset(pyg.data.Dataset):
         # Per-user distance-from-home
         data.distances = self.distances[idx].to(full_x.dtype)
 
-        # Carry over any extra attributes from the network graph (pos, etc.)
-        for key, value in self.network_graph:  # pyrefly: ignore[not-iterable]
+        # Carry over any extra attributes from the graph (pos, etc.)
+        for key, value in self.pyg_graph:  # pyrefly: ignore[not-iterable]
             if key in ("x", "edge_index", "edge_attr", "y"):
                 continue
 
@@ -252,8 +233,8 @@ class ActivityDataset(pyg.data.Dataset):
 class FittedScalers:
     """Container for ``StandardScaler`` instances fitted on the training split."""
 
-    network_features: StandardScaler
-    network_edges: StandardScaler
+    node_features: StandardScaler
+    edge_features: StandardScaler
     spatial: StandardScaler | None
     demographics: StandardScaler
     distances: StandardScaler
@@ -338,22 +319,11 @@ def load_dataset(
     dataset_path = project_root / cfg.data.paths.pyg_datasets
 
     if not all((dataset_path / file).exists() for file in ActivityDataset.PROCESSED_FILE_NAMES):
-        data, network_nodes, network_edges = load_survey_and_graph(cfg.data, project_root)
-        network_graph, spatial_features, spatial_labels, demographics, distances, group_ids = build_tensors(
-            data, network_nodes, network_edges
-        )
-        dataset_path = project_root / cfg.data.paths.pyg_datasets
+        survey = load_survey(cfg.data, project_root).with_filter("zone")
+        nodes_gdf, edges_gdf = load_graph(survey, cfg.data, project_root)
+        tensors = build_tensors(survey, nodes_gdf, edges_gdf)
 
-        return ActivityDataset(
-            str(dataset_path),
-            cast(pyg.data.Data, network_graph),
-            spatial_features,
-            spatial_labels,
-            demographics,
-            distances,
-            group_ids,
-            **build_kwargs,
-        )
+        return ActivityDataset(str(dataset_path), tensors, **build_kwargs)
 
     return ActivityDataset(root=str(dataset_path), **build_kwargs)
 
@@ -424,15 +394,15 @@ def fit_scalers(
         fingerprint: Identity of the dataset being fitted on, stored for cache validation.
 
     Returns:
-        ``FittedScalers`` with one scaler per feature group (network nodes, edges, spatial, demographics).
+        ``FittedScalers`` with one scaler per feature group (graph nodes, edges, spatial, demographics).
     """
-    # Network node features: no need to separate between train and test, the network is the same.
-    network_scaler = StandardScaler()
-    network_scaler.fit(dataset.network_x.numpy())
+    # Location node features: no need to separate between train and test, the graph is the same.
+    node_scaler = StandardScaler()
+    node_scaler.fit(dataset.location_x.numpy())
 
-    # Network edge attributes: same as above
+    # Location edge attributes: same as above
     edge_scaler = StandardScaler()
-    edge_scaler.fit(dataset.network_edge_attr.numpy())
+    edge_scaler.fit(dataset.edge_attr.numpy())
 
     # Spatial features: individual-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
     spatial_train = dataset.spatial_features[train_idx]
@@ -457,8 +427,8 @@ def fit_scalers(
     distances_scaler.fit(distances_train.reshape(-1, distances_train.shape[-1]).float().numpy())
 
     return FittedScalers(
-        network_features=network_scaler,
-        network_edges=edge_scaler,
+        node_features=node_scaler,
+        edge_features=edge_scaler,
         spatial=spatial_scaler,
         demographics=demo_scaler,
         distances=distances_scaler,
@@ -468,15 +438,15 @@ def fit_scalers(
 
 
 def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
-    """Apply fitted scalers to the dataset in-place, transforming network/spatial/demographic tensors."""
+    """Apply fitted scalers to the dataset in-place, transforming graph/spatial/demographic tensors."""
     if dataset._is_scaled:
         raise RuntimeError("apply_scalers called twice on the same ActivityDataset")
 
-    x = dataset.network_x.numpy()
-    dataset.network_graph.x = torch.from_numpy(scalers.network_features.transform(x)).float()
+    x = dataset.location_x.numpy()
+    dataset.pyg_graph.x = torch.from_numpy(scalers.node_features.transform(x)).float()
 
-    ea = dataset.network_edge_attr.numpy()
-    dataset.network_graph.edge_attr = torch.from_numpy(scalers.network_edges.transform(ea)).float()
+    ea = dataset.edge_attr.numpy()
+    dataset.pyg_graph.edge_attr = torch.from_numpy(scalers.edge_features.transform(ea)).float()
 
     if scalers.spatial is not None:
         sf = dataset.spatial_features.float()

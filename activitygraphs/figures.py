@@ -1,6 +1,6 @@
 """Builders for the presentation figures: matplotlib zone maps and Altair model curves.
 
-Node order is the PyG node order: ``network_nodes`` sorted by ``loc_id``, so row ``i`` of a gdf from
+Node order is the PyG node order: ``nodes_gdf`` sorted by ``loc_id``, so row ``i`` of a gdf from
 ``node_gdf`` is node index ``i`` of a score vector, a ``pos_node`` or a ``home_node``.
 
 ``DEFAULT_MODELS`` is the shared scheme behind every chart: the models of the comparison, the names
@@ -137,17 +137,17 @@ def with_labels(frame: pl.DataFrame, specs: Sequence[ModelStyle] = DEFAULT_MODEL
 # =========================================
 
 
-def node_gdf(network_nodes: gpd.GeoDataFrame, polygons: bool = True) -> gpd.GeoDataFrame:
+def node_gdf(nodes_gdf: gpd.GeoDataFrame, polygons: bool = True) -> gpd.GeoDataFrame:
     """Network nodes in PyG node order, in ``CRS``, with polygon or point geometry.
 
     Args:
-        network_nodes: Nodes from ``load_*_network_graph``, indexed by ``loc_id``.
+        nodes_gdf: Nodes from ``load_graph``, indexed by ``loc_id``.
         polygons: Use the zone polygons (``original_geometry``) rather than the centroids.
 
     Returns:
         The nodes sorted by ``loc_id`` with a reset index, so row ``i`` is node index ``i``.
     """
-    nodes = network_nodes.sort_index().reset_index()
+    nodes = nodes_gdf.sort_index().reset_index()
     nodes = nodes.set_geometry("original_geometry") if polygons else nodes.set_geometry("geometry")
 
     return nodes.to_crs(CRS)
@@ -160,7 +160,7 @@ def edges_within(edges: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame) -> gpd.GeoDat
     unnamed, and only the TPG builder names them while joining its islands.
 
     Args:
-        edges: Edges from ``load_*_network_graph``, indexed by (source ``loc_id``, target ``loc_id``).
+        edges: Edges from ``load_graph``, indexed by (source ``loc_id``, target ``loc_id``).
         nodes: The subset of zones to keep edges within, carrying a ``loc_id`` column.
 
     Returns:
@@ -180,7 +180,7 @@ def neighbours_of(edges: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame, index: int) 
     searched.
 
     Args:
-        edges: Edges from ``load_*_network_graph``, indexed by (source ``loc_id``, target ``loc_id``).
+        edges: Edges from ``load_graph``, indexed by (source ``loc_id``, target ``loc_id``).
         nodes: The zones ``index`` and the result are positions into, carrying a ``loc_id`` column.
         index: Position of the zone whose neighbours are wanted.
 
@@ -389,7 +389,7 @@ def zone_map(
         values: Value per node to colour by, of shape ``[len(nodes)]``; a flat fill if None.
         markers: Label -> node indices (into ``nodes``) drawn as labelled centroid points.
         highlight_zones: Label -> node indices filled in a flat colour, drawn over the choropleth.
-        edges: Adjacency edges from ``load_*_network_graph`` drawn as an overlay.
+        edges: Adjacency edges from ``load_graph`` drawn as an overlay.
         show_nodes: Draw a dot at each zone's centroid, so the adjacency overlay reads as a graph.
         highlight: Node indices (into ``nodes``) outlined in bold, e.g. a top-k selection.
         focus: Node indices whose bounds set the view, so a selection clustered in one corner of the

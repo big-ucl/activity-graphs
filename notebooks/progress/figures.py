@@ -200,7 +200,7 @@ def example_ranking_figure(k: int = 20, seed: int = 42, user_id: int | None = No
     colour bar although their scores are on different scales.
     """
     cfg, per_user, scores, _ = load("cmap")
-    nodes = figures.node_gdf(gpd.read_parquet(PROJECT_ROOT / cfg.data.paths.processed / "NetworkGraph/nodes.parquet"))
+    nodes = figures.node_gdf(gpd.read_parquet(PROJECT_ROOT / cfg.data.paths.processed / "Graph/nodes.parquet"))
 
     user_id = pick_user(per_user) if user_id is None else user_id
     row = per_user.filter((pl.col("stage") == PER_USER_STAGE) & (pl.col("user_id") == user_id)).row(0, named=True)

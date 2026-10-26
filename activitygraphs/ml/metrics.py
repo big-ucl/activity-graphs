@@ -170,7 +170,7 @@ class PerUserRanking(Metric):
 
     Also keeps info about each of the users' positives (i.e. visited nodes, R = |RG_i|), NOT indexed by user, but by
     ``sum(num_pos_u, u in users)`` (i.e. each index is a visited node), struct of flattened lists:
-        - pos_node: index of the positive node within the network graph
+        - pos_node: index of the positive node within the graph
         - pos_hops: number of hops from home to the positive node
         - pos_in_top_r: did this positive node make it into the top R (= |RG_i|) nodes, ties broken arbitrarily
         - pos_n_scored_higher: number of nodes ranked higher than the positive node

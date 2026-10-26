@@ -1,4 +1,10 @@
-"""Toronto THATS survey loader and NetworkData subclass."""
+"""Toronto THATS survey: raw tables -> ``THATSSurvey``, and the census statistics for its graph nodes.
+
+Survey: ``THATSSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``build_thats_survey``,
+which builds the locations, journeys, activities and users in turn.
+Statistics: ``read_thats_statistics`` and ``add_thats_population_job_statistics`` add census population and jobs to
+the zones. ``LOADER`` bundles these steps for the survey registry.
+"""
 
 from dataclasses import dataclass
 from functools import cached_property
@@ -12,11 +18,12 @@ import polars.selectors as cs
 
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, LOCATIONS_SCHEMA, USER_JOURNEY_SCHEMA, Mode, Purpose
 from activitygraphs.config import THATSDataConfig
-from activitygraphs.network import NA, NetworkData, build_special_locations
+from activitygraphs.surveys.base import NA, DataFrameStore, SurveyData, SurveyLoader, build_special_locations
+from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import (
-    DataFrameStore,
     add_lon_lat_from_centroid,
     check_schema,
+    gdf_to_polars,
     get_project_root,
     invert_mapping,
 )
@@ -138,6 +145,11 @@ ACTIVITY_MAP = invert_mapping({
 })
 
 
+# =========================================
+# Survey
+# =========================================
+
+
 @dataclass(frozen=True)
 class THATSTables:
     """Parsed raw inputs for the Toronto THATS survey (journeys, persons, households, activities, boundaries)."""
@@ -152,12 +164,11 @@ class THATSTables:
     dissemination_areas_gdf: gpd.GeoDataFrame
 
 
-class THATSData(NetworkData, DataFrameStore):
-    """Toronto THATS ``NetworkData`` subclass with caching via ``DataFrameStore``."""
+class THATSSurvey(SurveyData, DataFrameStore):
+    """Toronto THATS ``SurveyData`` subclass with caching via ``DataFrameStore``."""
 
     def __init__(
         self,
-        inputs: THATSTables,
         locations_gdf: gpd.GeoDataFrame,
         user_journeys_df: pl.DataFrame,
         activities_df: pl.DataFrame,
@@ -165,7 +176,6 @@ class THATSData(NetworkData, DataFrameStore):
         filters: list[str] | None = None,
     ):
         super().__init__(user_journeys_df, locations_gdf, filters)
-        self.inputs = inputs
         self.activities_df = activities_df
         self._users_df = users_df
 
@@ -200,15 +210,12 @@ class THATSData(NetworkData, DataFrameStore):
         )
 
     def _copy(self, filters: list[str] | None = None) -> Self:
-        return type(self)(
-            self.inputs, self._locations_gdf, self._user_journeys_df, self.activities_df, self.users_df, filters
-        )
+        return type(self)(self._locations_gdf, self._user_journeys_df, self.activities_df, self.users_df, filters)
 
     @classmethod
-    def load(cls, cfg: THATSDataConfig, project_root: Path | None = None, name: str | None = None) -> "THATSData":
+    def load(cls, cfg: THATSDataConfig, project_root: Path | None = None, name: str | None = None) -> "THATSSurvey":
         """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
-        thats_inputs = read_tables(cfg, project_root)
 
         if data_dir.exists():
             locations_gdf = gpd.read_parquet(data_dir / "locations_gdf.parquet")
@@ -216,12 +223,12 @@ class THATSData(NetworkData, DataFrameStore):
             activities_df = pl.read_parquet(data_dir / "activities_df.parquet")
             users_df = pl.read_parquet(data_dir / "users_df.parquet")
 
-            return cls(thats_inputs, locations_gdf, user_journeys_df, activities_df, users_df)
-        else:
-            data = build_thats_data(thats_inputs)
-            data.save(cfg, project_root, name)
+            return cls(locations_gdf, user_journeys_df, activities_df, users_df)
 
-            return data
+        survey = build_thats_survey(read_tables(cfg, project_root))
+        survey.save(cfg, project_root, name)
+
+        return survey
 
     def save(self, cfg: THATSDataConfig, project_root: Path | None = None, name: str | None = None):
         """Write the locations, journeys, activities and users to the processed cache."""
@@ -254,30 +261,124 @@ def read_tables(cfg: THATSDataConfig, project_root: Path | None = None) -> THATS
     )
 
 
-def build_thats_data(inputs: THATSTables) -> THATSData:
-    """Parse raw Toronto inputs into a standardised ``THATSData`` instance."""
+def build_thats_survey(inputs: THATSTables) -> THATSSurvey:
+    """Parse raw Toronto inputs into a standardised ``THATSSurvey`` instance."""
     locations_gdf = build_thats_locations(inputs)
     user_journeys_df = build_thats_journeys(inputs, locations_gdf)
     activities_df = build_thats_activities(inputs, user_journeys_df)
     users_df = build_thats_users(inputs, locations_gdf, user_journeys_df)
 
-    return THATSData(inputs, locations_gdf, user_journeys_df, activities_df, users_df)
+    return THATSSurvey(locations_gdf, user_journeys_df, activities_df, users_df)
 
 
 # =========================================
-# Locations
+# Statistics
+# =========================================
+
+
+@dataclass(frozen=True)
+class THATSStatistics:
+    """Toronto census profile (population and area) and place-of-work tables."""
+
+    census_df: pl.LazyFrame
+    jobs_df: pl.LazyFrame
+
+
+def read_thats_statistics(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSStatistics:
+    """Read the Toronto census profile and place-of-work CSVs."""
+    stats_cfg = cfg.inputs.statistics
+    stats_dir = get_project_root(project_root) / stats_cfg.directory
+
+    census_df = pl.scan_csv(
+        stats_dir / stats_cfg.population,
+        encoding="utf8-lossy",
+        schema_overrides={"ALT_GEO_CODE": pl.String},
+    )
+    jobs_df = pl.scan_csv(stats_dir / stats_cfg.jobs, schema_overrides={"ALT_GEO_CODE": pl.String})
+
+    return THATSStatistics(census_df, jobs_df)
+
+
+def add_thats_population_job_statistics(
+    locations: gpd.GeoDataFrame, statistics: THATSStatistics, normalise: bool = True
+) -> gpd.GeoDataFrame:
+    """Add census population and job counts to Toronto census-tract locations.
+
+    Args:
+        locations: Toronto locations (must have a ``loc_id`` matching ``ALT_GEO_CODE``).
+        statistics: Census tables from ``read_thats_statistics``.
+        normalise: If True, divide counts by area to obtain densities.
+    """
+    locations_df = gdf_to_polars(locations).lazy()
+    census_stats = statistics.census_df
+
+    pop_stats = census_stats.filter(CHARACTERISTIC_ID=1).select("ALT_GEO_CODE", population="C1_COUNT_TOTAL")
+    area_stats = census_stats.filter(CHARACTERISTIC_ID=7).select("ALT_GEO_CODE", area=pl.col("C1_COUNT_TOTAL") * 10**6)
+
+    pop_stats = (
+        locations_df.select("loc_id").join(pop_stats, left_on="loc_id", right_on="ALT_GEO_CODE").collect().to_pandas()
+    )
+    area_stats = (
+        locations_df.select("loc_id").join(area_stats, left_on="loc_id", right_on="ALT_GEO_CODE").collect().to_pandas()
+    )
+
+    dguids_to_loc_ids = census_stats.select("DGUID", loc_id="ALT_GEO_CODE")
+    job_stats = statistics.jobs_df.join(dguids_to_loc_ids, on="DGUID")
+
+    job_stats = (
+        job_stats
+        .filter(
+            pl.col("Industry - Sectors - North American Industry Classification System (NAICS) 2017 (21)")
+            == "Total - Industry - Sectors - North American Industry Classification System (NAICS) 2017",
+            pl.col("Age (15A)") == "Total - Age",
+            pl.col("Gender (3)") == "Total - Gender",
+            pl.col("Place of work status (7)") == "Total - Place of work status",
+        )
+        .unique("DGUID")
+        .select(
+            "loc_id",
+            jobs="Work activity during the reference year (4A):Total - Work activity during the reference year[1]",
+        )
+    )
+
+    job_stats = locations_df.select("loc_id").join(job_stats, on="loc_id").collect().to_pandas()
+
+    stats_by_sector = (
+        locations
+        .merge(pop_stats, on="loc_id", how="left")
+        .merge(job_stats, on="loc_id", how="left")
+        .merge(area_stats, on="loc_id", how="left")
+    )
+
+    return normalise_statistics(stats_by_sector, normalise)
+
+
+# =========================================
+# Loader
+# =========================================
+
+
+LOADER = SurveyLoader(
+    load=THATSSurvey.load,
+    read_statistics=read_thats_statistics,
+    add_statistics=add_thats_population_job_statistics,
+)
+
+
+# =========================================
+# Survey: Locations
 # =========================================
 
 
 def build_thats_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     """Build the Toronto locations GeoDataFrame (census tracts and NA)."""
     special_locations = build_special_locations()
-    subsector_locations = build_subsector_locations(inputs)
+    zone_locations = build_zone_locations(inputs)
     return gpd.GeoDataFrame(
         pd.concat(
             [
                 special_locations,
-                subsector_locations,
+                zone_locations,
             ],
             ignore_index=True,
         ),
@@ -285,8 +386,8 @@ def build_thats_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     )
 
 
-def build_subsector_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
-    """Extract census-tract "subsector" locations within the Toronto CMA and return them as subsector locations."""
+def build_zone_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
+    """Extract the census tracts within the Toronto CMA as zone locations."""
     toronto_cma = inputs.metropolitan_areas_gdf.query(f"CMAUID == '{TORONTO_CMA}'")
     utm_crs = toronto_cma.estimate_utm_crs()
 
@@ -295,7 +396,7 @@ def build_subsector_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     boundaries_gdf = boundaries_gdf.drop(columns=["index_right"]).reset_index(drop=True).to_crs(CRS)
 
     boundaries_gdf = boundaries_gdf.rename(columns={"CTUID": "loc_id", "CTNAME": "loc_name"})
-    boundaries_gdf["type"] = "subsector"
+    boundaries_gdf["type"] = "zone"
     boundaries_gdf = add_lon_lat_from_centroid(boundaries_gdf, index_col="loc_id")
 
     # noinspection PyTypeChecker
@@ -305,7 +406,7 @@ def build_subsector_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
 
 
 # =========================================
-# Journeys
+# Survey: Journeys
 # =========================================
 
 
@@ -407,7 +508,7 @@ def build_thats_journeys(inputs: THATSTables, locations_gdf: gpd.GeoDataFrame) -
 
 
 # =========================================
-# Activities
+# Survey: Activities
 # =========================================
 
 
@@ -546,7 +647,7 @@ def collapse_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
 
 
 # =========================================
-# Users
+# Survey: Users
 # =========================================
 
 

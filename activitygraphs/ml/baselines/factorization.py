@@ -34,7 +34,7 @@ class HomeZoneMFBaseline(torch.nn.Module):
     The scores are inner products rather than probabilities, so its BCE is not meaningful.
 
     Args:
-        num_nodes: Number of nodes in the network graph.
+        num_nodes: Number of nodes in the graph.
         is_home_idx: Column index of ``is_home`` in ``batch.x``.
         max_recall_k: Largest rank cutoff ``K`` of the validation ``avg_recall@K`` that selects the kept factors.
         n_factors: Latent dimension ``k``.

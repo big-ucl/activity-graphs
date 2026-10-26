@@ -153,7 +153,7 @@ class FullyConnectedMLP(torch.nn.Module):
 
     Tries to serve as an "upper bound" on what is doable with a GNN. The idea is that a GNN approaches
     this baseline without needing to have a fixed-size node graph. It relies on every user graph having
-    exactly ``num_nodes`` nodes (true for the shared network graph). The constant ``edge_index`` /
+    exactly ``num_nodes`` nodes (true for the shared graph). The constant ``edge_index`` /
     ``edge_attr`` carry no per-user signal and are ignored.
     """
 

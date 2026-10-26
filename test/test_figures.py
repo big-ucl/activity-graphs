@@ -37,7 +37,7 @@ from activitygraphs.figures import (
 
 
 @pytest.fixture
-def network_nodes() -> gpd.GeoDataFrame:
+def nodes_gdf() -> gpd.GeoDataFrame:
     loc_ids = ["zone-3", "zone-1", "zone-2"]
     centroids = [Point(i, 0) for i in range(3)]
     polygons = [box(i - 0.4, -0.4, i + 0.4, 0.4) for i in range(3)]
@@ -102,23 +102,23 @@ def test_with_labels_renames_and_filters(curve):
         with_labels(curve, (ModelStyle("Nope", "Nope", "#000000", learned=False),))
 
 
-def test_node_gdf_is_in_sorted_loc_id_order(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_node_gdf_is_in_sorted_loc_id_order(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
 
     assert nodes["loc_id"].to_list() == ["zone-1", "zone-2", "zone-3"]
     assert nodes.geometry.geom_type.eq("Polygon").all()
-    assert node_gdf(network_nodes, polygons=False).geometry.geom_type.eq("Point").all()
+    assert node_gdf(nodes_gdf, polygons=False).geometry.geom_type.eq("Point").all()
 
 
 @pytest.mark.parametrize("level_names", [None, ["source", "target"]])
-def test_edges_within_keeps_only_interior_edges(network_nodes, level_names):
+def test_edges_within_keeps_only_interior_edges(nodes_gdf, level_names):
     pairs = [("zone-1", "zone-2"), ("zone-2", "zone-3"), ("zone-3", "zone-4")]
     edges = gpd.GeoDataFrame(
         {"geometry": gpd.GeoSeries([LineString([(0, 0), (1, 0)])] * 3, crs=CRS)},
         index=pd.MultiIndex.from_tuples(pairs, names=level_names),
     )
 
-    kept = edges_within(edges, node_gdf(network_nodes).iloc[[0, 1]])
+    kept = edges_within(edges, node_gdf(nodes_gdf).iloc[[0, 1]])
 
     assert list(kept.index) == [("zone-1", "zone-2")]
 
@@ -162,8 +162,8 @@ def test_user_scores_selects_the_model_seed_and_user():
         user_scores(vectors, "GAT", 2, seed=0)
 
 
-def test_zone_map_draws_choropleth_zones_and_highlights(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_zone_map_draws_choropleth_zones_and_highlights(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
 
     ax = zone_map(
         nodes,
@@ -178,8 +178,8 @@ def test_zone_map_draws_choropleth_zones_and_highlights(network_nodes):
     assert [text.get_text() for text in ax.get_legend().get_texts()] == ["Home", "Visited", "Work"]
 
 
-def test_zone_map_focus_restricts_the_view(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_zone_map_focus_restricts_the_view(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
 
     full = zone_map(nodes, basemap=False)
     focused = zone_map(nodes, focus=[0], basemap=False)
@@ -187,8 +187,8 @@ def test_zone_map_focus_restricts_the_view(network_nodes):
     assert focused.get_xlim()[1] - focused.get_xlim()[0] < full.get_xlim()[1] - full.get_xlim()[0]
 
 
-def test_zero_focus_margin_crops_exactly_to_the_zones(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_zero_focus_margin_crops_exactly_to_the_zones(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
 
     ax = zone_map(nodes, focus=range(len(nodes)), focus_margin=0.0, basemap=False)
 
@@ -197,8 +197,8 @@ def test_zero_focus_margin_crops_exactly_to_the_zones(network_nodes):
     assert ax.get_ylim() == pytest.approx((min_y, max_y))
 
 
-def test_zone_figsize_matches_the_ground_aspect(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_zone_figsize_matches_the_ground_aspect(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
     min_x, min_y, max_x, max_y = nodes.to_crs(nodes.estimate_utm_crs()).total_bounds
 
     width, height = zone_figsize(nodes, width=7.0)
@@ -207,8 +207,8 @@ def test_zone_figsize_matches_the_ground_aspect(network_nodes):
     assert height / width == pytest.approx((max_y - min_y) / (max_x - min_x))
 
 
-def test_map_figure_keeps_the_map_area_whatever_keys_it_reserves(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_map_figure_keeps_the_map_area_whatever_keys_it_reserves(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
     width, height = zone_figsize(nodes, width=7.0)
 
     plain = map_figure(nodes, width=7.0)
@@ -224,8 +224,8 @@ def test_map_figure_keeps_the_map_area_whatever_keys_it_reserves(network_nodes):
     assert keyed[2].get_position().y1 < keyed[1].get_position().y0
 
 
-def test_neighbours_of_is_symmetric_and_restricted_to_the_given_nodes(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_neighbours_of_is_symmetric_and_restricted_to_the_given_nodes(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
     # zone-2 appears once as a target and twice as a source; zone-9 is outside `nodes`.
     pairs = [("zone-1", "zone-2"), ("zone-3", "zone-2"), ("zone-2", "zone-9")]
     edges = gpd.GeoDataFrame(
@@ -237,8 +237,8 @@ def test_neighbours_of_is_symmetric_and_restricted_to_the_given_nodes(network_no
     assert neighbours_of(edges, nodes, 0) == [1]
 
 
-def test_add_transit_line_crosses_the_view_without_widening_it(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_add_transit_line_crosses_the_view_without_widening_it(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
     ax = zone_map(nodes, basemap=False)
     xlim = ax.get_xlim()
 
@@ -252,16 +252,16 @@ def test_add_transit_line_crosses_the_view_without_widening_it(network_nodes):
     assert drawn[:, 0].max() > xlim[1]
 
 
-def test_add_transit_line_needs_two_distinct_zones(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_add_transit_line_needs_two_distinct_zones(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
     ax = zone_map(nodes, basemap=False)
 
     with pytest.raises(ValueError, match="different zones"):
         add_transit_line(ax, nodes, through=[1, 1])
 
 
-def test_score_panels_shares_the_colour_scale(network_nodes):
-    nodes = node_gdf(network_nodes)
+def test_score_panels_shares_the_colour_scale(nodes_gdf):
+    nodes = node_gdf(nodes_gdf)
     scores = {"GNN": np.array([0.0, 0.5, 1.0]), "MTF-BPR": np.array([0.2, 0.2, 0.4])}
 
     fig = score_panels(nodes, scores, basemap=False)

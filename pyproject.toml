@@ -40,6 +40,7 @@ dev = [
     "pytest>=9.0.1",
     "ruff>=0.11.11",
     "scipy-stubs~=1.17.1",
+    "types-geopandas>=1.1.4.20261006",
 ]
 notebooks = [
     "marimo>=0.13.11",

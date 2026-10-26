@@ -9,7 +9,6 @@ import polars as pl
 import torch
 
 from activitygraphs.base import CRS, EDGE_LIST_SCHEMA, LOCATIONS_SCHEMA
-from activitygraphs.config import DataConfig
 
 PandasSchema = Mapping[str, str]
 
@@ -191,18 +190,6 @@ def add_lon_lat_from_centroid(
     gdf[lat_name] = gdf["centroid"].y
 
     return gdf.drop(columns=["centroid"])
-
-
-class DataFrameStore:
-    """Mixin that provides a standard cache-directory layout for concrete ``NetworkData`` subclasses."""
-
-    @classmethod
-    def _dirs(cls, cfg: DataConfig, project_root: Path | None = None, name: str | None = None) -> tuple[Path, Path]:
-        project_root = project_root if project_root is not None else Path(".")
-        suffix = "" if name is None else f"-{name}"
-        data_dir = project_root / cfg.paths.processed / f"{cls.__name__}{suffix}"
-
-        return project_root, data_dir
 
 
 def invert_mapping(mapping: dict[Hashable, list[Hashable]]) -> dict[Hashable, Hashable]:

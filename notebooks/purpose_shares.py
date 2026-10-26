@@ -10,7 +10,7 @@ import polars as pl
 
 from activitygraphs.base import Purpose
 from activitygraphs.config import read_config
-from activitygraphs.dataprocessing import load_survey_and_graph
+from activitygraphs.surveys.registry import load_survey
 
 ANCHOR_PURPOSES = [Purpose.WORK_MAIN.value, Purpose.STUDY.value]
 
@@ -111,8 +111,8 @@ def main(datasets: list[str]) -> None:
 
     for name in datasets:
         cfg = read_config(project_root, verbose=False, data=name)
-        data, _, _ = load_survey_and_graph(cfg.data, project_root)
-        positives = non_home_positives(data.location_visits, data.home_locations)
+        survey = load_survey(cfg.data, project_root).with_filter("zone")
+        positives = non_home_positives(survey.location_visits, survey.home_locations)
 
         print(f"\n=== {cfg.data.name}: all modelled users, home node excluded ===")
         print(summary_table(positives))

@@ -1,5 +1,6 @@
 # @package data
 name: THATS
+survey: thats
 
 inputs:
   raw_person: indivs.parquet

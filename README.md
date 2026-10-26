@@ -1,17 +1,25 @@
 # Activity Graphs
 
-A graph neural network framework for predicting location consideration sets from travel surveys. Given a survey participant's home location and demographics, the model scores every zone of a city's spatial network and ranks them into a tractable candidate set of locations the person plausibly considers visiting. This choice set can be used as input to downstream activity-based travel models. The task is set up as node-level classification/ranking over a spatial adjacency graph of census/traffic analysis zones, trained on realised visits. 
+A graph neural network framework for predicting location consideration sets from travel surveys. Given a survey
+participant's home location and demographics, the model scores every zone of a city's spatial network and ranks them
+into a tractable candidate set of locations the person plausibly considers visiting. This choice set can be used as
+input to downstream activity-based travel models. The task is set up as node-level classification/ranking over a spatial
+adjacency graph of census/traffic analysis zones, trained on realised visits.
 
-Datasets: Toronto (THATS), Geneva (TPG), with Chicago (CMAP MyDailyTravel) coming soon. Survey data is not distributed in this repository, `data/` must be added to the local repo clone.
+Datasets: Toronto (THATS), Geneva (TPG), with Chicago (CMAP MyDailyTravel) coming soon. Survey data is not distributed
+in this repository, `data/` must be added to the local repo clone.
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/). PyTorch / PyTorch Geometric are pulled from CUDA 12.6 wheel indices configured in `pyproject.toml`.
+Requires [uv](https://docs.astral.sh/uv/). PyTorch / PyTorch Geometric are pulled from CUDA 12.6 wheel indices
+configured in `pyproject.toml`.
 
 From the cloned repository, run:
+
 ```bash
 uv sync
 ```
+
 to setup the project and install dependencies.
 
 ## Usage
@@ -38,21 +46,23 @@ uv run report-results data=tpg analysis.run=3             # a specific dataset a
 uv run report-results analysis.reference_model=MLP-dist   # change reference model for comparisons
 ```
 
-`report-results` reads the result Parquet files and prints: 
- - the aggregate metric as mean +- sd over the training seeds;
- - the per-user paired comparison of every model against `analysis.reference_model` (bootstrap CI and Wilcoxon p);
- - the per-hop-band metrics table. 
+`report-results` reads the result Parquet files and prints:
 
-Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line. 
+- the aggregate metric as mean +- sd over the training seeds;
+- the per-user paired comparison of every model against `analysis.reference_model` (bootstrap CI and Wilcoxon p);
+- the per-hop-band metrics table.
 
-`train.experiment` selects what to run: 
- - `comparison` (default) trains the GNN variants (GATSkip, GraphTransformer, MLP) 
-against frequency baselines, 
- - `depth_sweep` sweeps the message-passing depth of the best GATSkip variant.
+Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line.
 
-Both write per-epoch metrics to WandB and `reports/data/{name}-results-{N}.parquet`, per-test-user scores to 
-`{name}-per-user-{N}.parquet`, and best-validation checkpoints to `models/`. The train/val/test split is drawn with 
-`train.split_seed`; every model in every run is scored on the same test users; 
+`train.experiment` selects what to run:
+
+- `comparison` (default) trains the GNN variants (GATSkip, GraphTransformer, MLP)
+  against frequency baselines,
+- `depth_sweep` sweeps the message-passing depth of the best GATSkip variant.
+
+Both write per-epoch metrics to WandB and `reports/data/{name}-results-{N}.parquet`, per-test-user scores to
+`{name}-per-user-{N}.parquet`, and best-validation checkpoints to `models/`. The train/val/test split is drawn with
+`train.split_seed`; every model in every run is scored on the same test users;
 `train.train_seeds` reseeds each model run to measure spread.
 
 ## Tests
@@ -68,13 +78,15 @@ uv run pytest test/ -m integration     # integration tests (skip when data is ab
 activitygraphs/
   main.py, experiments.py  # Hydra entry points and experiment running
   analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
-  network.py               # Abstraction for travel data (NetworkData)
-  dataprocessing.py        # Graph construction and pytorch tensor building
-  data/                    # Per-dataset loaders (tpg, thats, cmap)
+  surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap) and registry
+  graph/                   # Graph construction
+  tensors/                 # pytorch tensor building
   conf/                    # Hydra configs (root + per-dataset)
   ml/                      # PyG dataset, Lightning module, training, models, losses, metrics, baselines
 test/                      # pytest suite
 reports/data/              # result dataframes
 ```
 
-Models are evaluated using metrics for consideration sets: realised visits are a subset of the latent target, so we use recall metrics that are set size-aware (R-precision, recall at a set size). Precision-style metrics are diagnostics only.
+Models are evaluated using metrics for consideration sets: realised visits are a subset of the latent target, so we use
+recall metrics that are set size-aware (R-precision, recall at a set size). Precision-style metrics are diagnostics
+only.

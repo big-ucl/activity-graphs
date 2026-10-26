@@ -66,12 +66,12 @@ def load_run():
     return cfg, per_user, score_vectors, home_distances, n_nodes
 
 
-def load_network(cfg):
+def read_graph(cfg):
     """The region's zones in PyG node order and its adjacency edges, read from the processed cache."""
-    network_path = PROJECT_ROOT / cfg.data.paths.processed / "NetworkGraph"
-    nodes = figures.node_gdf(gpd.read_parquet(network_path / "nodes.parquet"))
+    graph_path = PROJECT_ROOT / cfg.data.paths.processed / "Graph"
+    nodes = figures.node_gdf(gpd.read_parquet(graph_path / "nodes.parquet"))
 
-    return nodes, gpd.read_parquet(network_path / "edges.parquet")
+    return nodes, gpd.read_parquet(graph_path / "edges.parquet")
 
 
 def out_dir(cfg) -> Path:
@@ -500,7 +500,7 @@ def band_figures(cfg, per_user, home_distances, path: Path) -> pl.DataFrame:
 
 def main() -> None:
     cfg, per_user, score_vectors, home_distances, n_nodes = load_run()
-    nodes, edges = load_network(cfg)
+    nodes, edges = read_graph(cfg)
     path = out_dir(cfg)
 
     user_id = users_by_visits(per_user)[0]

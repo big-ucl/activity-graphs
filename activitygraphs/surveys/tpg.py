@@ -1,9 +1,18 @@
-"""Geneva TPG survey loader and NetworkData subclass."""
+"""Geneva TPG survey: raw tables -> ``TPGSurvey``, and the census statistics for its graph nodes.
+
+Survey: ``TPGSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``build_tpg_survey``,
+which builds the locations, matches each journey's stop names to them, and keeps the locations the journeys visit.
+Statistics: ``read_tpg_statistics`` and ``add_tpg_population_job_statistics`` add census population and jobs to
+the zones.
+Island edges: ``build_tpg_island_edges`` joins the island zones, which have no contiguous neighbour, to the
+mainland. ``LOADER`` bundles these steps for the survey registry.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
+import city2graph as c2g
 import geopandas as gpd
 import pandas as pd
 import polars as pl
@@ -12,13 +21,11 @@ from rapidfuzz import fuzz, process
 
 from activitygraphs import utils
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, LOCATIONS_SCHEMA, USER_JOURNEY_SCHEMA, Mode, Purpose
-from activitygraphs.config import DataConfig, TPGDataConfig
-from activitygraphs.data.gtfs import GTFSTables
-from activitygraphs.network import (
-    NetworkData,
-    build_special_locations,
-)
-from activitygraphs.utils import DataFrameStore, add_lon_lat_from_centroid, check_schema
+from activitygraphs.config import TPGDataConfig
+from activitygraphs.surveys.base import DataFrameStore, SurveyData, SurveyLoader, build_special_locations
+from activitygraphs.surveys.gtfs import GTFSTables
+from activitygraphs.surveys.statistics import normalise_statistics
+from activitygraphs.utils import add_lon_lat_from_centroid, check_schema, get_project_root
 
 GENEVA_CANTON_CODE = 25
 
@@ -87,6 +94,14 @@ PURPOSE_MAPPING = {
 
 FUZZY_MATCH_THRESHOLD = 65
 
+ISLAND_LOC_IDS = ["subsector-174", "subsector-141", "subsector-10", "subsector-325"]
+CROSS_LAKE_LOC_IDS = ["subsector-243", "subsector-261", "subsector-54"]
+
+
+# =========================================
+# Survey
+# =========================================
+
 
 @dataclass(frozen=True)
 class TPGTables:
@@ -103,44 +118,27 @@ class TPGTables:
     gtfs: GTFSTables
 
 
-class TPGData(NetworkData, DataFrameStore):
-    """Geneva TPG ``NetworkData`` subclass with caching via ``DataFrameStore``."""
-
-    def __init__(
-        self,
-        inputs: TPGTables,
-        locations_gdf: gpd.GeoDataFrame,
-        user_journeys_df: pl.DataFrame,
-        filters: list[str] | None = None,
-    ):
-        super().__init__(
-            user_journeys_df,
-            locations_gdf,
-            filters,
-        )
-
-        self.inputs = inputs
-        self.gtfs = self.inputs.gtfs
+class TPGSurvey(SurveyData, DataFrameStore):
+    """Geneva TPG ``SurveyData`` subclass with caching via ``DataFrameStore``."""
 
     def _copy(self, filters: list[str] | None = None) -> Self:
-        return type(self)(self.inputs, self._locations_gdf, self._user_journeys_df, filters)
+        return type(self)(self._user_journeys_df, self._locations_gdf, filters)
 
     @classmethod
-    def load(cls, cfg: TPGDataConfig, project_root: Path | None = None, name: str | None = None) -> "TPGData":
+    def load(cls, cfg: TPGDataConfig, project_root: Path | None = None, name: str | None = None) -> "TPGSurvey":
         """Load the survey from the processed cache, building and caching it on first call."""
         project_root, data_dir = cls._dirs(cfg, project_root, name)
-        tpg_tables = read_tables(cfg, project_root)
 
         if data_dir.exists():
             locations_gdf = gpd.read_parquet(data_dir / "locations_gdf.parquet")
             user_journeys_df = pl.read_parquet(data_dir / "user_journeys_df.parquet", schema=USER_JOURNEY_SCHEMA)
 
-            return cls(tpg_tables, locations_gdf, user_journeys_df)
-        else:
-            data = build_tpg_data(tpg_tables)
-            data.save(cfg, project_root, name)
+            return cls(user_journeys_df, locations_gdf)
 
-            return build_tpg_data(tpg_tables)
+        survey = build_tpg_survey(read_tables(cfg, project_root))
+        survey.save(cfg, project_root, name)
+
+        return survey
 
     def save(self, cfg: TPGDataConfig, project_root: Path | None = None, name: str | None = None):
         """Write the locations and journeys to the processed cache."""
@@ -213,36 +211,11 @@ def read_tables(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTabl
     return TPGTables(raw_journeys_df, subsectors_gdf, postcodes_gdf, localities_gdf, boundaries_gdf, french_gdf, gtfs)
 
 
-def build_tpg_data(inputs: TPGTables) -> TPGData:
-    """Parse raw TPG tables into a standardised ``TPGData`` instance."""
+def build_tpg_survey(inputs: TPGTables) -> TPGSurvey:
+    """Parse raw TPG tables into a standardised ``TPGSurvey`` instance."""
     # Create locations with all PT stops
-    locations_gdf = build_tpg_locations(
-        inputs.gtfs.stops_df,
-        inputs.subsectors_gdf,
-        inputs.postcodes_gdf,
-        inputs.localities_gdf,
-        inputs.swiss_boundaries_gdf,
-        inputs.french_gdf,
-    )
-
-    # Match user trips to existing locations then parse other columns
-    user_journeys_df = _handle_null_values(inputs.raw_journeys_df)
-    user_journeys_df = match_loc_ids(user_journeys_df, utils.gdf_to_polars(locations_gdf), inputs.gtfs.stops_df)
-    user_journeys_df = user_journeys_df.select(
-        user_id=pl.col("id_utilisateur").cast(pl.String),
-        journey_id=pl.col("id_deplacement").cast(pl.String),
-        leg_id=pl.col("id_trajet").cast(pl.Int8),
-        leg_mode=pl.col("mode").cast(pl.Categorical).replace(MODE_MAPPING),
-        leg_line=pl.col("ligne_trajet").cast(pl.String),
-        duration=pl.duration(microseconds=0),
-        dep_day=pl.col("jour_depart").str.to_date("%+"),
-        dep_time=pl.col("date").str.split(" - ").list.first().str.to_time("%R"),
-        dep_purpose=pl.col("motif_depart").replace_strict(PURPOSE_MAPPING).cast(pl.Categorical),
-        dep_loc_id="dep_loc_id",
-        arr_loc_id="arr_loc_id",
-        arr_purpose=pl.col("motif_arrivee").replace_strict(PURPOSE_MAPPING).cast(pl.Categorical),
-    )
-    user_journeys_df = check_schema(user_journeys_df, USER_JOURNEY_SCHEMA)
+    locations_gdf = build_tpg_locations(inputs)
+    user_journeys_df = build_tpg_journeys(inputs, locations_gdf)
 
     # Filter out locations not in user journeys
     user_loc_ids = (
@@ -255,23 +228,101 @@ def build_tpg_data(inputs: TPGTables) -> TPGData:
     locations_gdf = locations_gdf.merge(user_loc_ids, on="loc_id")
     locations_gdf = check_schema(locations_gdf, LOCATIONS_SCHEMA)
 
-    return TPGData(inputs, locations_gdf, user_journeys_df)
+    return TPGSurvey(user_journeys_df, locations_gdf)
 
 
-def build_tpg_locations(
-    stops: pl.DataFrame,
-    subsectors: gpd.GeoDataFrame,
-    postcodes: gpd.GeoDataFrame,
-    localities: gpd.GeoDataFrame,
-    swiss_boundaries: gpd.GeoDataFrame,
-    french_gdf: gpd.GeoDataFrame,
+# =========================================
+# Statistics
+# =========================================
+
+
+def read_tpg_statistics(cfg: TPGDataConfig, project_root: Path | None = None) -> gpd.GeoDataFrame:
+    """Read the Geneva census grid of population and job densities."""
+    stats_cfg = cfg.inputs.statistics
+
+    return gpd.read_file(get_project_root(project_root) / stats_cfg.directory / stats_cfg.file)
+
+
+def add_tpg_population_job_statistics(
+    locations: gpd.GeoDataFrame, statistics: gpd.GeoDataFrame, normalise: bool = True
 ) -> gpd.GeoDataFrame:
+    """Add population and job counts to Geneva subsector locations.
+
+    Args:
+        locations: Subsector locations (must have a ``loc_id`` column).
+        statistics: Census grid from ``read_tpg_statistics``.
+        normalise: If True, divide counts by polygon area to obtain densities.
+    """
+    utm_crs = locations.estimate_utm_crs()
+    original_locations = locations
+
+    statistics = statistics.copy()
+    statistics["population"] = statistics["D_POP_HA"] * statistics["GEOM_AREA"] / 10000
+    statistics["jobs"] = statistics["D_EMP_HA"] * statistics["GEOM_AREA"] / 10000
+    statistics = statistics.rename(columns={"GRID_ID": "id"}).to_crs(utm_crs)
+    statistics = statistics[["id", "population", "jobs", "geometry"]]
+
+    locations = locations.reset_index()[["loc_id", "geometry"]].to_crs(utm_crs).copy()
+    locations["area"] = locations.geometry.area
+
+    intersection = locations.sjoin(statistics.to_crs(utm_crs), how="left", predicate="intersects")
+    stats_by_sector = intersection.groupby("loc_id")[["population", "jobs"]].sum()
+
+    stats_by_sector = original_locations.merge(stats_by_sector, on="loc_id", how="right")
+    stats_by_sector["area"] = stats_by_sector.to_crs(utm_crs).geometry.area
+
+    return normalise_statistics(stats_by_sector, normalise)
+
+
+# =========================================
+# Island edges
+# =========================================
+
+
+def build_tpg_island_edges(nodes_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Build kNN edges joining the island subsectors, which have no contiguous neighbour, to the mainland.
+
+    Returns:
+        Edges indexed by (source ``loc_id``, target ``loc_id``).
+    """
+    island_nodes = nodes_gdf[nodes_gdf.index.isin(ISLAND_LOC_IDS)]
+    mainland_nodes = nodes_gdf[~nodes_gdf.index.isin(ISLAND_LOC_IDS) & ~nodes_gdf.index.isin(CROSS_LAKE_LOC_IDS)]
+
+    _, island_edges = c2g.knn_graph(island_nodes, k=3, target_gdf=mainland_nodes)
+    island_edges = island_edges.reset_index()
+    island_edges["source"] = island_edges["source"].str[1]
+    island_edges["target"] = island_edges["target"].str[1]
+
+    return island_edges.set_index(["source", "target"])
+
+
+# =========================================
+# Loader
+# =========================================
+
+
+LOADER = SurveyLoader(
+    load=TPGSurvey.load,
+    read_statistics=read_tpg_statistics,
+    add_statistics=add_tpg_population_job_statistics,
+    build_extra_edges=build_tpg_island_edges,
+)
+
+
+# =========================================
+# Survey: Locations
+# =========================================
+
+
+def build_tpg_locations(inputs: TPGTables) -> gpd.GeoDataFrame:
     """Concatenate all Geneva location types (NA sentinel, PT stops, subsectors, Swiss and French municipalities)."""
     special_locations = build_special_locations()
-    pt_locations = _build_pt_locations(stops)
-    subsector_locations = _build_subsector_locations(subsectors)
-    municipality_swiss_locations = _build_municipality_swiss_locations(postcodes, localities, swiss_boundaries)
-    municipality_french_locations = _build_municipality_french_locations(french_gdf)
+    pt_locations = _build_pt_locations(inputs.gtfs.stops_df)
+    subsector_locations = _build_subsector_locations(inputs.subsectors_gdf)
+    municipality_swiss_locations = _build_municipality_swiss_locations(
+        inputs.postcodes_gdf, inputs.localities_gdf, inputs.swiss_boundaries_gdf
+    )
+    municipality_french_locations = _build_municipality_french_locations(inputs.french_gdf)
 
     return gpd.GeoDataFrame(
         pd.concat(
@@ -302,7 +353,7 @@ def _build_subsector_locations(subsectors_gdf: gpd.GeoDataFrame) -> gpd.GeoDataF
     subsector_locations = add_lon_lat_from_centroid(subsectors_gdf, index_col="OBJECTID")
 
     subsector_locations["loc_id"] = "subsector-" + subsector_locations["OBJECTID"].astype(str)
-    subsector_locations["type"] = "subsector"
+    subsector_locations["type"] = "zone"
 
     subsector_locations = subsector_locations.rename(columns={"NOM": "loc_name"})
     return subsector_locations[LOCATIONS_COLUMNS]
@@ -358,31 +409,66 @@ def _build_municipality_french_locations(french_gdf: gpd.GeoDataFrame) -> gpd.Ge
     return french_locations[LOCATIONS_COLUMNS]
 
 
-def build_stop_names_to_loc_id_mapping(stops_df: pl.DataFrame) -> pl.DataFrame:
-    """Return a ``(loc_name, loc_id)`` DataFrame mapping stop names to their parent station IDs."""
-    df = stops_df.with_columns(
+# =========================================
+# Survey: Journeys
+# =========================================
+
+
+def build_tpg_journeys(inputs: TPGTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+    """Parse raw trip records into standardised journey DF conforming to ``USER_JOURNEY_SCHEMA``."""
+    # Match user trips to existing locations then parse other columns
+    user_journeys_df = _handle_null_values(inputs.raw_journeys_df)
+    user_journeys_df = match_loc_ids(user_journeys_df, utils.gdf_to_polars(locations_gdf), inputs.gtfs.stops_df)
+    user_journeys_df = user_journeys_df.select(
+        user_id=pl.col("id_utilisateur").cast(pl.String),
+        journey_id=pl.col("id_deplacement").cast(pl.String),
+        leg_id=pl.col("id_trajet").cast(pl.Int8),
+        leg_mode=pl.col("mode").cast(pl.Categorical).replace(MODE_MAPPING),
+        leg_line=pl.col("ligne_trajet").cast(pl.String),
+        duration=pl.duration(microseconds=0),
+        dep_day=pl.col("jour_depart").str.to_date("%+"),
+        dep_time=pl.col("date").str.split(" - ").list.first().str.to_time("%R"),
+        dep_purpose=pl.col("motif_depart").replace_strict(PURPOSE_MAPPING).cast(pl.Categorical),
+        dep_loc_id="dep_loc_id",
+        arr_loc_id="arr_loc_id",
+        arr_purpose=pl.col("motif_arrivee").replace_strict(PURPOSE_MAPPING).cast(pl.Categorical),
+    )
+
+    return check_schema(user_journeys_df, USER_JOURNEY_SCHEMA)
+
+
+def _handle_null_values(raw_tpg_df: pl.DataFrame) -> pl.DataFrame:
+    # Remove null rows
+    cols_remove_null_rows = ["jour_depart"]
+    removed_rows_df = raw_tpg_df.drop_nulls(subset=cols_remove_null_rows)
+
+    # Remove empty rows from certain columns
+    cols_remove_empty_rows = ["jour_depart", "date", "motif_depart", "motif_arrivee"]
+    removed_rows_df = removed_rows_df.filter(pl.all_horizontal(pl.col(cols_remove_empty_rows) != ""))
+
+    # Impute empty rows to `NA` category for location columns
+    cols_impute_empty_to_na = ["lieu_depart_trajet", "lieu_arrivee_trajet"]
+    imputed_na_rows_df = removed_rows_df.with_columns(pl.col(cols_impute_empty_to_na).replace(old="", new="NA"))
+
+    # Impute empty values to unknown for mode column
+    cols_impute_empty_to_unknown = ["mode"]
+    imputed_unknown_rows_df = imputed_na_rows_df.with_columns(
+        pl.col(cols_impute_empty_to_unknown).replace(old="", new=Mode.UNKNOWN)
+    )
+
+    # Impute empty values of `ligne_trajet` to UNKNOWN or NA for ligne column depending on if mode is applicable
+    applicable_modes = ["mode_bus", "mode_tramway", "mode_bateau_navette"]
+    imputed_line_df = imputed_unknown_rows_df.with_columns(
         pl
-        .when(pl.col("stop_id").str.starts_with("Parent"))
-        .then("stop_id")
-        .otherwise("parent_station")
-        .alias("parent_station")
+        .when((pl.col("ligne_trajet") == "") & pl.col("mode").is_in(applicable_modes))
+        .then(pl.lit("UNKNOWN"))
+        .otherwise("ligne_trajet")
+        .alias("ligne_trajet")
+    ).with_columns(
+        pl.when(pl.col("ligne_trajet") == "").then(pl.lit("NA")).otherwise("ligne_trajet").alias("ligne_trajet")
     )
 
-    with_parents = (
-        df
-        .filter(pl.col("parent_station") != "")
-        .group_by("parent_station")
-        .agg(pl.col("stop_name").first().alias("loc_name"))
-        .rename({"parent_station": "loc_id"})
-        .select("loc_name", "loc_id")
-    )
-
-    without_parents = df.filter(pl.col("parent_station") == "", ~pl.col("stop_id").str.starts_with("Parent")).select(
-        pl.col("stop_name").alias("loc_name"),
-        pl.col("stop_id").alias("loc_id"),
-    )
-
-    return pl.concat([with_parents, without_parents])
+    return imputed_line_df
 
 
 def match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, stops_df: pl.DataFrame) -> pl.DataFrame:
@@ -409,6 +495,33 @@ def match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, st
         )
 
     return matched_df
+
+
+def build_stop_names_to_loc_id_mapping(stops_df: pl.DataFrame) -> pl.DataFrame:
+    """Return a ``(loc_name, loc_id)`` DataFrame mapping stop names to their parent station IDs."""
+    df = stops_df.with_columns(
+        pl
+        .when(pl.col("stop_id").str.starts_with("Parent"))
+        .then("stop_id")
+        .otherwise("parent_station")
+        .alias("parent_station")
+    )
+
+    with_parents = (
+        df
+        .filter(pl.col("parent_station") != "")
+        .group_by("parent_station")
+        .agg(pl.col("stop_name").first().alias("loc_name"))
+        .rename({"parent_station": "loc_id"})
+        .select("loc_name", "loc_id")
+    )
+
+    without_parents = df.filter(pl.col("parent_station") == "", ~pl.col("stop_id").str.starts_with("Parent")).select(
+        pl.col("stop_name").alias("loc_name"),
+        pl.col("stop_id").alias("loc_id"),
+    )
+
+    return pl.concat([with_parents, without_parents])
 
 
 def manual_patch_stop_names(user_journeys_df: pl.DataFrame, *stop_name_cols: str) -> pl.DataFrame:
@@ -445,7 +558,7 @@ def match_loc_id_on_subsector(
 ):
     """Match still-unmatched stop names that name a subsector to that subsector's location."""
     regex = LOCATION_REGEXES["subsector"]
-    subsectors = all_locations_df.filter(pl.col("type") == "subsector").select("loc_id", "loc_name")
+    subsectors = all_locations_df.filter(pl.col("type") == "zone").select("loc_id", "loc_name")
     does_regex_match_expr = pl.col(loc_id_col).is_null() & ~pl.col("loc_id").is_null()
 
     return (
@@ -624,63 +737,3 @@ def match_null_loc_ids_to_na(user_journeys_df: pl.DataFrame, loc_id_col: str, ma
         pl.when(is_unmatched).then(pl.lit("NA")).otherwise(loc_id_col).alias(loc_id_col),
         pl.when(is_unmatched).then(pl.lit("na")).otherwise(match_type_col).alias(match_type_col),
     )
-
-
-def _read_raw_data(data_cfg: DataConfig, project_root=None) -> pl.DataFrame:
-    project_root = project_root if project_root is not None else Path(".")
-    data_path = project_root / data_cfg.paths.raw
-
-    raw_tpg_df = utils.read_from_parquet(
-        data_path / data_cfg.inputs.raw_journeys,
-        schema={
-            "id_utilisateur": pl.String,
-            "id_deplacement": pl.Categorical,
-            "id_trajet": pl.Int8,
-            "jour_depart": pl.String,
-            "motif_depart": pl.Categorical,
-            "motif_arrivee": pl.Categorical,
-            "date": pl.String,
-            "lieu_depart_trajet": pl.String,
-            "lieu_arrivee_trajet": pl.String,
-            "mode": pl.Categorical,
-            "ligne_trajet": pl.String,
-        },
-    )
-
-    raw_tpg_df = raw_tpg_df.with_columns(pl.col("jour_depart").str.to_date(format="%+", strict=False))
-
-    return raw_tpg_df
-
-
-def _handle_null_values(raw_tpg_df: pl.DataFrame) -> pl.DataFrame:
-    # Remove null rows
-    cols_remove_null_rows = ["jour_depart"]
-    removed_rows_df = raw_tpg_df.drop_nulls(subset=cols_remove_null_rows)
-
-    # Remove empty rows from certain columns
-    cols_remove_empty_rows = ["jour_depart", "date", "motif_depart", "motif_arrivee"]
-    removed_rows_df = removed_rows_df.filter(pl.all_horizontal(pl.col(cols_remove_empty_rows) != ""))
-
-    # Impute empty rows to `NA` category for location columns
-    cols_impute_empty_to_na = ["lieu_depart_trajet", "lieu_arrivee_trajet"]
-    imputed_na_rows_df = removed_rows_df.with_columns(pl.col(cols_impute_empty_to_na).replace(old="", new="NA"))
-
-    # Impute empty values to unknown for mode column
-    cols_impute_empty_to_unknown = ["mode"]
-    imputed_unknown_rows_df = imputed_na_rows_df.with_columns(
-        pl.col(cols_impute_empty_to_unknown).replace(old="", new=Mode.UNKNOWN)
-    )
-
-    # Impute empty values of `ligne_trajet` to UNKNOWN or NA for ligne column depending on if mode is applicable
-    applicable_modes = ["mode_bus", "mode_tramway", "mode_bateau_navette"]
-    imputed_line_df = imputed_unknown_rows_df.with_columns(
-        pl
-        .when((pl.col("ligne_trajet") == "") & pl.col("mode").is_in(applicable_modes))
-        .then(pl.lit("UNKNOWN"))
-        .otherwise("ligne_trajet")
-        .alias("ligne_trajet")
-    ).with_columns(
-        pl.when(pl.col("ligne_trajet") == "").then(pl.lit("NA")).otherwise("ligne_trajet").alias("ligne_trajet")
-    )
-
-    return imputed_line_df

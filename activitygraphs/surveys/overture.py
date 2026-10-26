@@ -127,7 +127,7 @@ class Overture:
 
             # noinspection PyTypeChecker
             c2g.load_overture_data(
-                area=geometry.to_crs(CRS).union_all(),
+                area=geometry.to_crs(CRS).union_all(),  # pyrefly: ignore[bad-argument-type]
                 types=["land_use", "place"],
                 output_dir=str(output_dir),
                 save_to_file=True,

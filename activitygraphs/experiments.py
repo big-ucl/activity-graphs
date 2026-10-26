@@ -529,7 +529,7 @@ def build_gat(
     use_home_pe: bool = False,
 ) -> GATSkip:
     """Instantiate a ``GATSkip`` model sized for ``dataset`` (1 pre-layer, 3 post-layers)."""
-    edge_dim = dataset.network_edge_attr.size(-1)
+    edge_dim = dataset.edge_attr.size(-1)
 
     return GATSkip(
         num_pre_layers=1,
@@ -561,7 +561,7 @@ def build_gps(
     use_home_pe: bool = False,
 ):
     """Instantiate a ``GraphTransformer`` (GPS) model sized for ``dataset``."""
-    edge_dim = dataset.network_edge_attr.size(-1)
+    edge_dim = dataset.edge_attr.size(-1)
 
     return GraphTransformer(
         in_channels=extracted_features_dim(
