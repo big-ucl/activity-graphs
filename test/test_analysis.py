@@ -15,7 +15,6 @@ from activitygraphs.analysis import (
     SCORED_USERS_COLUMN,
     _average_metric_over_seeds,
     _diff_sd_per_seed,
-    _latest_run,
     _num_scored_dropped_users,
     _restrict_to_realised_size,
     aggregate_metrics,
@@ -48,6 +47,7 @@ from activitygraphs.analysis import (
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.models import NodeMLP
+from activitygraphs.runs import PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"
@@ -116,47 +116,26 @@ def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:
 
 
 class TestLoading:
-    def test_latest_run_picks_the_highest_number(self, tmp_path):
-        for run in [1, 2, 10]:
-            (tmp_path / f"TPG-results-{run}.parquet").touch()
-        (tmp_path / "OtherCity-results-99.parquet").touch()
+    def test_load_run_reads_both_frames_of_the_run(self, tmp_path):
+        make_aggregate().write_parquet(tmp_path / RESULTS_FILE)
+        make_per_user().write_parquet(tmp_path / PER_USER_FILE)
 
-        assert _latest_run(tmp_path, "TPG") == 10
-
-    def test_latest_run_raises_when_nothing_matches(self, tmp_path):
-        with pytest.raises(FileNotFoundError):
-            _latest_run(tmp_path, "TPG")
-
-    def test_load_run_reads_both_frames_of_the_latest_run(self, tmp_path):
-        make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
-        make_per_user().write_parquet(tmp_path / "TPG-per-user-1.parquet")
-        make_aggregate().head(1).write_parquet(tmp_path / "TPG-results-2.parquet")
-        make_per_user().head(1).write_parquet(tmp_path / "TPG-per-user-2.parquet")
-
-        aggregate, per_user = read_run(tmp_path, "TPG")
-        assert aggregate.height == 1
-        assert per_user.height == 1
-
-        aggregate, per_user = read_run(tmp_path, "TPG", run=1)
+        aggregate, per_user = read_run(tmp_path)
         assert aggregate.height == 4
         assert per_user.height == 9
 
 
 class TestLoadScoreVectors:
-    def test_reads_the_score_frame_of_the_latest_run(self, tmp_path):
-        make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
-        make_score_vectors([[0.1, 0.9]]).write_parquet(tmp_path / "TPG-scores-1.parquet")
-        make_aggregate().write_parquet(tmp_path / "TPG-results-2.parquet")
-        make_score_vectors([[0.2, 0.8], [0.3, 0.7]]).write_parquet(tmp_path / "TPG-scores-2.parquet")
+    def test_reads_the_score_frame_of_the_run(self, tmp_path):
+        make_score_vectors([[0.2, 0.8], [0.3, 0.7]]).write_parquet(tmp_path / SCORES_FILE)
 
-        assert read_score_vectors(tmp_path, "TPG").height == 2
-        assert read_score_vectors(tmp_path, "TPG", run=1)["scores"].to_list() == [[0.1, 0.9]]
+        assert read_score_vectors(tmp_path)["scores"].to_list() == [[0.2, 0.8], [0.3, 0.7]]
 
     def test_raises_when_the_run_saved_no_score_vectors(self, tmp_path):
-        make_aggregate().write_parquet(tmp_path / "TPG-results-1.parquet")
+        make_aggregate().write_parquet(tmp_path / RESULTS_FILE)
 
         with pytest.raises(FileNotFoundError, match="save_score_vectors"):
-            read_score_vectors(tmp_path, "TPG")
+            read_score_vectors(tmp_path)
 
 
 class TestUserInvariance:

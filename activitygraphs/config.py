@@ -206,12 +206,12 @@ class CMAPDataConfig(DataConfig):
 
 @dataclass
 class OutputPaths:
-    """Filesystem paths for experiment outputs (reports, figures, saved models)."""
+    """Filesystem paths for experiment outputs (reports, run directories, overfit run directories, figures)."""
 
     reports: Path
-    reports_data: Path
+    runs: Path
+    overfit: Path
     figures: Path
-    models: Path
 
 
 @dataclass

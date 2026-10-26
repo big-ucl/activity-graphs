@@ -1,7 +1,7 @@
 """Training orchestration: run_experiment, evaluate_baseline, and shared feature/weight helpers."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -18,6 +18,7 @@ from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallb
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.popularity import popularity_logit
+from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
 
 
 def node_popularity_logit(train_dataset: VisitDataset) -> torch.Tensor:
@@ -109,6 +110,10 @@ class WandBParams:
     ``experiment`` is the name of the experiment that produced the run (``cfg.train.experiment``).
     It is carried into the group, the tags and the logged hyperparameters, so a run can be traced
     back to the experiment it belongs to from any of the three places W&B lets you filter on.
+
+    Attributes:
+        config: The resolved run config without ``models``. Logged as the hyperparameters of every W&B run.
+        run_dir: The run directory, logged beside the config. None on a ``fast_dev_run``.
     """
 
     use_wandb: bool
@@ -117,6 +122,8 @@ class WandBParams:
     group: str | None = None
     dataset_name: str | None = None
     experiment: str | None = None
+    config: dict = field(default_factory=dict)
+    run_dir: str | None = None
 
     def tags(self, *extra: str) -> list[str]:
         """Run tags: the dataset, the experiment, and any run-specific extras, skipping the unset ones."""
@@ -175,10 +182,10 @@ def evaluate_baseline(
             tags=wandb_params.tags("baseline"),
         )
         logger.log_hyperparams({
+            **wandb_params.config,
+            "run_dir": wandb_params.run_dir,
             "model": name,
             "run_tag": run_tag,
-            "dataset": wandb_params.dataset_name,
-            "experiment": wandb_params.experiment,
             "model_type": "baseline",
         })
 
@@ -221,7 +228,7 @@ def train_and_evaluate_model(
     reg: str | None = None,
     full_info: bool = False,
     use_demographics: bool = True,
-    model_save_dir: Path | None = None,
+    run_dir: Path | None = None,
     fast_dev_run: bool = False,
     overfit_batches: int = 0,
     weight_decay: float = 1e-4,
@@ -230,7 +237,7 @@ def train_and_evaluate_model(
     use_home_pe: bool = False,
     store_score_vectors: bool = False,
     log_train_ranking: bool = True,
-    extra_hyperparams: dict | None = None,
+    hyperparams: dict | None = None,
     compile_model: bool = True,
     wandb_params: WandBParams | None = None,
     debug: bool = False,
@@ -248,12 +255,13 @@ def train_and_evaluate_model(
         recall_ks: Rank cutoffs of the logged ``recall@k``.
         num_epochs: Number of training epochs.
         verbose: Non-zero enables the Lightning progress bar.
-        name: Experiment name used for logging and checkpoint filename.
+        name: Experiment name used for logging and checkpoint directory.
         lr: Initial learning rate.
         reg: Optional regularisation; ``"l1"`` adds L1 weight penalty.
         full_info: Passed to ``extract_features`` to optionally include home/distance features.
         use_demographics: concatenate the per-user demographics onto the node features.
-        model_save_dir: Directory for checkpoint and CSV log files; None disables both.
+        run_dir: Run directory. Checkpoints are written to ``checkpoints/<run name>/`` (``best.ckpt``,
+            ``last.ckpt``) and the logs to ``logs/``. None disables both.
         fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
         overfit_batches: Number of batches to overfit on; 0 disables (normal training).
         weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
@@ -265,11 +273,10 @@ def train_and_evaluate_model(
         log_train_ranking: log ``train_avg_recall@K`` on the training batches.
         compile_model: use PyTorch Dynamo compilation on the model
         wandb_params: parameters to configure WandB logging.
-        extra_hyperparams: run-specific values to log alongside the standard ones, (architecture
-            settings that otherwise exist inside the model name, e.g. GNN ``depth``).
+        hyperparams: values to log alongside the run config, e.g. the architecture and the input flags of the variant.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
         run_tag: Suffix distinguishing repeated runs of the same model (e.g. per training seed). It
-            qualifies the checkpoint filename and logger run name only; ``name`` still identifies
+            qualifies the checkpoint directory and logger run name only; ``name`` still identifies
             the model in the returned frame, so repeated runs group together.
 
     Returns:
@@ -313,12 +320,12 @@ def train_and_evaluate_model(
     collector = EpochMetricsCollector()
     callbacks: list[L.Callback] = [collector, LearningRateMonitor(logging_interval="epoch")]
 
-    if model_save_dir is not None:
+    if run_dir is not None:
         callbacks.append(
             ModelCheckpoint(
-                dirpath=str(model_save_dir),
-                filename=run_name,
-                save_last=False,
+                dirpath=str(run_dir / CHECKPOINTS_DIR / run_name),
+                filename="best",
+                save_last=True,
                 save_top_k=1,
                 monitor=loss.monitor,
                 mode=loss.monitor_mode,
@@ -328,7 +335,7 @@ def train_and_evaluate_model(
     if debug:
         callbacks.append(OverfitDebugCallback())
 
-    log_dir = str(model_save_dir) if model_save_dir is not None else "."
+    log_dir = str(run_dir / LOGS_DIR) if run_dir is not None else "."
 
     # Configure logging
 
@@ -342,21 +349,11 @@ def train_and_evaluate_model(
             tags=wandb_params.tags(),
         )
         logger.log_hyperparams({
+            **wandb_params.config,
+            "run_dir": wandb_params.run_dir,
             "model": name,
             "run_tag": run_tag,
-            "dataset": wandb_params.dataset_name,
-            "experiment": wandb_params.experiment,
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "num_epochs": num_epochs,
-            "reg": reg,
-            "full_info": full_info,
-            "use_demographics": use_demographics,
-            "schedule_lr": schedule_lr,
-            "overfit_batches": overfit_batches,
-            "pop_mode": pop_mode,
-            "use_home_pe": use_home_pe,
-            **(extra_hyperparams or {}),
+            **(hyperparams or {}),
         })
     else:
         logger = CSVLogger(save_dir=log_dir, name=run_name)
@@ -383,7 +380,7 @@ def train_and_evaluate_model(
         if fast_dev_run:
             return pl.DataFrame()
 
-        if model_save_dir is not None:
+        if run_dir is not None:
             trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
         aggregate_results = aggregate_frame(collector.rows, name)

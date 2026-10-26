@@ -18,7 +18,7 @@ from activitygraphs import analysis, figures
 from activitygraphs.base import PER_USER_STAGE
 from activitygraphs.config import read_config
 from activitygraphs.figures import DASHED, DOTTED, SOLID, ModelStyle
-
+from activitygraphs.runs import run_dir
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = PROJECT_ROOT / "reports/figures/progress"
@@ -73,11 +73,11 @@ def load(dataset: str):
     """The config, per-user results, score vectors and home distances of a dataset's pinned run."""
     name, run = RUNS[dataset]
     cfg = read_config(PROJECT_ROOT, verbose=False, data=dataset)
-    reports = PROJECT_ROOT / cfg.paths.reports_data
+    run_path = run_dir(PROJECT_ROOT / cfg.paths.runs, name, run)
 
-    _, per_user = analysis.read_report_run(reports, name, run, cfg.train.max_recall_k)
-    scores = analysis.read_score_vectors(reports, name, run)
-    distances = analysis.read_home_distances(reports, name, run)
+    _, per_user = analysis.read_report_run(run_path, cfg.train.max_recall_k)
+    scores = analysis.read_score_vectors(run_path)
+    distances = analysis.read_home_distances(run_path)
 
     return cfg, per_user, scores, distances
 

@@ -60,8 +60,9 @@ Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be ove
   against frequency baselines,
 - `depth_sweep` sweeps the message-passing depth of the best GATSkip variant.
 
-Both write per-epoch metrics to WandB and `reports/data/{name}-results-{N}.parquet`, per-test-user scores to
-`{name}-per-user-{N}.parquet`, and best-validation checkpoints to `models/`. The train/val/test split is drawn with
+Both write per-epoch metrics to WandB and to a run directory `reports/runs/{name}-{N}-{timestamp}/`: the config
+used by the run, `results.parquet`, per-test-user scores in `per-user.parquet`, and the best and last checkpoints of
+each model under `checkpoints/`. The train/val/test split is drawn with
 `train.split_seed`; every model in every run is scored on the same test users;
 `train.train_seeds` reseeds each model run to measure spread.
 
@@ -84,7 +85,7 @@ activitygraphs/
   conf/                    # Hydra configs (root + per-dataset)
   ml/                      # PyG dataset, Lightning module, training, models, losses, metrics, baselines
 test/                      # pytest suite
-reports/data/              # result dataframes
+reports/runs/              # one directory per run: config, result dataframes, checkpoints, logs
 ```
 
 Models are evaluated using metrics for consideration sets: realised visits are a subset of the latent target, so we use

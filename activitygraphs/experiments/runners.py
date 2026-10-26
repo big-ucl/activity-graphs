@@ -17,8 +17,8 @@ def comparison_experiment(cfg: Config):
     Every model is trained once per seed in ``cfg.train.train_seeds``; the baselines are deterministic,
     so they are evaluated once.
 
-    Results are logged to W&B and written to ``cfg.paths.reports/data/{dataset}-results-{n}.parquet``, with the
-    per-user test scores alongside in ``{dataset}-per-user-{n}.parquet``.
+    Results are logged to W&B and written to ``results.parquet`` in the run directory, with the
+    per-user test scores alongside in ``per-user.parquet``.
     """
     setup = setup_experiment(cfg)
     mlp, gat, gps = setup.models["mlp"], setup.models["gat"], setup.models["gps"]
@@ -37,10 +37,10 @@ def comparison_experiment(cfg: Config):
 
     model_results = run_variants(setup, variants)
 
-    if cfg.train.fast_dev_run:
+    if setup.run_dir is None:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results, setup.home_distances)
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
 
 
 def depth_sweep_experiment(cfg: Config):
@@ -56,10 +56,10 @@ def depth_sweep_experiment(cfg: Config):
 
     model_results = run_variants(setup, variants)
 
-    if cfg.train.fast_dev_run:
+    if setup.run_dir is None:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results, setup.home_distances)
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
 
 
 def demographics_ablation_experiment(cfg: Config):
@@ -83,10 +83,10 @@ def demographics_ablation_experiment(cfg: Config):
 
     model_results = run_variants(setup, variants)
 
-    if cfg.train.fast_dev_run:
+    if setup.run_dir is None:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *model_results, *setup.baseline_results, setup.home_distances)
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
 
 
 def overfit_health_experiment(cfg: Config):
@@ -112,11 +112,11 @@ def overfit_health_experiment(cfg: Config):
 
     model_results = run_variants(setup, variants)
 
-    if cfg.train.fast_dev_run:
+    if setup.run_dir is None:
         return
 
     results = pl.concat(model_results, how="diagonal")
-    save_results(cfg.paths.reports, cfg.data.name, results, setup.home_distances)
+    save_results(setup.run_dir, results, setup.home_distances)
 
     with pl.Config(tbl_rows=-1, float_precision=4):
         print(f"\n-- overfit health: best train_avg_recall@{cfg.train.max_recall_k} on the memorised batch --")
@@ -130,7 +130,7 @@ def baselines_experiment(cfg: Config):
     """
     setup = setup_experiment(cfg)
 
-    if cfg.train.fast_dev_run:
+    if setup.run_dir is None:
         return
 
-    save_results(cfg.paths.reports, cfg.data.name, *setup.baseline_results, setup.home_distances)
+    save_results(setup.run_dir, *setup.baseline_results, setup.home_distances)

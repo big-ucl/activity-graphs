@@ -8,7 +8,7 @@
   - Density of home zones
 
 Reads the parquet files written by ``experiments.py:save_results`` and reports the points above. All analyses use the
-parquet files generated to ``reports/data`` only, except the home-zone analysis, which reads the built ``VisitDataset``.
+parquet files generated to the run directory only, except the home-zone analysis, which reads the built ``VisitDataset``.
 """
 
 from collections.abc import Sequence
@@ -25,6 +25,7 @@ from activitygraphs.config import AnalysisConfig
 from activitygraphs.datasets.dataset import VisitDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
+from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, latest_run, run_dir
 
 # Baseline model representing node popularity.
 POPULARITY_MODEL = "VisitFrequency"
@@ -81,31 +82,26 @@ DEFAULT_ANALYSIS = AnalysisConfig(
 # =========================================
 
 
-def read_run(report_data_path: str | Path, name: str, run: int | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
+def read_run(run_path: str | Path) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Read the aggregate and per-user result frames of a run.
 
     Args:
-        report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
-        name: Dataset name used in filename, e.g. ``"TPG"``.
-        run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
+        run_path: The run directory, e.g. from ``runs.run_dir``.
 
     Returns:
         Tuple ``(aggregate_results, per_user_results)``.
     """
-    path = Path(report_data_path)
-    run = _latest_run(path, name) if run is None else run
+    path = Path(run_path)
 
-    aggregate_results = pl.read_parquet(path / f"{name}-results-{run}.parquet")
-    per_user_result = pl.read_parquet(path / f"{name}-per-user-{run}.parquet")
+    aggregate_results = pl.read_parquet(path / RESULTS_FILE)
+    per_user_result = pl.read_parquet(path / PER_USER_FILE)
 
     return aggregate_results, per_user_result
 
 
-def read_score_vectors(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
+def read_score_vectors(run_path: str | Path) -> pl.DataFrame:
     """Read the full per-user score vectors of a run: ``name, seed, user_id, scores``."""
-    path = Path(report_data_path)
-    run = _latest_run(path, name) if run is None else run
-    scores_path = path / f"{name}-scores-{run}.parquet"
+    scores_path = Path(run_path) / SCORES_FILE
 
     if not scores_path.exists():
         raise FileNotFoundError(f"{scores_path} not found; re-run with train.save_score_vectors=true")
@@ -113,12 +109,9 @@ def read_score_vectors(report_data_path: str | Path, name: str, run: int | None 
     return pl.read_parquet(scores_path).filter(pl.col("stage") == SCORE_VECTOR_STAGE)
 
 
-def read_home_distances(report_data_path: str | Path, name: str, run: int | None = None) -> pl.DataFrame:
+def read_home_distances(run_path: str | Path) -> pl.DataFrame:
     """Read each test user's distance from home to every node of a run: ``user_id, distances``, in metres."""
-    path = Path(report_data_path)
-    run = _latest_run(path, name) if run is None else run
-
-    distances = pl.read_parquet(path / f"{name}-distances-{run}.parquet")
+    distances = pl.read_parquet(Path(run_path) / DISTANCES_FILE)
 
     return distances.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
 
@@ -161,38 +154,18 @@ def _positive_average_recall(positives: pl.DataFrame, budget: int) -> pl.Series:
     )
 
 
-def read_report_run(
-    report_data_path: str | Path, name: str, run: int, max_recall_k: int
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+def read_report_run(run_path: str | Path, max_recall_k: int) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Read a run for reporting, with the aggregate results and the per-user ``avg_recall``.
 
     Args:
-        report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
-        name: Dataset name used in filename, e.g. ``"TPG"``.
-        run: Run number of the main run.
+        run_path: The run directory, e.g. from ``runs.run_dir``.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
 
     Returns:
         Tuple ``(aggregate_results, per_user_results)``.
     """
-    aggregate, per_user = read_run(report_data_path, name, run)
+    aggregate, per_user = read_run(run_path)
     return aggregate, with_ranking_metrics(per_user, max_recall_k)
-
-
-def _latest_run(path: Path, name: str) -> int:
-    """Highest run number among ``{name}-results-{n}.parquet`` files in ``path``."""
-    run_numbers = [
-        int(run_num)
-        for f in path.iterdir()
-        if f.suffix == ".parquet" and f.name.startswith(f"{name}-results-")
-        for run_num in [f.stem.split("-")[-1]]
-        if run_num.isdecimal()
-    ]
-
-    if not run_numbers:
-        raise FileNotFoundError(f"no {name}-results-*.parquet in {path}")
-
-    return max(run_numbers)
 
 
 # =========================================
@@ -1255,7 +1228,7 @@ def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int]
 
 
 def print_report(
-    report_data_path: str | Path,
+    runs_path: str | Path,
     name: str,
     max_recall_k: int,
     distance_bands: Sequence[float],
@@ -1267,17 +1240,18 @@ def print_report(
     Covers aggregate results, paired comparison, hop bands and distance bands.
 
     Args:
-        report_data_path: path to the Parquet results tables (e.g. ``reports/data/``).
-        name: Dataset name used in filename, e.g. ``"TPG"``.
+        runs_path: path to the run directories (e.g. ``reports/runs/``).
+        name: Dataset name used in the run directory names, e.g. ``"TPG"``.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
         distance_bands: Upper edges in km of the distance bands, for the band split and the within-band AUC.
-        run: Run number ``n`` of ``{name}-results-{n}.parquet``. Uses latest available if None.
+        run: Run number ``n`` of the run directory ``{name}-{n}-{timestamp}``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None.
     """
-    report_data_path = Path(report_data_path)
-    run = run if run is not None else _latest_run(report_data_path, name)
+    runs_path = Path(runs_path)
+    run = run if run is not None else latest_run(runs_path, name)
+    run_path = run_dir(runs_path, name, run)
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
-    aggregate, per_user = read_report_run(report_data_path, name, run, max_recall_k)
+    aggregate, per_user = read_report_run(run_path, max_recall_k)
 
     n_scored, n_dropped = _num_scored_dropped_users(aggregate)
     metric = analysis.per_user_metric
@@ -1321,7 +1295,7 @@ def print_report(
         print(f"\n-- paired per-user {metric} by hop band of each positive, vs {reference} --")
         print(paired_comparison_by_band(per_user, reference, metric))
 
-        by_distance = distance_band_recall(per_user, read_home_distances(report_data_path, name, run), distance_bands)
+        by_distance = distance_band_recall(per_user, read_home_distances(run_path), distance_bands)
 
         print(f"\n-- per-user {metric} by distance band of each positive, edges {distance_bands} km, avg over seeds --")
         print(distance_band_recall_table(by_distance))
@@ -1335,9 +1309,9 @@ def print_report(
         print(f"\n-- paired per-user {metric}, vs {reference}, by home coverage --")
         print(paired_comparison_by_home_coverage(per_user, reference, metric))
 
-        if (report_data_path / f"{name}-scores-{run}.parquet").exists():
-            scores = read_score_vectors(report_data_path, name, run)
-            home_distances = read_home_distances(report_data_path, name, run)
+        if (run_path / SCORES_FILE).exists():
+            scores = read_score_vectors(run_path)
+            home_distances = read_home_distances(run_path)
             band_auc = within_band_auc(per_user, scores, home_distances, distance_bands)
 
             print(f"\n-- AUC within each positive's distance band, edges {distance_bands} km, avg over seeds --")

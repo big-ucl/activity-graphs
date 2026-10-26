@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import marimo
 
 from activitygraphs.analysis import read_score_vectors
@@ -43,11 +41,10 @@ def _(dataset_dropdown):
     dataset_str = dataset_dropdown.value
     full_run = 7
     demographics_run = 4
-    overfit_run = 5
     latest = None
 
     run = latest
-    return dataset_str, overfit_run, run
+    return dataset_str, run
 
 
 @app.cell(hide_code=True)
@@ -100,26 +97,22 @@ def _(pl):
 @app.cell
 def _():
     from activitygraphs.analysis import POPULARITY_MODEL, R_PRECISION_COLUMN, read_report_run, read_run
-    from activitygraphs.analysis import _latest_run as latest_run
+    from activitygraphs.runs import latest_overfit_dir, run_dir
 
-    return POPULARITY_MODEL, R_PRECISION_COLUMN, latest_run, read_report_run, read_run
+    return POPULARITY_MODEL, R_PRECISION_COLUMN, latest_overfit_dir, read_report_run, read_run, run_dir
 
 
 @app.cell
-def _(cfg, latest_run, read_report_run, project_root, run):
-    reports_data_path = project_root / cfg.paths.reports_data
+def _(cfg, read_report_run, project_root, run, run_dir):
     max_recall_k = cfg.train.max_recall_k
-    report_run = latest_run(reports_data_path, cfg.data.name) if run is None else run
+    run_path = run_dir(project_root / cfg.paths.runs, cfg.data.name, run)
 
-    aggregate_results, per_user_results = read_report_run(
-        reports_data_path, cfg.data.name, report_run, max_recall_k
-    )
+    aggregate_results, per_user_results = read_report_run(run_path, max_recall_k)
     return (
         aggregate_results,
         per_user_results,
         max_recall_k,
-        report_run,
-        reports_data_path,
+        run_path,
     )
 
 
@@ -958,9 +951,8 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, report_run, reports_data_path):
-    path = Path(reports_data_path)
-    scores = read_score_vectors(path, cfg.data.name, report_run)
+def _(run_path):
+    scores = read_score_vectors(run_path)
     score_vectors = scores
     score_vectors
     return (score_vectors,)
@@ -988,10 +980,10 @@ def _(mo):
 
 
 @app.cell
-def _(cfg, read_run, overfit_run, max_recall_k, reports_data_path):
+def _(cfg, latest_overfit_dir, max_recall_k, project_root, read_run):
     from activitygraphs.analysis import check_overfit_health
 
-    _aggregate_results, _ = read_run(reports_data_path, cfg.data.name, run=overfit_run)
+    _aggregate_results, _ = read_run(latest_overfit_dir(project_root / cfg.paths.overfit, cfg.data.name))
 
     overfit_health = check_overfit_health(_aggregate_results, max_recall_k)
     overfit_health

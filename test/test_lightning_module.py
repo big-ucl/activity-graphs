@@ -2,6 +2,7 @@
 
 import types
 
+import lightning as L
 import pytest
 import torch
 import torch_geometric as pyg
@@ -555,6 +556,46 @@ class TestConfigureOptimizers:
         """In overfit mode the scheduler is skipped and a bare optimizer is returned."""
         result = attach_fake_trainer(make_module(), overfit_batches=5).configure_optimizers()
         assert isinstance(result, torch.optim.AdamW)
+
+
+class TestCheckpoint:
+    """A checkpoint must rebuild the module from its own hyperparameters plus the objects it was not given."""
+
+    def test_hyperparameters_leave_out_the_objects_passed_in(self):
+        hparams = make_module(schedule_lr=True).hparams
+
+        assert hparams["lr"] == 1e-3
+        assert hparams["schedule_lr"] is True
+        assert not {"model", "loss", "home_hop_distance", "pop_logit"} & set(hparams)
+
+    def test_compiling_keeps_the_state_dict_keys(self):
+        module = make_module()
+        module.compile_model = True
+        module._trainer = types.SimpleNamespace(fast_dev_run=False, overfit_batches=0)
+        keys = list(module.state_dict())
+
+        module.configure_model()
+
+        assert list(module.state_dict()) == keys
+
+    def test_reloads_from_a_checkpoint(self, tmp_path):
+        module = make_module(schedule_lr=True)
+        path = tmp_path / "best.ckpt"
+        torch.save(
+            {
+                "state_dict": module.state_dict(),
+                "hyper_parameters": dict(module.hparams),
+                "pytorch-lightning_version": L.__version__,
+            },
+            path,
+        )
+
+        model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
+        reloaded = RankingModule.load_from_checkpoint(path, model=model, home_hop_distance=chain_hop_distance())
+
+        assert reloaded.schedule_lr is True
+        for key, value in module.state_dict().items():
+            assert torch.equal(reloaded.state_dict()[key], value)
 
 
 def make_home_batch(

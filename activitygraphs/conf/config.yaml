@@ -7,9 +7,9 @@ defaults:
 
 paths:
   reports: reports
-  reports_data: ${..paths.reports}/data
+  runs: ${..paths.reports}/runs
+  overfit: ${..paths.reports}/overfit
   figures: ${..paths.reports}/figures
-  models: models
 
 train:
   # Number of training epochs
@@ -49,7 +49,7 @@ train:
   compile: true
   # Enable the `OverfitDebugCallback` statistics, prints at the start and end of training.
   debug: false
-  # Save each test user's full per-node score vector to `<name>-scores-<n>.parquet`. Required by the
+  # Save each test user's full per-node score vector to the run's `scores.parquet`. Required by the
   # model-health checks; costs ~4 bytes per test user per node per model per seed.
   save_score_vectors: true
   # Log `train_avg_recall@K` on the training batches
@@ -89,5 +89,5 @@ analysis:
   occupancy_thresholds: [ 10, 25, 60 ]
   # List of points k at which to evaluate the recall@k
   recall_curve_ks: [ 1, 3, 5, 10, 20, 50 ]
-  # Run number `n` of `{dataset}-results-{n}.parquet`. null reads the latest.
+  # Run number `n` of the run directory `{dataset}-{n}-{timestamp}`. null reads the latest.
   run: null

@@ -39,7 +39,7 @@ def main(cfg: Config):
 def report_results(cfg: Config):
     """Print the results report for a recorded run."""
     print_report(
-        cfg.paths.reports_data,
+        cfg.paths.runs,
         cfg.data.name,
         cfg.train.max_recall_k,
         cfg.data.distance_bands,

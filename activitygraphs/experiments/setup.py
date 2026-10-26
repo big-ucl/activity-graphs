@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 
 import lightning as L
@@ -12,8 +13,10 @@ from omegaconf import OmegaConf
 from activitygraphs.config import Config, ModelConfig
 from activitygraphs.datasets import HouseholdSplit, VisitDataModule
 from activitygraphs.experiments.baselines import measure_baselines
+from activitygraphs.experiments.results import create_output_dir, run_config, save_config
 from activitygraphs.experiments.training import WandBParams, home_distance_frame
 from activitygraphs.ml.losses import Loss, build_loss
+from activitygraphs.runs import TIMESTAMP_FORMAT
 
 
 @dataclass(frozen=True)
@@ -22,9 +25,14 @@ class ExperimentSetup:
 
     Built once per experiment by ``setup_experiment``, so all experiments train against the
     same split, loss, and baselines.
+
+    Attributes:
+        run_dir: Directory holding the config, results, checkpoints and logs written by the run. None on a
+            ``fast_dev_run``, since a ``fast_dev_run`` writes nothing.
     """
 
     cfg: Config
+    run_dir: Path | None
     datamodule: VisitDataModule
     loss: Loss
     models: dict[str, ModelConfig]
@@ -44,7 +52,8 @@ def with_overrides(model: ModelConfig, overrides: dict) -> ModelConfig:
 def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetup:
     """Set up an experiment.
 
-    Configure logging, build the datamodule, loss, baselines, and the training settings shared by every model.
+    Configure logging, build the datamodule, loss, baselines, and the training settings shared by every model, and
+    create the run directory with the config the run uses.
 
     The architectures and their hyperparameters are read from ``cfg.models``. When ``cfg.train.overfit_batches > 0``,
     every architecture's dropout and weight decay are set to 0 and its learning rate to ``cfg.train.overfit_lr``,
@@ -53,15 +62,8 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
 
     ``with_baselines=False`` skips fitting the frequency baselines.
     """
-    run_group = f"{cfg.data.name}-{cfg.train.experiment}-{datetime.now():%Y%m%d-%H%M%S}"
-    wandb_params = WandBParams(
-        use_wandb=cfg.train.wandb,
-        project=cfg.train.wandb_project,
-        entity=cfg.train.wandb_entity,
-        group=run_group,
-        dataset_name=cfg.data.name,
-        experiment=cfg.train.experiment,
-    )
+    started = datetime.now()
+    run_dir = create_output_dir(cfg, started)
 
     split = HouseholdSplit(val_size=cfg.train.val_size, test_size=cfg.train.test_size)
     split_seed = cfg.train.split_seed
@@ -93,6 +95,20 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     else:
         epochs = cfg.train.epochs
 
+    if run_dir is not None:
+        save_config(run_dir, cfg, models)
+
+    wandb_params = WandBParams(
+        use_wandb=cfg.train.wandb,
+        project=cfg.train.wandb_project,
+        entity=cfg.train.wandb_entity,
+        group=f"{cfg.data.name}-{cfg.train.experiment}-{started:{TIMESTAMP_FORMAT}}",
+        dataset_name=cfg.data.name,
+        experiment=cfg.train.experiment,
+        config=run_config(cfg),
+        run_dir=None if run_dir is None else str(run_dir),
+    )
+
     num_nodes = train_dataset.num_nodes
     baseline_results = (
         measure_baselines(
@@ -111,6 +127,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
 
     return ExperimentSetup(
         cfg=cfg,
+        run_dir=run_dir,
         datamodule=datamodule,
         loss=loss,
         models=models,

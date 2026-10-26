@@ -194,6 +194,7 @@ class RankingModule(L.LightningModule):
             computation becomes expensive.
     """
 
+    model: torch.nn.Module
     home_hop_distance: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
     pop_logit: torch.Tensor | None
 
@@ -221,6 +222,7 @@ class RankingModule(L.LightningModule):
         log_train_ranking: bool = True,
     ):
         super().__init__()
+        self.save_hyperparameters(ignore=["model", "loss", "home_hop_distance", "pop_logit"])
         self.model = model
         self.lr = lr
         self.loss = loss if loss is not None else BCELoss
@@ -287,9 +289,7 @@ class RankingModule(L.LightningModule):
         if self.trainer.fast_dev_run or self.trainer.overfit_batches:  # pyrefly: ignore[missing-attribute]
             return
 
-        self.model = cast(
-            torch.nn.Module, torch.compile(self.model, dynamic=True)
-        )  # dynamic=True since graph sizes (i.e. batch sizes) differ
+        self.model.compile(dynamic=True)  # dynamic=True since graph sizes (i.e. batch sizes) differ
         self._compiled = True
 
     def forward(

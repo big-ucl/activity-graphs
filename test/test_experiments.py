@@ -1,6 +1,8 @@
 """Tests for the variants, the seed loop and the aggregate / per-user result split."""
 
 import types
+from datetime import datetime
+from typing import cast
 
 import polars as pl
 import pytest
@@ -11,12 +13,21 @@ from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTO
 from activitygraphs.config import Config, read_config
 from activitygraphs.experiments import runners, variants
 from activitygraphs.experiments.architectures import BUILDERS, architecture_builder
-from activitygraphs.experiments.results import drop_empty_columns, save_results
+from activitygraphs.experiments.results import (
+    create_output_dir,
+    drop_empty_columns,
+    run_config,
+    save_config,
+    save_results,
+)
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
 from activitygraphs.experiments.training import WandBParams
-from activitygraphs.experiments.variants import Variant, build_model, run_variants
+from activitygraphs.experiments.variants import Variant, build_model, run_variants, variant_hyperparams
 from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
+from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.utils import get_project_root
+
+STARTED = datetime(2026, 10, 26, 15, 30, 0)
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +39,7 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
     """An ExperimentSetup with no datamodule; ``build_model`` is stubbed by the tests, so no data is needed."""
     return ExperimentSetup(
         cfg=cfg,
+        run_dir=None,
         datamodule=types.SimpleNamespace(train_dataset=None),  # type: ignore[arg-type]
         loss=None,  # type: ignore[arg-type]
         models=dict(cfg.models),
@@ -209,6 +221,14 @@ class TestRunVariants:
         assert calls[0]["full_info"] is False
         assert calls[1]["full_info"] is True
 
+    def test_logs_the_architecture_and_flags_of_each_variant(self, cfg, monkeypatch):
+        calls = record_training(monkeypatch)
+        run_variants(make_setup(cfg, [42]), self._variants(cfg))
+
+        assert calls[1]["hyperparams"] == variant_hyperparams(Variant(cfg.models.gat, full_info=True))
+        assert calls[1]["hyperparams"]["architecture"]["num_gcn_layers"] == cfg.models.gat.num_gcn_layers
+        assert calls[1]["hyperparams"]["full_info"] is True
+
     def test_trains_with_the_architecture_optimiser_settings(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
         gps = with_overrides(cfg.models.gps, {"lr": 0.5, "weight_decay": 0.25})
@@ -284,13 +304,13 @@ class TestDepthSweep:
     def test_every_run_logs_its_depth(self, cfg, monkeypatch):
         calls = self._recorded(cfg, monkeypatch, [2, 4, 8])
 
-        assert [call["extra_hyperparams"]["depth"] for call in calls] == [0, 2, 4, 8]
+        assert [call["hyperparams"]["depth"] for call in calls] == [0, 2, 4, 8]
 
     def test_the_mlp_anchor_is_depth_zero(self, cfg, monkeypatch):
         anchor = self._recorded(cfg, monkeypatch, [2])[0]
 
         assert anchor["name"] == "MLP-dist"
-        assert anchor["extra_hyperparams"] == {"depth": 0}
+        assert anchor["hyperparams"]["depth"] == 0
 
     def test_each_depth_is_named_after_it(self, cfg, monkeypatch):
         names = [call["name"] for call in self._recorded(cfg, monkeypatch, [2, 4])]
@@ -313,11 +333,12 @@ class TestWandBParams:
 
 
 class TestSaveResults:
-    def _saved(self, tmp_path, *frames: pl.DataFrame, name: str = "TestSet"):
-        (tmp_path / "data").mkdir()
-        save_results(tmp_path, name, *frames)
-        data = tmp_path / "data"
-        return pl.read_parquet(data / f"{name}-results-1.parquet"), pl.read_parquet(data / f"{name}-per-user-1.parquet")
+    def _saved(self, tmp_path, *frames: pl.DataFrame):
+        save_results(tmp_path, *frames)
+        return pl.read_parquet(tmp_path / RESULTS_FILE), pl.read_parquet(tmp_path / PER_USER_FILE)
+
+    def _written(self, tmp_path) -> list[str]:
+        return sorted(f.name for f in tmp_path.iterdir())
 
     def test_splits_stages_into_two_files(self, tmp_path):
         aggregate, per_user = self._saved(tmp_path, make_model_frame("MLP"), make_model_frame("GATSkip"))
@@ -340,62 +361,34 @@ class TestSaveResults:
         assert per_user["seed"].to_list() == [1, 1, 2, 2]
         assert per_user["user_id"].to_list() == [7, 9, 7, 9]
 
-    def test_both_files_share_a_run_number(self, tmp_path):
-        (tmp_path / "data").mkdir()
-        save_results(tmp_path, "TestSet", make_model_frame("MLP"))
-        save_results(tmp_path, "TestSet", make_model_frame("MLP"))
-
-        written = sorted(f.name for f in (tmp_path / "data").iterdir())
-        assert written == [
-            "TestSet-per-user-1.parquet",
-            "TestSet-per-user-2.parquet",
-            "TestSet-results-1.parquet",
-            "TestSet-results-2.parquet",
-        ]
-
     def test_writes_only_the_aggregate_file_when_no_per_user_rows(self, tmp_path):
-        (tmp_path / "data").mkdir()
         aggregate_only = make_model_frame("MLP").filter(pl.col("stage") != PER_USER_STAGE)
-        save_results(tmp_path, "TestSet", aggregate_only)
+        save_results(tmp_path, aggregate_only)
 
-        assert [f.name for f in (tmp_path / "data").iterdir()] == ["TestSet-results-1.parquet"]
+        assert self._written(tmp_path) == [RESULTS_FILE]
 
     def test_no_scores_file_when_the_run_saved_no_score_vectors(self, tmp_path):
-        (tmp_path / "data").mkdir()
-        save_results(tmp_path, "TestSet", make_model_frame("MLP"))
+        save_results(tmp_path, make_model_frame("MLP"))
 
-        written = sorted(f.name for f in (tmp_path / "data").iterdir())
-        assert written == ["TestSet-per-user-1.parquet", "TestSet-results-1.parquet"]
+        assert self._written(tmp_path) == [PER_USER_FILE, RESULTS_FILE]
 
     def test_home_distances_go_to_their_own_file(self, tmp_path):
-        (tmp_path / "data").mkdir()
         combined = pl.concat([make_model_frame("MLP"), make_home_distance_frame()], how="diagonal")
-        save_results(tmp_path, "TestSet", combined)
+        save_results(tmp_path, combined)
 
-        data = tmp_path / "data"
-        assert sorted(f.name for f in data.iterdir()) == [
-            "TestSet-distances-1.parquet",
-            "TestSet-per-user-1.parquet",
-            "TestSet-results-1.parquet",
-        ]
+        assert self._written(tmp_path) == [DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE]
 
-        distances = pl.read_parquet(data / "TestSet-distances-1.parquet")
+        distances = pl.read_parquet(tmp_path / DISTANCES_FILE)
         assert distances["stage"].unique().to_list() == [HOME_DISTANCE_STAGE]
         assert distances["distances"].to_list() == [[0.0, 900.0, 4000.0], [4000.0, 900.0, 0.0]]
 
     def test_score_vectors_go_to_their_own_file(self, tmp_path):
-        (tmp_path / "data").mkdir()
         combined = pl.concat([make_model_frame("MLP"), make_score_frame("MLP")], how="diagonal")
-        save_results(tmp_path, "TestSet", combined)
+        save_results(tmp_path, combined)
 
-        data = tmp_path / "data"
-        assert sorted(f.name for f in data.iterdir()) == [
-            "TestSet-per-user-1.parquet",
-            "TestSet-results-1.parquet",
-            "TestSet-scores-1.parquet",
-        ]
+        assert self._written(tmp_path) == [PER_USER_FILE, RESULTS_FILE, SCORES_FILE]
 
-        scores = pl.read_parquet(data / "TestSet-scores-1.parquet")
+        scores = pl.read_parquet(tmp_path / SCORES_FILE)
         assert scores["stage"].unique().to_list() == [SCORE_VECTOR_STAGE]
         assert scores["scores"].to_list() == [[0.1, 0.9, 0.4], [0.7, 0.2, 0.5]]
         assert {"name", "seed", "user_id"}.issubset(scores.columns)
@@ -409,18 +402,44 @@ class TestSaveResults:
         assert "scores" not in aggregate.columns
         assert "scores" not in per_user.columns
 
-    def test_all_three_files_share_a_run_number(self, tmp_path):
-        (tmp_path / "data").mkdir()
-        combined = pl.concat([make_model_frame("MLP"), make_score_frame("MLP")], how="diagonal")
-        save_results(tmp_path, "TestSet", combined)
-        save_results(tmp_path, "TestSet", combined)
 
-        written = sorted(f.name for f in (tmp_path / "data").iterdir())
-        assert written == [
-            "TestSet-per-user-1.parquet",
-            "TestSet-per-user-2.parquet",
-            "TestSet-results-1.parquet",
-            "TestSet-results-2.parquet",
-            "TestSet-scores-1.parquet",
-            "TestSet-scores-2.parquet",
-        ]
+class TestRunRecord:
+    """A run directory must record the config used by the experiment, overrides included."""
+
+    def _cfg(self, cfg, tmp_path, **train) -> Config:
+        overrides = {
+            "paths": {"runs": str(tmp_path / "runs"), "overfit": str(tmp_path / "overfit")},
+            "train": {"fast_dev_run": False, "overfit_batches": 0, **train},
+        }
+        return cast(Config, OmegaConf.merge(cfg, overrides))
+
+    def test_a_run_gets_a_numbered_directory(self, cfg, tmp_path):
+        run_dir = create_output_dir(self._cfg(cfg, tmp_path), STARTED)
+
+        assert run_dir == tmp_path / "runs" / f"{cfg.data.name}-1-20261026-153000"
+        assert run_dir.is_dir()
+
+    def test_an_overfit_run_gets_an_unnumbered_directory_elsewhere(self, cfg, tmp_path):
+        run_dir = create_output_dir(self._cfg(cfg, tmp_path, overfit_batches=1), STARTED)
+
+        assert run_dir == tmp_path / "overfit" / f"{cfg.data.name}-20261026-153000"
+        assert not (tmp_path / "runs").exists()
+
+    def test_a_fast_dev_run_records_nothing(self, cfg, tmp_path):
+        assert create_output_dir(self._cfg(cfg, tmp_path, fast_dev_run=True), STARTED) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_saved_config_holds_the_architectures_as_trained(self, cfg, tmp_path):
+        models = {**cfg.models, "gat": with_overrides(cfg.models.gat, {"lr": 0.5})}
+        save_config(tmp_path, cfg, models)
+
+        saved = OmegaConf.load(tmp_path / CONFIG_FILE)
+        assert saved.models.gat.lr == 0.5
+        assert saved.models.mlp.lr == cfg.models.mlp.lr
+        assert saved.data.name == cfg.data.name
+
+    def test_the_wandb_config_leaves_out_the_architectures(self, cfg):
+        config = run_config(cfg)
+
+        assert "models" not in config
+        assert config["train"]["loss"]["type"] == cfg.train.loss.type

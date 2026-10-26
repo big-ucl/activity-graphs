@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import lightning as L
 import polars as pl
 import torch
+from omegaconf import OmegaConf
 
 from activitygraphs.config import ModelConfig
 from activitygraphs.datasets import VisitDataset
@@ -65,6 +66,17 @@ def build_model(variant: Variant, dataset: VisitDataset) -> torch.nn.Module:
     return architecture_builder(variant.model)(variant.model, sizes)
 
 
+def variant_hyperparams(variant: Variant) -> dict:
+    """Collect the architecture config, input flags and extra hyperparameters of ``variant``, as logged to W&B."""
+    return {
+        "architecture": OmegaConf.to_container(variant.model, resolve=True),
+        "full_info": variant.full_info,
+        "use_home_pe": variant.use_home_pe,
+        "use_demographics": variant.use_demographics,
+        **(variant.extra_hyperparams or {}),
+    }
+
+
 def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.DataFrame]:
     """Train every variant once per training seed and return the seed-tagged result frames.
 
@@ -91,8 +103,8 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
                 full_info=variant.full_info,
                 use_demographics=variant.use_demographics,
                 use_home_pe=variant.use_home_pe,
-                extra_hyperparams=variant.extra_hyperparams,
-                model_save_dir=cfg.paths.models,
+                hyperparams=variant_hyperparams(variant),
+                run_dir=setup.run_dir,
                 fast_dev_run=cfg.train.fast_dev_run,
                 overfit_batches=cfg.train.overfit_batches,
                 schedule_lr=cfg.train.schedule_lr,

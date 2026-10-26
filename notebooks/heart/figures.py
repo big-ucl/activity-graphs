@@ -18,6 +18,7 @@ import polars as pl
 from activitygraphs import analysis, figures
 from activitygraphs.base import PER_USER_STAGE
 from activitygraphs.config import read_config
+from activitygraphs.runs import run_dir
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATASET = "cmap"
@@ -56,11 +57,11 @@ RECALL_TICK_KS = (1, 10, 20, 30, 40, 50)
 def load_run():
     """The config, per-user results, score vectors, home distances and node count of the pinned run."""
     cfg = read_config(PROJECT_ROOT, verbose=False, data=DATASET)
-    reports = PROJECT_ROOT / cfg.paths.reports_data
+    run_path = run_dir(PROJECT_ROOT / cfg.paths.runs, cfg.data.name, cfg.analysis.run)
 
-    _, per_user = analysis.read_report_run(reports, cfg.data.name, cfg.analysis.run, cfg.train.max_recall_k)
-    score_vectors = analysis.read_score_vectors(reports, cfg.data.name, cfg.analysis.run)
-    home_distances = analysis.read_home_distances(reports, cfg.data.name, cfg.analysis.run)
+    _, per_user = analysis.read_report_run(run_path, cfg.train.max_recall_k)
+    score_vectors = analysis.read_score_vectors(run_path)
+    home_distances = analysis.read_home_distances(run_path)
     n_nodes = len(score_vectors["scores"].to_list()[0])
 
     return cfg, per_user, score_vectors, home_distances, n_nodes
