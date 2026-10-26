@@ -1,4 +1,4 @@
-"""ActivityGraphModule and _EpochMetricsCallback for Lightning-based GNN training."""
+"""RankingModule and _EpochMetricsCallback for Lightning-based GNN training."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,8 +14,8 @@ from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
-from activitygraphs.ml.batch import UserBatch
-from activitygraphs.ml.dataset import ActivityDataset, is_home_node_mask
+from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.dataset import VisitDataset, is_home_node_mask
 from activitygraphs.ml.losses import BCELoss, Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
@@ -33,7 +33,7 @@ def extract_features(
 ) -> torch.Tensor:
     """Return node features for a batch.
 
-    Starts with ``batch.x`` (which already contains the network features and the per-user
+    Starts with ``batch.x`` (which already contains the location features and the per-user
     ``is_home`` indicator).
 
      If ``pop_logit`` is provided, the ``VisitFrequencyBaseline`` popularity logits for each node are appended
@@ -67,7 +67,7 @@ def extract_features(
 
 
 def extracted_features_dim(
-    dataset: ActivityDataset,
+    dataset: VisitDataset,
     use_demographics: bool = True,
     full_info: bool = False,
     use_pop_feature: bool = False,
@@ -162,7 +162,7 @@ class EvaluationTensors:
     ranking: RankingTensors
 
 
-class ActivityGraphModule(L.LightningModule):
+class RankingModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
 
     Handles BCE or BPR training, optional L1 regularisation, and per-epoch ranking metrics.

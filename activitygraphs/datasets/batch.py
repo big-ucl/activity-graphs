@@ -8,7 +8,7 @@ from torch import Tensor
 
 @dataclass(frozen=True)
 class UserBatch:
-    """The tensors of a collated ``ActivityDataset`` batch, typed.
+    """The tensors of a collated ``VisitDataset`` batch, typed.
 
     Attributes:
         x: Node features, ``[num_nodes, num_features]``.
@@ -34,7 +34,7 @@ class UserBatch:
 
     @classmethod
     def from_pyg(cls, batch: pyg.data.Batch) -> "UserBatch":
-        """Return the typed view of a PyG batch collated from ``ActivityDataset`` items."""
+        """Return the typed view of a PyG batch collated from ``VisitDataset`` items."""
         return cls(**{field.name: getattr(batch, field.name) for field in fields(cls)})
 
     @property

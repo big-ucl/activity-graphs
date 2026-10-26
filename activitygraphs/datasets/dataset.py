@@ -1,10 +1,7 @@
-"""ActivityDataset, FittedScalers, and the ``load_splits`` entry point for the ML pipeline."""
+"""This module contains VisitDataset, the ``load_dataset`` cache entry point, and the split/scaler cache fingerprints."""
 
 import hashlib
-import json
-import pickle
 from collections.abc import Callable
-from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import cast
@@ -12,14 +9,12 @@ from typing import cast
 import numpy as np
 import torch
 import torch_geometric as pyg
-import torch_geometric.transforms as T
 from omegaconf import OmegaConf
-from sklearn.model_selection import GroupShuffleSplit
-from sklearn.preprocessing import StandardScaler
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import shortest_path
 
 from activitygraphs.config import Config
 from activitygraphs.graph import load_graph
-from activitygraphs.ml.metrics import compute_home_hop_distance
 from activitygraphs.surveys.registry import load_survey
 from activitygraphs.tensors import USER_NODE_FEATURE_NAMES, SurveyTensors, build_tensors
 from activitygraphs.utils import get_project_root
@@ -32,7 +27,7 @@ def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
     return (x[..., is_home_idx] > 0.0).bool()
 
 
-class ActivityDataset(pyg.data.Dataset):
+class VisitDataset(pyg.data.Dataset):
     """Main PyG dataset for a travel survey: shared graph + per-user node features/visit labels + user attributes.
 
     Stores the graph once and slices per-user tensors on ``get()`` call.
@@ -229,247 +224,38 @@ class ActivityDataset(pyg.data.Dataset):
         return data
 
 
-@dataclass
-class FittedScalers:
-    """Container for ``StandardScaler`` instances fitted on the training split."""
+def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.ndarray:
+    """Return the all-pairs contiguity-hop distance matrix ``[num_nodes, num_nodes]``.
 
-    node_features: StandardScaler
-    edge_features: StandardScaler
-    user_node_features: StandardScaler | None
-    user_attributes: StandardScaler
-    distances: StandardScaler
-    exclude_user_node_cols: list[int]
-    fingerprint: Fingerprint
-
-    def save(self, path: Path) -> None:
-        """Pickle the scalers to ``path``."""
-        with path.open("wb") as f:
-            pickle.dump(self, f)
-
-    @staticmethod
-    def read(path: Path) -> "FittedScalers":
-        """Read scalers pickled by ``save``."""
-        with path.open("rb") as f:
-            return pickle.load(f)
-
-
-def load_splits(
-    cfg: Config,
-    val_size: float,
-    test_size: float,
-    seed: int,
-    project_root: Path | None = None,
-    **build_kwargs,
-) -> tuple[ActivityDataset, ActivityDataset, ActivityDataset, FittedScalers]:
-    """Load, split, scale, and return the dataset as train/val/test subsets with cached scalers.
-
-    Split indices are cached in ``splits.json``; scalers are cached in ``scalers.pkl``
-    under ``cfg.data.paths.pyg_datasets``.
-
-    Returns:
-        Tuple ``(train_dataset, val_dataset, test_dataset, scalers)``.
+    Treats the graph as undirected and unweighted; unreachable pairs are ``inf``.
     """
-    project_root = get_project_root(project_root)
-    pyg_dir = project_root / cfg.data.paths.pyg_datasets
-    splits_cache = pyg_dir / f"splits_{seed}_val{val_size}_test{test_size}_grouped.json"
-    scalers_cache = pyg_dir / f"scalers_{seed}_val{val_size}_test{test_size}_grouped.pkl"
+    src = edge_index[0].cpu().numpy()
+    dst = edge_index[1].cpu().numpy()
+    adjacency = coo_matrix((np.ones(len(src)), (src, dst)), shape=(num_nodes, num_nodes))
 
-    positional_encodings_transforms = T.Compose([
-        T.AddRandomWalkPE(walk_length=20, attr_name=None),
-        # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
-    ])
-
-    dataset = load_dataset(
-        cfg, project_root=project_root, pre_transform=positional_encodings_transforms, **build_kwargs
-    )
-
-    fingerprint = dataset_fingerprint(cfg, dataset)
-
-    train_idx, val_idx, test_idx = split_indices(
-        dataset, val_size, test_size, seed, cache_path=splits_cache, fingerprint=fingerprint
-    )
-
-    scalers = None
-    if scalers_cache.exists():
-        scalers = FittedScalers.read(scalers_cache)
-
-    if scalers is None or scalers.fingerprint != fingerprint:
-        scalers = fit_scalers(
-            dataset, train_idx, exclude_user_node_cols=[dataset.is_home_user_node_idx], fingerprint=fingerprint
-        )
-        scalers.save(scalers_cache)
-
-    apply_scalers(dataset, scalers)
-
-    return (
-        cast(ActivityDataset, dataset[train_idx]),
-        cast(ActivityDataset, dataset[val_idx]),
-        cast(ActivityDataset, dataset[test_idx]),
-        scalers,
-    )
+    return shortest_path(adjacency, method="D", unweighted=True, directed=False)
 
 
 def load_dataset(
     cfg: Config,
     project_root: Path | None = None,
     **build_kwargs,
-) -> ActivityDataset:
-    """Construct an ``ActivityDataset`` rooted at ``cfg.data.paths.pyg_datasets``."""
+) -> VisitDataset:
+    """Construct an ``VisitDataset`` rooted at ``cfg.data.paths.tensors``."""
     project_root = get_project_root(project_root)
-    dataset_path = project_root / cfg.data.paths.pyg_datasets
+    dataset_path = project_root / cfg.data.paths.tensors
 
-    if not all((dataset_path / file).exists() for file in ActivityDataset.PROCESSED_FILE_NAMES):
+    if not all((dataset_path / file).exists() for file in VisitDataset.PROCESSED_FILE_NAMES):
         survey = load_survey(cfg.data, project_root).with_filter("zone")
         nodes_gdf, edges_gdf = load_graph(survey, cfg.data, project_root)
         tensors = build_tensors(survey, nodes_gdf, edges_gdf)
 
-        return ActivityDataset(str(dataset_path), tensors, **build_kwargs)
+        return VisitDataset(str(dataset_path), tensors, **build_kwargs)
 
-    return ActivityDataset(root=str(dataset_path), **build_kwargs)
-
-
-def split_indices(
-    dataset: ActivityDataset,
-    val_size: float,
-    test_size: float,
-    seed: int,
-    fingerprint: Fingerprint,
-    cache_path: Path | None = None,
-) -> tuple[list[int], list[int], list[int]]:
-    """Return (train_indices, val_indices, test_indices). Loads from ``cache_path`` if it matches ``fingerprint``, otherwise splits and caches."""
-    if cache_path is not None and cache_path.exists():
-        with cache_path.open() as f:
-            cached_indices = json.load(f)
-
-        if cached_indices.get("fingerprint") == fingerprint:
-            return cached_indices["train"], cached_indices["val"], cached_indices["test"]
-
-        print(f"Cached indices at `{cache_path.name}` do not match fingerprint, re-splitting.")
-
-    all_idx = list(range(len(dataset)))
-
-    # Split Test and Train-Val
-    gss_test = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
-    train_val_idx, test_idx = next(iter(gss_test.split(all_idx, groups=dataset.group_ids)))
-
-    # Compute size of validation set and adjust the group Ids
-    train_val_group_ids = dataset.group_ids[train_val_idx]
-    proportional_val_size = val_size / (1 - test_size)
-
-    # Split Val and Train
-    gss_val = GroupShuffleSplit(n_splits=1, test_size=proportional_val_size, random_state=seed)
-    rel_train_idx, rel_val_idx = next(iter(gss_val.split(train_val_idx, groups=train_val_group_ids)))
-    train_idx, val_idx = train_val_idx[rel_train_idx], train_val_idx[rel_val_idx]
-
-    assert set(train_idx) & set(val_idx) == set() and set(train_val_idx) & set(test_idx) == set(), (
-        "Assert train/val/test sets are disjoint."
-    )
-
-    train_idx, val_idx, test_idx = train_idx.tolist(), val_idx.tolist(), test_idx.tolist()
-
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("w") as f:
-            json.dump(
-                {"train": train_idx, "val": val_idx, "test": test_idx, "seed": seed, "fingerprint": fingerprint}, f
-            )
-
-    return train_idx, val_idx, test_idx
+    return VisitDataset(root=str(dataset_path), **build_kwargs)
 
 
-def fit_scalers(
-    dataset: ActivityDataset,
-    train_idx: list[int],
-    fingerprint: Fingerprint,
-    exclude_user_node_cols: list[int],
-    exclude_user_attribute_cols: list[int] | None = None,
-) -> FittedScalers:
-    """Fit ``StandardScaler`` instances on the training split of each feature group.
-
-    Args:
-        dataset: The full ``ActivityDataset`` (not yet scaled).
-        train_idx: Indices of training users.
-        exclude_user_node_cols: Column indices excluded from user node scaler fitting (e.g. ``[is_home_user_node_idx]``).
-        exclude_user_attribute_cols: Column indices excluded from user attribute scaler fitting.
-        fingerprint: Identity of the dataset being fitted on, stored for cache validation.
-
-    Returns:
-        ``FittedScalers`` with one scaler per feature group (graph nodes, edges, user nodes, user attributes).
-    """
-    # Location node features: no need to separate between train and test, the graph is the same.
-    node_scaler = StandardScaler()
-    node_scaler.fit(dataset.location_x.numpy())
-
-    # Location edge attributes: same as above
-    edge_scaler = StandardScaler()
-    edge_scaler.fit(dataset.edge_attr.numpy())
-
-    # User node features: user-specific, fit only on train. Skip when every column is excluded (e.g. only is_home).
-    user_node_train = dataset.user_node_features[train_idx]
-    keep = [c for c in range(user_node_train.shape[-1]) if c not in exclude_user_node_cols]
-    user_node_scaler = None
-    if keep:
-        user_node_flat = user_node_train[..., keep].reshape(-1, len(keep)).float().numpy()
-        user_node_scaler = StandardScaler()
-        user_node_scaler.fit(user_node_flat)
-
-    # User attributes: user-specific, fit only on train
-    attr_train = dataset.user_attributes[train_idx]
-    if exclude_user_attribute_cols:
-        keep = [c for c in range(attr_train.shape[-1]) if c not in exclude_user_attribute_cols]
-        attr_train = attr_train[..., keep]
-    attr_scaler = StandardScaler()
-    attr_scaler.fit(attr_train.float().numpy())
-
-    # Distance-from-home: user-specific, fit only on train
-    distances_train = dataset.distances[train_idx]
-    distances_scaler = StandardScaler()
-    distances_scaler.fit(distances_train.reshape(-1, distances_train.shape[-1]).float().numpy())
-
-    return FittedScalers(
-        node_features=node_scaler,
-        edge_features=edge_scaler,
-        user_node_features=user_node_scaler,
-        user_attributes=attr_scaler,
-        distances=distances_scaler,
-        exclude_user_node_cols=exclude_user_node_cols,
-        fingerprint=fingerprint,
-    )
-
-
-def apply_scalers(dataset: ActivityDataset, scalers: FittedScalers) -> None:
-    """Apply fitted scalers to the dataset in-place, transforming graph/user node/user attribute tensors."""
-    if dataset._is_scaled:
-        raise RuntimeError("apply_scalers called twice on the same ActivityDataset")
-
-    x = dataset.location_x.numpy()
-    dataset.pyg_graph.x = torch.from_numpy(scalers.node_features.transform(x)).float()
-
-    ea = dataset.edge_attr.numpy()
-    dataset.pyg_graph.edge_attr = torch.from_numpy(scalers.edge_features.transform(ea)).float()
-
-    if scalers.user_node_features is not None:
-        unf = dataset.user_node_features.float()
-        n_cols = unf.shape[-1]
-        keep = [c for c in range(n_cols) if c not in scalers.exclude_user_node_cols]
-        flat = unf.reshape(-1, n_cols)[:, keep].numpy()
-        scaled_keep = torch.from_numpy(scalers.user_node_features.transform(flat)).float()
-        result = unf.reshape(-1, n_cols).clone()
-        result[:, keep] = scaled_keep
-        dataset.user_node_features = result.reshape(unf.shape)
-
-    attr = dataset.user_attributes.float().numpy()
-    dataset.user_attributes = torch.from_numpy(scalers.user_attributes.transform(attr)).float()
-
-    dist = dataset.distances.float()
-    shape = dist.shape
-    flat = dist.reshape(-1, shape[-1]).numpy()
-    dataset.distances = torch.from_numpy(scalers.distances.transform(flat)).float().reshape(shape)
-
-    dataset._is_scaled = True
-
-
-def dataset_fingerprint(cfg: Config, dataset: ActivityDataset) -> Fingerprint:
+def dataset_fingerprint(cfg: Config, dataset: VisitDataset) -> Fingerprint:
     """Returns a fingerprint of the dataset for comparison with caches, based on the data config and dataset properties.
 
     Only ``cfg.data`` is hashed, so training hyperparameters do not invalidate the caches. Must be

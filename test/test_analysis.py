@@ -46,7 +46,7 @@ from activitygraphs.analysis import (
     within_band_auc_table,
 )
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.models import NodeMLP
 
 MAIN_METRIC = "test_r_precision"
@@ -87,7 +87,7 @@ def make_per_user() -> pl.DataFrame:
 
 @dataclass
 class FakeDataset:
-    """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``ActivityDataset``."""
+    """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``VisitDataset``."""
 
     user_node_features: torch.Tensor
     num_nodes: int
@@ -898,7 +898,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
         graphs.append(graph)
 
     idx = torch.arange(num_nodes)
-    module = ActivityGraphModule(
+    module = RankingModule(
         model=NodeMLP(num_layers=2, in_channels=3, hidden_channels=8, out_channels=1),
         lr=1e-3,
         is_home_idx=0,

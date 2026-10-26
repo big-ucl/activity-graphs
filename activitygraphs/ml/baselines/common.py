@@ -6,7 +6,7 @@ import torch
 import torch_geometric as pyg
 from torch_geometric.utils import to_dense_batch
 
-from activitygraphs.ml.dataset import is_home_node_mask
+from activitygraphs.datasets.dataset import is_home_node_mask
 from activitygraphs.ml.popularity import POPULARITY_EPS
 
 

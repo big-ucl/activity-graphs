@@ -1,11 +1,8 @@
-"""Ranking metrics (average recall, R-precision, per-user ranking) and the contiguity-hop distance."""
+"""Ranking metrics (average recall, R-precision, per-user ranking)."""
 
 from collections.abc import Collection, Sequence
 
-import numpy as np
 import torch
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import shortest_path
 from torch_geometric.utils import to_dense_batch
 from torchmetrics import Metric
 from torchmetrics.utilities.data import dim_zero_cat
@@ -22,18 +19,6 @@ DEFAULT_HOP_BANDS: HopBands = (
     ("9-12", 9, 12),
     ("13+", 13, float("inf")),
 )
-
-
-def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.ndarray:
-    """Return the all-pairs contiguity-hop distance matrix ``[num_nodes, num_nodes]``.
-
-    Treats the graph as undirected and unweighted; unreachable pairs are ``inf``.
-    """
-    src = edge_index[0].cpu().numpy()
-    dst = edge_index[1].cpu().numpy()
-    adjacency = coo_matrix((np.ones(len(src)), (src, dst)), shape=(num_nodes, num_nodes))
-
-    return shortest_path(adjacency, method="D", unweighted=True, directed=False)
 
 
 @torch.no_grad()

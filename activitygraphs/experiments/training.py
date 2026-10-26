@@ -12,14 +12,30 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.datasets import VisitDataModule, VisitDataset
 from activitygraphs.ml.baselines.gravity import unscale_distances
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
-from activitygraphs.ml.datamodule import ActivityDataModule
-from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import Loss
+from activitygraphs.ml.popularity import popularity_logit
 
 
-def home_distance_frame(datamodule: ActivityDataModule) -> pl.DataFrame:
+def node_popularity_logit(train_dataset: VisitDataset) -> torch.Tensor:
+    """Compute the per-node visit popularity logit over the training dataset, shape [num_nodes].
+
+    logit(p_n), where p_n is the home-excluded train visit rate of node n.
+
+    Same per-node rate as VisitFrequencyBaseline, injected into the ML model outputs to see if they learn anything
+    beyond the "general" popularity signal.
+    """
+    idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
+    labels = train_dataset.visit_labels[idx].squeeze(-1)
+    home_idx = train_dataset.user_node_features[idx, :, train_dataset.is_home_user_node_idx].argmax(dim=1)
+
+    return popularity_logit(labels, home_idx)
+
+
+def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
     """Distance from home to every node for each test user, as ``stage="test_distances"`` rows.
 
     The ``distances`` column is a list of one distance in metres per node, in node-index order. One frame per run: the
@@ -36,7 +52,7 @@ def home_distance_frame(datamodule: ActivityDataModule) -> pl.DataFrame:
     ).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
 
-def score_vector_frame(module: ActivityGraphModule, name: str) -> pl.DataFrame:
+def score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:
     """Full per-node test score vectors as ``stage="test_scores"`` rows, one row per scored test user.
 
     The ``scores`` column is a list of one score per node, in node-index order, row-aligned with the
@@ -68,7 +84,7 @@ def aggregate_frame(rows: list[dict], name: str) -> pl.DataFrame:
     return pl.DataFrame(rows, infer_schema_length=None).with_columns(name=pl.lit(name))
 
 
-def per_user_frame(module: ActivityGraphModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
+def per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
     """Per-user test scores as ``stage="test_user"`` rows, one row per scored test user.
 
     Carried inside the same long-format frame as the aggregate rows so that every caller keeps a
@@ -109,7 +125,7 @@ class WandBParams:
 
 def evaluate_baseline(
     baseline: torch.nn.Module,
-    datamodule: ActivityDataModule,
+    datamodule: VisitDataModule,
     loss: Loss,
     name: str,
     max_recall_k: int,
@@ -127,7 +143,7 @@ def evaluate_baseline(
 
     Args:
         baseline: Fitted baseline module to evaluate.
-        datamodule: ``ActivityDataModule`` instance (``setup()`` is called internally if needed).
+        datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance, for the BCE and the monitored metric.
         name: Baseline name used for logging and in the returned frame.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
@@ -138,7 +154,7 @@ def evaluate_baseline(
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
-    baseline_module = ActivityGraphModule(
+    baseline_module = RankingModule(
         model=baseline,
         lr=0.0,
         loss=loss,
@@ -194,7 +210,7 @@ def evaluate_baseline(
 
 def train_and_evaluate_model(
     model: torch.nn.Module,
-    datamodule: ActivityDataModule,
+    datamodule: VisitDataModule,
     loss: Loss,
     max_recall_k: int,
     recall_ks: Sequence[int],
@@ -226,7 +242,7 @@ def train_and_evaluate_model(
 
     Args:
         model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
-        datamodule: ``ActivityDataModule`` instance (``setup()`` is called internally if needed).
+        datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
         recall_ks: Rank cutoffs of the logged ``recall@k``.
@@ -269,9 +285,9 @@ def train_and_evaluate_model(
 
     datamodule.setup()
 
-    pop_logit = datamodule.pop_logit if pop_mode != "none" else None
+    pop_logit = node_popularity_logit(datamodule.train_dataset) if pop_mode != "none" else None
 
-    lit_model = ActivityGraphModule(
+    lit_model = RankingModule(
         model=model,
         lr=lr,
         loss=loss,

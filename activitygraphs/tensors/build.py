@@ -29,7 +29,7 @@ COLS_EXCLUDED_FROM_FEATURES = [
 
 # Single source of truth for the per-user node feature columns, in the order they are
 # appended after the graph's node features in the concatenated node feature matrix `x`.
-# `is_home` must stay first so that the derived home-column index (see ActivityDataset)
+# `is_home` must stay first so that the derived home-column index (see VisitDataset)
 # remains valid for `is_home_node_mask`, the conditional baseline and the home exclusion.
 USER_NODE_FEATURE_NAMES = ["is_home"]
 

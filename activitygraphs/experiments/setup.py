@@ -1,0 +1,123 @@
+"""Experiment setup: the split, loss, baselines, architectures and training settings shared by an experiment's models."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import cast
+
+import lightning as L
+import polars as pl
+import torch
+from omegaconf import OmegaConf
+
+from activitygraphs.config import Config, ModelConfig
+from activitygraphs.datasets import HouseholdSplit, VisitDataModule
+from activitygraphs.experiments.baselines import measure_baselines
+from activitygraphs.experiments.training import WandBParams, home_distance_frame
+from activitygraphs.ml.losses import Loss, build_loss
+
+
+@dataclass(frozen=True)
+class ExperimentSetup:
+    """Shared experiment setup: dataset split, loss, baselines, and model hyperparameters.
+
+    Built once per experiment by ``setup_experiment``, so all experiments train against the
+    same split, loss, and baselines.
+    """
+
+    cfg: Config
+    datamodule: VisitDataModule
+    loss: Loss
+    models: dict[str, ModelConfig]
+    baseline_results: list[pl.DataFrame]
+    home_distances: pl.DataFrame
+    train_seeds: list[int]
+    num_epochs: int
+    debug: bool
+    wandb_params: WandBParams
+
+
+def with_overrides(model: ModelConfig, overrides: dict) -> ModelConfig:
+    """Return a copy of ``model`` with ``overrides`` merged in; an interpolated name follows the new values."""
+    return cast(ModelConfig, OmegaConf.merge(model, overrides))
+
+
+def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetup:
+    """Set up an experiment.
+
+    Configure logging, build the datamodule, loss, baselines, and the training settings shared by every model.
+
+    The architectures and their hyperparameters are read from ``cfg.models``. When ``cfg.train.overfit_batches > 0``,
+    every architecture's dropout and weight decay are set to 0 and its learning rate to ``cfg.train.overfit_lr``,
+    unless that is null. The split is drawn with ``cfg.train.split_seed`` and is never reseeded, so every model in
+    every experiment is scored on the same test users.
+
+    ``with_baselines=False`` skips fitting the frequency baselines.
+    """
+    run_group = f"{cfg.data.name}-{cfg.train.experiment}-{datetime.now():%Y%m%d-%H%M%S}"
+    wandb_params = WandBParams(
+        use_wandb=cfg.train.wandb,
+        project=cfg.train.wandb_project,
+        entity=cfg.train.wandb_entity,
+        group=run_group,
+        dataset_name=cfg.data.name,
+        experiment=cfg.train.experiment,
+    )
+
+    split = HouseholdSplit(val_size=cfg.train.val_size, test_size=cfg.train.test_size)
+    split_seed = cfg.train.split_seed
+    train_seeds = list(cfg.train.train_seeds)
+
+    L.seed_everything(split_seed, workers=True)
+    torch.set_float32_matmul_precision("high")
+
+    datamodule = VisitDataModule(cfg, split, seed=split_seed, batch_size=cfg.train.batch_size)
+    datamodule.prepare_data()
+    datamodule.setup()
+
+    train_dataset = datamodule.train_dataset
+
+    home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
+    max_recall_k = cfg.train.max_recall_k
+    recall_ks = list(cfg.analysis.recall_curve_ks)
+    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, max_recall_k)
+
+    overfitting = cfg.train.overfit_batches > 0
+    models = dict(cfg.models)
+
+    if overfitting:
+        epochs = cfg.train.overfit_epochs
+        overrides: dict = {"weight_decay": 0.0, "dropout": 0.0}
+        if cfg.train.overfit_lr is not None:
+            overrides["lr"] = cfg.train.overfit_lr
+        models = {key: with_overrides(model, overrides) for key, model in models.items()}
+    else:
+        epochs = cfg.train.epochs
+
+    num_nodes = train_dataset.num_nodes
+    baseline_results = (
+        measure_baselines(
+            num_nodes,
+            datamodule,
+            loss,
+            max_recall_k,
+            recall_ks,
+            train_seeds,
+            wandb_params,
+            cfg.train.save_score_vectors,
+        )
+        if with_baselines
+        else []
+    )
+
+    return ExperimentSetup(
+        cfg=cfg,
+        datamodule=datamodule,
+        loss=loss,
+        models=models,
+        baseline_results=baseline_results,
+        home_distances=home_distance_frame(datamodule),
+        train_seeds=train_seeds,
+        num_epochs=epochs,
+        debug=overfitting or cfg.train.debug,
+        wandb_params=wandb_params,
+    )

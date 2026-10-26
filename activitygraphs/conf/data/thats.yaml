@@ -32,6 +32,6 @@ paths:
   external: data/external
   gtfs: ${..paths.external}/gtfs
 
-  pyg_datasets: ${..paths.processed}/PyGDatasets
+  tensors: ${..paths.processed}/Tensors
 
 distance_bands: [ 2, 5, 10, 25 ]

@@ -151,7 +151,7 @@ class CMAPPaths(SurveyPaths):
 
 @dataclass
 class DataPaths:
-    """Filesystem paths for a dataset (raw, processed, external, PyG)."""
+    """Filesystem paths for a dataset (raw, processed, external, tensors)."""
 
     processed: Path
     raw: Path
@@ -159,7 +159,7 @@ class DataPaths:
     external: Path
     gtfs: Path
 
-    pyg_datasets: Path
+    tensors: Path
 
 
 # ===================================================
@@ -258,6 +258,68 @@ class TrainConfig:
 
 
 @dataclass
+class ModelConfig:
+    """Config for one architecture, from the ``model`` config group. Contains name, optimiser settings and model arch.
+
+    Attributes:
+        architecture: Key of the builder in ``experiments.architectures.BUILDERS`` that constructs the model.
+        name: Name the architecture is reported under; a variant appends its flags to it.
+        lr: Initial AdamW learning rate.
+        weight_decay: AdamW weight decay.
+        hidden_channels: Width of the hidden layers.
+        dropout: Dropout probability.
+    """
+
+    architecture: str
+    name: str
+    lr: float
+    weight_decay: float
+    hidden_channels: int
+    dropout: float
+
+
+@dataclass
+class MLPConfig(ModelConfig):
+    """Config for the node-wise MLP (``NodeMLP``).
+
+    Attributes:
+        num_layers: Number of linear layers.
+    """
+
+    num_layers: int
+
+
+@dataclass
+class GATConfig(ModelConfig):
+    """Config for the GAT with skip connections (``GATSkip``).
+
+    Attributes:
+        num_pre_layers: Number of linear layers before message passing.
+        num_gcn_layers: Number of message-passing layers.
+        num_post_layers: Number of linear layers after message passing.
+        residuals: Add residual connections around the message-passing layers.
+    """
+
+    num_pre_layers: int
+    num_gcn_layers: int
+    num_post_layers: int
+    residuals: bool
+
+
+@dataclass
+class GPSConfig(ModelConfig):
+    """Config for the GPS graph transformer (``GraphTransformer``).
+
+    Attributes:
+        num_layers: Number of GPS layers.
+        num_heads: Number of attention heads per layer.
+    """
+
+    num_layers: int
+    num_heads: int
+
+
+@dataclass
 class AnalysisConfig:
     """Result analysis configuration."""
 
@@ -277,6 +339,7 @@ class Config:
     data: DataConfig
     paths: OutputPaths
     train: TrainConfig
+    models: dict[str, ModelConfig]
     analysis: AnalysisConfig
 
 

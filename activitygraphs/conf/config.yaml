@@ -1,6 +1,9 @@
 defaults:
   - _self_
   - data: tpg
+  - model@models.mlp: mlp
+  - model@models.gat: gat
+  - model@models.gps: gps
 
 paths:
   reports: reports

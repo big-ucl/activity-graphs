@@ -3,8 +3,8 @@
 import lightning as L
 import torch
 
-from activitygraphs.ml.batch import UserBatch
-from activitygraphs.ml.lightning_module import ActivityGraphModule
+from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.ml.lightning_module import RankingModule
 
 
 class OverfitDebugCallback(L.Callback):
@@ -17,7 +17,7 @@ class OverfitDebugCallback(L.Callback):
         if batch_idx != 0:
             return
 
-        assert isinstance(pl_module, ActivityGraphModule)
+        assert isinstance(pl_module, RankingModule)
 
         if trainer.current_epoch == 0:
             b_min, b_max, b_mean = batch.x.min().item(), batch.x.max().item(), batch.x.mean().item()

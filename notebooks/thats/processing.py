@@ -30,12 +30,12 @@ def _():
 @app.cell
 def _():
     from activitygraphs.graph import load_graph
-    from activitygraphs.ml.dataset import ActivityDataset
+    from activitygraphs.datasets.dataset import VisitDataset
     from activitygraphs.surveys.thats import THATSSurvey, read_tables
     from activitygraphs.tensors import build_tensors
 
     return (
-        ActivityDataset,
+        VisitDataset,
         THATSSurvey,
         build_tensors,
         load_graph,
@@ -53,7 +53,7 @@ def _():
 
 @app.cell
 def _(
-    ActivityDataset,
+    VisitDataset,
     THATSSurvey,
     build_tensors,
     load_graph,
@@ -66,9 +66,9 @@ def _(
 
     survey_tensors = build_tensors(survey, nodes_gdf, edges_gdf)
 
-    dataset_path = project_root / cfg.data.paths.pyg_datasets
+    dataset_path = project_root / cfg.data.paths.tensors
 
-    dataset = ActivityDataset(dataset_path, survey_tensors)
+    dataset = VisitDataset(dataset_path, survey_tensors)
     return dataset, edges_gdf, nodes_gdf, survey, tables
 
 

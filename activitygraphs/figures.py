@@ -138,7 +138,7 @@ def with_labels(frame: pl.DataFrame, specs: Sequence[ModelStyle] = DEFAULT_MODEL
 
 
 def node_gdf(nodes_gdf: gpd.GeoDataFrame, polygons: bool = True) -> gpd.GeoDataFrame:
-    """Network nodes in PyG node order, in ``CRS``, with polygon or point geometry.
+    """Graph nodes in PyG node order, in ``CRS``, with polygon or point geometry.
 
     Args:
         nodes_gdf: Nodes from ``load_graph``, indexed by ``loc_id``.

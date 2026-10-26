@@ -1,4 +1,4 @@
-"""Unit tests for ActivityGraphModule."""
+"""Unit tests for RankingModule."""
 
 import types
 
@@ -8,7 +8,7 @@ import torch_geometric as pyg
 
 from activitygraphs.ml.lightning_module import (
     HOME_PE_BINS,
-    ActivityGraphModule,
+    RankingModule,
     create_home_distance_encoding,
     extract_features,
     extracted_features_dim,
@@ -30,7 +30,7 @@ NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
 IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
 # Column of the per-user ``is_home`` indicator in the synthetic ``x``, mirroring the real dataset,
-# where the user node block starts with ``is_home`` (see ``ActivityDataset.is_home_col_idx``).
+# where the user node block starts with ``is_home`` (see ``VisitDataset.is_home_col_idx``).
 IS_HOME_IDX = 0
 HOME_NODE = 0
 
@@ -78,9 +78,9 @@ def make_module(
     lambda_reg: float = 0.01,
     schedule_lr: bool = False,
     store_score_vectors: bool = False,
-) -> ActivityGraphModule:
+) -> RankingModule:
     model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
-    return ActivityGraphModule(
+    return RankingModule(
         model=model,
         lr=1e-3,
         reg=reg,
@@ -107,7 +107,7 @@ def scored_nodes(batch: pyg.data.Batch, graph: int) -> torch.Tensor:
     return rows[rows != rows[HOME_NODE]]
 
 
-def capture_logs(module: ActivityGraphModule, monkeypatch) -> dict:
+def capture_logs(module: RankingModule, monkeypatch) -> dict:
     """Patch ``self.log`` and ``self.log_dict`` (no Trainer attached) and collect everything logged."""
     logged: dict = {}
     monkeypatch.setattr(module, "log", lambda key, val, **kw: logged.__setitem__(key, val))
@@ -115,7 +115,7 @@ def capture_logs(module: ActivityGraphModule, monkeypatch) -> dict:
     return logged
 
 
-def attach_fake_trainer(module: ActivityGraphModule, overfit_batches: int = 0) -> ActivityGraphModule:
+def attach_fake_trainer(module: RankingModule, overfit_batches: int = 0) -> RankingModule:
     """Give the module a minimal stand-in trainer so ``configure_optimizers`` can read ``overfit_batches``."""
     module._trainer = types.SimpleNamespace(overfit_batches=overfit_batches)
     return module
@@ -258,11 +258,11 @@ class TestTestStep:
 class TestUseDemographics:
     """`use_demographics` is sized for at build time; the module must apply it at run time too."""
 
-    def _module(self, use_demographics: bool) -> ActivityGraphModule:
+    def _module(self, use_demographics: bool) -> RankingModule:
         in_channels = NUM_NODE_FEATURES + (NUM_DEMO_FEATURES if use_demographics else 0)
         model = NodeMLP(num_layers=2, in_channels=in_channels, hidden_channels=8, out_channels=1)
 
-        return ActivityGraphModule(
+        return RankingModule(
             model=model,
             lr=1e-3,
             use_demographics=use_demographics,
@@ -293,8 +293,8 @@ class TestUseDemographics:
 
 
 class TestTrainRanking:
-    def _module(self, **kwargs) -> ActivityGraphModule:
-        return ActivityGraphModule(
+    def _module(self, **kwargs) -> RankingModule:
+        return RankingModule(
             model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
             lr=1e-3,
             is_home_idx=IS_HOME_IDX,
@@ -578,12 +578,10 @@ def make_home_batch(
     return batch, chain_hop_distance(num_nodes), is_home_idx
 
 
-def make_home_pe_module(
-    home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = HOME_PE_BINS
-) -> ActivityGraphModule:
+def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = HOME_PE_BINS) -> RankingModule:
     """A module with the home-anchored PE enabled; model width accounts for the extra ``n_bins`` columns."""
     model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS + n_bins, hidden_channels=8, out_channels=1)
-    return ActivityGraphModule(
+    return RankingModule(
         model=model,
         lr=1e-3,
         home_hop_distance=home_hop_distance,

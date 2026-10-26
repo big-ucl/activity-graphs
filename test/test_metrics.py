@@ -4,13 +4,9 @@ import pytest
 import torch
 import torch_geometric as pyg
 
-from activitygraphs.ml.lightning_module import ActivityGraphModule
-from activitygraphs.ml.metrics import (
-    PerUserRanking,
-    RetrievalAverageRecall,
-    RetrievalRPrecision,
-    compute_home_hop_distance,
-)
+from activitygraphs.datasets.dataset import compute_home_hop_distance
+from activitygraphs.ml.lightning_module import RankingModule
+from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
 from activitygraphs.ml.models import FullyConnectedMLP, NodeMLP
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
@@ -409,7 +405,7 @@ class TestPerUserColumnsInModule:
     def test_per_user_columns_populated_at_test_end(self, monkeypatch):
         hop = compute_home_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
         model = NodeMLP(num_layers=2, in_channels=4, hidden_channels=8, out_channels=1)
-        module = ActivityGraphModule(
+        module = RankingModule(
             model=model,
             lr=1e-3,
             home_hop_distance=hop,

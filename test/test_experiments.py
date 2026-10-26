@@ -1,35 +1,68 @@
-"""Tests for the seed loop and the aggregate / per-user result split."""
+"""Tests for the variants, the seed loop and the aggregate / per-user result split."""
 
 import types
 
 import polars as pl
+import pytest
 import torch
+from omegaconf import OmegaConf
 
-from activitygraphs import experiments
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.experiments import (
-    ExperimentSetup,
-    ModelSpec,
-    drop_empty_columns,
-    run_model_specs,
-    save_results,
-)
-from activitygraphs.ml.training import WandBParams
+from activitygraphs.config import Config, read_config
+from activitygraphs.experiments import runners, variants
+from activitygraphs.experiments.architectures import BUILDERS, architecture_builder
+from activitygraphs.experiments.results import drop_empty_columns, save_results
+from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
+from activitygraphs.experiments.training import WandBParams
+from activitygraphs.experiments.variants import Variant, build_model, run_variants
+from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
+from activitygraphs.utils import get_project_root
 
 
-def make_setup(train_seeds: list[int], run_model=None) -> ExperimentSetup:
-    """An ExperimentSetup with no datamodule; spec factories stay unevaluated so no data is needed."""
+@pytest.fixture(scope="module")
+def cfg() -> Config:
+    return read_config(get_project_root(), verbose=False)
+
+
+def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
+    """An ExperimentSetup with no datamodule; ``build_model`` is stubbed by the tests, so no data is needed."""
     return ExperimentSetup(
-        cfg=None,  # type: ignore[arg-type]
-        train_dataset=None,  # type: ignore[arg-type]
-        run_model=run_model,  # type: ignore[arg-type]
+        cfg=cfg,
+        datamodule=types.SimpleNamespace(train_dataset=None),  # type: ignore[arg-type]
+        loss=None,  # type: ignore[arg-type]
+        models=dict(cfg.models),
         baseline_results=[],
         home_distances=pl.DataFrame(),
         train_seeds=train_seeds,
-        hidden_channels=128,
-        dropout=0.2,
-        lr_for={"MLP": 1e-3, "GATSkip": 1e-3}.__getitem__,
+        num_epochs=1,
+        debug=False,
+        wandb_params=WandBParams(use_wandb=False),
     )
+
+
+def make_dataset(num_features: int = 6, num_attributes: int = 3, num_edge_features: int = 2):
+    """Stand-in exposing only what ``build_model`` reads off a ``VisitDataset``."""
+    return types.SimpleNamespace(
+        num_features=num_features,
+        num_classes=2,
+        user_attributes=torch.zeros(4, num_attributes),
+        distances=torch.zeros(4, 5, 1),
+        edge_attr=torch.zeros(8, num_edge_features),
+    )
+
+
+def record_training(monkeypatch, frame=None) -> list[dict]:
+    """Replace model building and training with stubs, returning the list each training call is recorded into."""
+    calls: list[dict] = []
+
+    def train_and_evaluate_model(**kwargs):
+        calls.append(kwargs)
+        return frame(kwargs["name"]) if frame else pl.DataFrame({"name": [kwargs["name"]], "stage": ["test"]})
+
+    monkeypatch.setattr(variants, "train_and_evaluate_model", train_and_evaluate_model)
+    monkeypatch.setattr(variants, "build_model", lambda variant, dataset: torch.nn.Linear(1, 1))
+
+    return calls
 
 
 def make_score_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
@@ -70,65 +103,118 @@ def make_model_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
     return combined.with_columns(seed=pl.lit(seed, dtype=pl.Int64))
 
 
-class TestRunModelSpecs:
-    def _specs(self) -> list[ModelSpec]:
-        return [
-            ModelSpec("MLP", lambda: torch.nn.Linear(1, 1), 1e-3, {}),
-            ModelSpec("GATSkip-2-res", lambda: torch.nn.Linear(1, 1), 1e-3, {"full_info": True}),
-        ]
+class TestVariant:
+    def test_name_appends_the_feature_flags_in_order(self, cfg):
+        gat = cfg.models.gat
 
-    def _recording_setup(self, train_seeds):
-        calls: list[dict] = []
+        assert Variant(gat).name == "GATSkip-8-res"
+        assert Variant(gat, full_info=True).name == "GATSkip-8-res-dist"
+        assert Variant(gat, use_home_pe=True).name == "GATSkip-8-res-hpe"
+        assert Variant(gat, full_info=True, use_home_pe=True).name == "GATSkip-8-res-hpe-dist"
 
-        def run_model(model, name, lr, run_tag, **kwargs):
-            calls.append({"name": name, "run_tag": run_tag, **kwargs})
-            return pl.DataFrame({"name": [name], "stage": ["test"]})
+    def test_suffix_comes_last(self, cfg):
+        assert Variant(cfg.models.mlp, full_info=True, suffix="nodemo").name == "MLP-dist-nodemo"
 
-        return make_setup(train_seeds, run_model), calls
+    def test_name_follows_an_overridden_depth(self, cfg):
+        gat = with_overrides(cfg.models.gat, {"num_gcn_layers": 4})
 
-    def test_trains_every_spec_once_per_seed(self):
-        setup, calls = self._recording_setup([1, 2])
-        frames = run_model_specs(setup, self._specs())
+        assert Variant(gat).name == "GATSkip-4-res"
+        assert cfg.models.gat.name == "GATSkip-8-res"
+
+
+class TestBuildModel:
+    @pytest.mark.parametrize("key", ["mlp", "gat", "gps"])
+    def test_every_architecture_builds(self, cfg, key):
+        model = build_model(Variant(cfg.models[key]), make_dataset())  # type: ignore[arg-type]
+
+        assert isinstance(model, torch.nn.Module)
+
+    def test_input_width_follows_the_variant_features(self, cfg):
+        dataset = make_dataset(num_features=6, num_attributes=3)
+        plain = build_model(Variant(cfg.models.mlp, use_demographics=False), dataset)  # type: ignore[arg-type]
+        dist = build_model(Variant(cfg.models.mlp, full_info=True), dataset)  # type: ignore[arg-type]
+
+        assert isinstance(plain, NodeMLP) and isinstance(dist, NodeMLP)
+        assert plain.lins[0].in_features == 6
+        assert dist.lins[0].in_features == 6 + 3 + 1
+
+    def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
+        dataset = make_dataset(num_edge_features=2)
+        gat = build_model(Variant(cfg.models.gat), dataset)  # type: ignore[arg-type]
+        gps = build_model(Variant(cfg.models.gps), dataset)  # type: ignore[arg-type]
+
+        assert isinstance(gat, GATSkip) and isinstance(gps, GraphTransformer)
+        assert gps.edge_proj.in_features == 2
+
+
+class TestArchitectureRegistry:
+    @pytest.mark.parametrize("path", sorted((get_project_root() / "activitygraphs/conf/model").glob("*.yaml")))
+    def test_every_model_config_names_a_registered_architecture(self, path):
+        assert OmegaConf.load(path).architecture in BUILDERS
+
+    def test_an_unregistered_architecture_raises(self, cfg):
+        model = with_overrides(cfg.models.mlp, {"architecture": "unknown"})
+
+        with pytest.raises(KeyError, match="unknown"):
+            architecture_builder(model)
+
+
+class TestRunVariants:
+    def _variants(self, cfg) -> list[Variant]:
+        return [Variant(cfg.models.mlp), Variant(cfg.models.gat, full_info=True)]
+
+    def test_trains_every_variant_once_per_seed(self, cfg, monkeypatch):
+        calls = record_training(monkeypatch)
+        frames = run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
 
         assert len(frames) == 4
-        assert [call["name"] for call in calls] == ["MLP", "GATSkip-2-res", "MLP", "GATSkip-2-res"]
+        assert [call["name"] for call in calls] == ["MLP", "GATSkip-8-res-dist", "MLP", "GATSkip-8-res-dist"]
 
-    def test_tags_each_frame_with_its_training_seed(self):
-        setup, _ = self._recording_setup([1, 2])
-        seeds = pl.concat(run_model_specs(setup, self._specs()))["seed"].to_list()
+    def test_tags_each_frame_with_its_training_seed(self, cfg, monkeypatch):
+        record_training(monkeypatch)
+        seeds = pl.concat(run_variants(make_setup(cfg, [1, 2]), self._variants(cfg)))["seed"].to_list()
 
         assert seeds == [1, 1, 2, 2]
 
-    def test_builds_a_fresh_model_for_every_seed(self):
-        setup, _ = self._recording_setup([1, 2])
+    def test_builds_a_fresh_model_for_every_seed(self, cfg, monkeypatch):
+        record_training(monkeypatch)
         built: list[torch.nn.Module] = []
 
-        def build():
+        def build(variant, dataset):
             built.append(torch.nn.Linear(1, 1))
             return built[-1]
 
-        run_model_specs(setup, [ModelSpec("MLP", build, 1e-3, {})])
+        monkeypatch.setattr(variants, "build_model", build)
+        run_variants(make_setup(cfg, [1, 2]), [Variant(cfg.models.mlp)])
 
         assert len(built) == 2
         assert built[0] is not built[1]
 
-    def test_run_tag_separates_checkpoints_across_seeds(self):
-        setup, calls = self._recording_setup([1, 2])
-        run_model_specs(setup, self._specs())
+    def test_run_tag_separates_checkpoints_across_seeds(self, cfg, monkeypatch):
+        calls = record_training(monkeypatch)
+        run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
 
         assert [call["run_tag"] for call in calls] == ["seed1", "seed1", "seed2", "seed2"]
 
-    def test_no_run_tag_for_a_single_seed(self):
-        setup, calls = self._recording_setup([42])
-        run_model_specs(setup, self._specs())
+    def test_no_run_tag_for_a_single_seed(self, cfg, monkeypatch):
+        calls = record_training(monkeypatch)
+        run_variants(make_setup(cfg, [42]), self._variants(cfg))
 
         assert [call["run_tag"] for call in calls] == [None, None]
 
-    def test_forwards_the_spec_train_and_eval_kwargs(self):
-        setup, calls = self._recording_setup([42])
-        run_model_specs(setup, self._specs())
+    def test_forwards_the_variant_features(self, cfg, monkeypatch):
+        calls = record_training(monkeypatch)
+        run_variants(make_setup(cfg, [42]), self._variants(cfg))
 
+        assert calls[0]["full_info"] is False
         assert calls[1]["full_info"] is True
+
+    def test_trains_with_the_architecture_optimiser_settings(self, cfg, monkeypatch):
+        calls = record_training(monkeypatch)
+        gps = with_overrides(cfg.models.gps, {"lr": 0.5, "weight_decay": 0.25})
+        run_variants(make_setup(cfg, [42]), [Variant(gps)])
+
+        assert (calls[0]["lr"], calls[0]["weight_decay"]) == (0.5, 0.25)
 
 
 class TestDropEmptyColumns:
@@ -146,79 +232,70 @@ class TestDropEmptyColumns:
 class TestDemographicsAblation:
     """The ablation must run both arms of `use_demographics` for each retained architecture."""
 
-    def _recorded(self, monkeypatch) -> list[dict]:
-        calls: list[dict] = []
+    def _recorded(self, cfg, monkeypatch) -> list[dict]:
+        calls = record_training(monkeypatch, frame=make_model_frame)
+        setup = make_setup(cfg, [42, 43])
+        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
+        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
 
-        def run_model(model, name, lr, run_tag, **kwargs):
-            calls.append({"name": name, **kwargs})
-            return make_model_frame(name)
-
-        setup = make_setup([42, 43], run_model=run_model)
-        monkeypatch.setattr(experiments, "setup_experiment", lambda cfg, **kw: setup)
-        monkeypatch.setattr(experiments, "build_mlp", lambda *a, **kw: torch.nn.Linear(1, 1))
-        monkeypatch.setattr(experiments, "build_gat", lambda *a, **kw: torch.nn.Linear(1, 1))
-        monkeypatch.setattr(experiments, "save_results", lambda *a, **kw: None)
-
-        cfg = types.SimpleNamespace(
+        run_cfg = types.SimpleNamespace(
             train=types.SimpleNamespace(fast_dev_run=False),
             paths=types.SimpleNamespace(reports="reports"),
             data=types.SimpleNamespace(name="CMAP"),
         )
-        experiments.demographics_ablation_experiment(cfg)
+        runners.demographics_ablation_experiment(run_cfg)  # type: ignore[arg-type]
 
         return calls
 
-    def test_runs_both_arms_of_each_architecture(self, monkeypatch):
-        names = {call["name"] for call in self._recorded(monkeypatch)}
+    def test_runs_both_arms_of_each_architecture(self, cfg, monkeypatch):
+        names = {call["name"] for call in self._recorded(cfg, monkeypatch)}
 
         assert names == {"MLP-dist-demo", "MLP-dist-nodemo", "GATSkip-8-res-dist-demo", "GATSkip-8-res-dist-nodemo"}
 
-    def test_the_arms_differ_only_in_use_demographics(self, monkeypatch):
-        calls = {call["name"]: call for call in self._recorded(monkeypatch)}
+    def test_the_arms_differ_only_in_use_demographics(self, cfg, monkeypatch):
+        calls = {call["name"]: call for call in self._recorded(cfg, monkeypatch)}
 
         assert calls["MLP-dist-demo"]["use_demographics"] is True
         assert calls["MLP-dist-nodemo"]["use_demographics"] is False
         assert all(call["full_info"] for call in calls.values())
 
-    def test_every_arm_runs_once_per_seed(self, monkeypatch):
-        assert len(self._recorded(monkeypatch)) == 8  # 2 architectures x 2 arms x 2 seeds
+    def test_every_arm_runs_once_per_seed(self, cfg, monkeypatch):
+        assert len(self._recorded(cfg, monkeypatch)) == 8  # 2 architectures x 2 arms x 2 seeds
 
 
 class TestDepthSweep:
     """Depth survives only inside the model name unless it is logged, so grouping by it must be possible."""
 
-    def _recorded(self, monkeypatch, depths: list[int]) -> list[dict]:
-        calls: list[dict] = []
+    def _recorded(self, cfg, monkeypatch, depths: list[int]) -> list[dict]:
+        calls = record_training(monkeypatch, frame=make_model_frame)
+        setup = make_setup(cfg, [42])
+        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
+        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
 
-        def run_model(model, name, lr, run_tag, **kwargs):
-            calls.append({"name": name, **kwargs})
-            return make_model_frame(name)
-
-        setup = make_setup([42], run_model=run_model)
-        monkeypatch.setattr(experiments, "setup_experiment", lambda cfg, **kw: setup)
-        monkeypatch.setattr(experiments, "build_mlp", lambda *a, **kw: torch.nn.Linear(1, 1))
-        monkeypatch.setattr(experiments, "build_gat", lambda *a, **kw: torch.nn.Linear(1, 1))
-        monkeypatch.setattr(experiments, "save_results", lambda *a, **kw: None)
-
-        cfg = types.SimpleNamespace(
+        run_cfg = types.SimpleNamespace(
             train=types.SimpleNamespace(fast_dev_run=False, depths=depths),
             paths=types.SimpleNamespace(reports="reports"),
             data=types.SimpleNamespace(name="CMAP"),
         )
-        experiments.depth_sweep_experiment(cfg)
+        runners.depth_sweep_experiment(run_cfg)  # type: ignore[arg-type]
 
         return calls
 
-    def test_every_run_logs_its_depth(self, monkeypatch):
-        calls = self._recorded(monkeypatch, [2, 4, 8])
+    def test_every_run_logs_its_depth(self, cfg, monkeypatch):
+        calls = self._recorded(cfg, monkeypatch, [2, 4, 8])
 
         assert [call["extra_hyperparams"]["depth"] for call in calls] == [0, 2, 4, 8]
 
-    def test_the_mlp_anchor_is_depth_zero(self, monkeypatch):
-        anchor = self._recorded(monkeypatch, [2])[0]
+    def test_the_mlp_anchor_is_depth_zero(self, cfg, monkeypatch):
+        anchor = self._recorded(cfg, monkeypatch, [2])[0]
 
         assert anchor["name"] == "MLP-dist"
         assert anchor["extra_hyperparams"] == {"depth": 0}
+
+    def test_each_depth_is_named_after_it(self, cfg, monkeypatch):
+        names = [call["name"] for call in self._recorded(cfg, monkeypatch, [2, 4])]
+
+        assert names == ["MLP-dist", "GATSkip-2-res-hpe-dist", "GATSkip-4-res-hpe-dist"]
 
 
 class TestWandBParams:

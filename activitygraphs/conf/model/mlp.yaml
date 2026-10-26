@@ -1,0 +1,8 @@
+architecture: mlp
+name: MLP
+lr: 1e-3
+weight_decay: 1e-4
+
+num_layers: 3
+hidden_channels: 128
+dropout: 0.2

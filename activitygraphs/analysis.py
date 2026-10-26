@@ -8,7 +8,7 @@
   - Density of home zones
 
 Reads the parquet files written by ``experiments.py:save_results`` and reports the points above. All analyses use the
-parquet files generated to ``reports/data`` only, except the home-zone analysis, which reads the built ``ActivityDataset``.
+parquet files generated to ``reports/data`` only, except the home-zone analysis, which reads the built ``VisitDataset``.
 """
 
 from collections.abc import Sequence
@@ -22,7 +22,7 @@ from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
-from activitygraphs.ml.dataset import ActivityDataset
+from activitygraphs.datasets.dataset import VisitDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
 
@@ -54,7 +54,7 @@ PER_POSITIVE_VALUE_COLUMNS = {"r_precision": "pos_in_top_r", AVG_RECALL_COLUMN: 
 N_SCORED_HIGHER_COLUMN = "pos_n_scored_higher"
 N_TIED_COLUMN = "pos_n_tied"
 
-# Per-user list column containing the network node index of each positive, and per-user column containing the user's
+# Per-user list column containing the graph node index of each positive, and per-user column containing the user's
 # home node. Together with the score vectors and the home distances they carry the within-band AUC.
 PER_POSITIVE_NODE_COLUMN = "pos_node"
 HOME_NODE_COLUMN = "home_node"
@@ -1207,7 +1207,7 @@ def paired_comparison_by_k(
 # =========================================
 
 
-def home_zone_summary(dataset: ActivityDataset, occupancy_thresholds: Sequence[int] | None = None) -> pl.DataFrame:
+def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int] | None = None) -> pl.DataFrame:
     """Density summary of a users-per-home-zone table (single row).
 
         - ``users_per_occupied_zone`` is the mean number of users per _occupied_ zone.

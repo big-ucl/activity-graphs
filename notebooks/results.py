@@ -1002,14 +1002,14 @@ def _(cfg, read_run, overfit_run, max_recall_k, reports_data_path):
 def _(mo):
     mo.md(r"""
     ## Home zones analysis
-    Based on original `ActivityDataset`, no model outputs needed.
+    Based on original `VisitDataset`, no model outputs needed.
     """)
     return
 
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.ml.dataset import load_dataset
+    from activitygraphs.datasets.dataset import load_dataset
 
     dataset = load_dataset(cfg, project_root)
     return (dataset,)

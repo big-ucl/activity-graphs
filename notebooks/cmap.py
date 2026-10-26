@@ -64,7 +64,7 @@ def _(edges_gdf, nodes_gdf):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.ml.dataset import load_dataset
+    from activitygraphs.datasets.dataset import load_dataset
 
     tensors = load_dataset(cfg, project_root)
     return (tensors,)
@@ -86,9 +86,10 @@ def _(tensors):
 
 @app.cell
 def _(cfg):
-    from activitygraphs.ml.datamodule import ActivityDataModule
+    from activitygraphs.datasets import HouseholdSplit, VisitDataModule
 
-    datamodule = ActivityDataModule(cfg, cfg.train.val_size, cfg.train.test_size, cfg.train.split_seed, cfg.train.batch_size)
+    datamodule = VisitDataModule(cfg, HouseholdSplit(cfg.train.val_size, cfg.train.test_size), cfg.train.split_seed, cfg.train.batch_size)
+    datamodule.prepare_data()
     datamodule.setup()
     return (datamodule,)
 

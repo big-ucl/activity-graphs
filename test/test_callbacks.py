@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 import torch
 
+from activitygraphs.experiments.training import aggregate_frame
 from activitygraphs.ml.callbacks import EpochMetricsCollector
-from activitygraphs.ml.training import aggregate_frame
 
 
 def fake_trainer(callback_metrics: dict, sanity_checking: bool = False, current_epoch: int = 0):

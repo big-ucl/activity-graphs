@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 
 from activitygraphs.config import LossConfig
-from activitygraphs.ml.batch import UserBatch
-from activitygraphs.ml.dataset import is_home_node_mask
+from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.dataset import is_home_node_mask
 
 
 class LossFn(Protocol):

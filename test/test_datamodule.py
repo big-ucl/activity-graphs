@@ -1,26 +1,27 @@
-"""Integration smoke tests for ActivityDataModule.
+"""Integration smoke tests for VisitDataModule.
 
 Marked ``integration`` and skipped automatically when the dataset is not on disk.
 """
 
 import pytest
 
-from activitygraphs.ml.datamodule import ActivityDataModule
+from activitygraphs.datasets import HouseholdSplit, VisitDataModule
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")
-def datamodule(load_or_skip) -> ActivityDataModule:
-    def build(cfg, root) -> ActivityDataModule:
-        dm = ActivityDataModule(cfg, val_size=0.2, test_size=0.1, seed=42, batch_size=64)
+def datamodule(load_or_skip) -> VisitDataModule:
+    def build(cfg, root) -> VisitDataModule:
+        dm = VisitDataModule(cfg, HouseholdSplit(val_size=0.2, test_size=0.1), seed=42, batch_size=64)
+        dm.prepare_data()
         dm.setup()
         return dm
 
     return load_or_skip("thats", build)
 
 
-class TestActivityDataModule:
+class TestVisitDataModule:
     def test_split_covers_all_users(self, datamodule):
         # Subsets share the full (unsliced) visit_labels tensor, so shape[0] is the total count.
         total = datamodule.train_dataset.visit_labels.shape[0]
