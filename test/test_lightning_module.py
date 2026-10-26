@@ -18,6 +18,7 @@ from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import NodeMLP
 
 MAX_RECALL_K = 50
+LR_SCHEDULER = {"factor": 0.5, "patience": 5}
 RECALL_KS = [1, 3, 5]
 
 
@@ -76,7 +77,7 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
 
 
 def make_module(
-    schedule_lr: bool = False,
+    lr_scheduler: dict | None = None,
     store_score_vectors: bool = False,
 ) -> RankingModule:
     model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
@@ -84,7 +85,7 @@ def make_module(
         model=model,
         lr=1e-3,
         loss=BCELoss,
-        schedule_lr=schedule_lr,
+        lr_scheduler=lr_scheduler,
         store_score_vectors=store_score_vectors,
         is_home_idx=IS_HOME_IDX,
         home_hop_distance=chain_hop_distance(),
@@ -519,37 +520,60 @@ class TestRankingView:
 
 class TestConfigureOptimizers:
     def test_returns_optimizer_and_scheduler(self):
-        result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
+        result = attach_fake_trainer(make_module(lr_scheduler=LR_SCHEDULER)).configure_optimizers()
         assert "optimizer" in result
         assert "lr_scheduler" in result
 
     def test_scheduler_monitors_val_bce(self):
-        result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
+        result = attach_fake_trainer(make_module(lr_scheduler=LR_SCHEDULER)).configure_optimizers()
         assert result["lr_scheduler"]["monitor"] == "val_bce"
 
     def test_optimizer_is_adamw(self):
-        result = attach_fake_trainer(make_module(schedule_lr=True)).configure_optimizers()
+        result = attach_fake_trainer(make_module(lr_scheduler=LR_SCHEDULER)).configure_optimizers()
         assert isinstance(result["optimizer"], torch.optim.AdamW)
 
     def test_no_scheduler_when_not_requested(self):
-        """With schedule_lr=False (the default), a bare optimizer is returned."""
+        """With no lr_scheduler (the default), a bare optimizer is returned."""
         result = attach_fake_trainer(make_module()).configure_optimizers()
         assert isinstance(result, torch.optim.AdamW)
 
     def test_no_scheduler_when_overfitting(self):
         """In overfit mode the scheduler is skipped and a bare optimizer is returned."""
-        result = attach_fake_trainer(make_module(), overfit_batches=5).configure_optimizers()
+        result = attach_fake_trainer(make_module(lr_scheduler=LR_SCHEDULER), overfit_batches=5).configure_optimizers()
         assert isinstance(result, torch.optim.AdamW)
+
+    def test_scheduler_takes_the_given_settings(self):
+        result = attach_fake_trainer(make_module(lr_scheduler={"factor": 0.25, "patience": 3})).configure_optimizers()
+        scheduler = result["lr_scheduler"]["scheduler"]
+
+        assert (scheduler.factor, scheduler.patience) == (0.25, 3)
+
+
+class TestCalibration:
+    def test_both_stages_use_the_given_bins(self):
+        module = RankingModule(
+            model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
+            lr=1e-3,
+            loss=BCELoss,
+            is_home_idx=IS_HOME_IDX,
+            home_hop_distance=chain_hop_distance(),
+            max_recall_k=MAX_RECALL_K,
+            recall_ks=RECALL_KS,
+            calibration_bins=7,
+        )
+
+        assert module.val_calibration.n_bins == 7
+        assert module.test_calibration.n_bins == 7
 
 
 class TestCheckpoint:
     """A checkpoint must rebuild the module from its own hyperparameters plus the objects it was not given."""
 
     def test_hyperparameters_leave_out_the_objects_passed_in(self):
-        hparams = make_module(schedule_lr=True).hparams
+        hparams = make_module(lr_scheduler=LR_SCHEDULER).hparams
 
         assert hparams["lr"] == 1e-3
-        assert hparams["schedule_lr"] is True
+        assert hparams["lr_scheduler"] == LR_SCHEDULER
         assert not {"model", "loss", "home_hop_distance"} & set(hparams)
 
     def test_compiling_keeps_the_state_dict_keys(self):
@@ -563,7 +587,7 @@ class TestCheckpoint:
         assert list(module.state_dict()) == keys
 
     def test_reloads_from_a_checkpoint(self, tmp_path):
-        module = make_module(schedule_lr=True)
+        module = make_module(lr_scheduler=LR_SCHEDULER)
         path = tmp_path / "best.ckpt"
         torch.save(
             {
@@ -579,7 +603,7 @@ class TestCheckpoint:
             path, model=model, loss=BCELoss, home_hop_distance=chain_hop_distance()
         )
 
-        assert reloaded.schedule_lr is True
+        assert reloaded.lr_scheduler == LR_SCHEDULER
         for key, value in module.state_dict().items():
             assert torch.equal(reloaded.state_dict()[key], value)
 
@@ -651,6 +675,14 @@ class TestHomePositionalEncoding:
         centers = torch.linspace(0, 40, n_bins)
         expected = torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)
         torch.testing.assert_close(pe, expected)
+
+    def test_hops_are_capped_at_max_hops(self):
+        """Every node at or beyond ``max_hops`` gets the encoding of ``max_hops`` itself."""
+        batch, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
+        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=4, max_hops=3)
+
+        torch.testing.assert_close(pe[3:], pe[3].expand(5, 4))
+        assert not torch.allclose(pe[2], pe[3])
 
     def test_varies_per_user(self):
         """Different home anchors give different encodings for the same node positions (the whole point)."""

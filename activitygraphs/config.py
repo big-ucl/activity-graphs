@@ -225,25 +225,67 @@ class LossConfig:
 
 
 @dataclass
+class TrainerConfig:
+    """Keyword arguments of the Lightning ``Trainer`` of every learned model."""
+
+    max_epochs: int
+    accelerator: str
+    gradient_clip_val: float
+    fast_dev_run: bool
+    overfit_batches: int
+    enable_progress_bar: bool
+    enable_model_summary: bool
+
+
+@dataclass
+class LoaderConfig:
+    """DataLoader settings of every split."""
+
+    batch_size: int
+    num_workers: int
+
+
+@dataclass
+class LRSchedulerConfig:
+    """Keyword arguments of the ``ReduceLROnPlateau`` scheduler."""
+
+    factor: float
+    patience: int
+
+
+@dataclass
+class HomePEConfig:
+    """Home-anchored positional encoding settings.
+
+    Attributes:
+        bins: Number of RBF centres, which is the number of feature columns added.
+        max_hops: Hop distance at which the encoding is capped, and the position of the last centre.
+    """
+
+    bins: int
+    max_hops: int
+
+
+@dataclass
 class TrainConfig:
     """Training configuration for development and debugging."""
 
-    epochs: int
     split_seed: int
     train_seeds: list[int]
 
     experiment: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
     depths: list[int]
 
-    batch_size: int
+    loader: LoaderConfig
     val_size: float
     test_size: float
 
-    fast_dev_run: bool
-    overfit_batches: int
     overfit_lr: float | None
     overfit_epochs: int
     schedule_lr: bool
+    lr_scheduler: LRSchedulerConfig
+    home_pe: HomePEConfig
+    calibration_bins: int
     compile: bool
     debug: bool
     save_score_vectors: bool
@@ -338,6 +380,7 @@ class Config:
 
     data: DataConfig
     paths: OutputPaths
+    trainer: TrainerConfig
     train: TrainConfig
     models: dict[str, ModelConfig]
     analysis: AnalysisConfig

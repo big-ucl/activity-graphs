@@ -88,7 +88,13 @@ def _(tensors):
 def _(cfg):
     from activitygraphs.datasets import HouseholdSplit, VisitDataModule
 
-    datamodule = VisitDataModule(cfg, HouseholdSplit(cfg.train.val_size, cfg.train.test_size), cfg.train.split_seed, cfg.train.batch_size)
+    datamodule = VisitDataModule(
+        cfg,
+        HouseholdSplit(cfg.train.val_size, cfg.train.test_size),
+        cfg.train.split_seed,
+        cfg.train.loader.batch_size,
+        cfg.train.loader.num_workers,
+    )
     datamodule.prepare_data()
     datamodule.setup()
     return (datamodule,)

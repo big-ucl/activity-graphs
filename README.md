@@ -28,7 +28,7 @@ to setup the project and install dependencies.
 uv run activity-graphs                       # full comparison run, default dataset (TPG)
 uv run activity-graphs data=cmap             # switch dataset (tpg, cmap, thats)
 
-uv run activity-graphs train.fast_dev_run=true      # single batch test run
+uv run activity-graphs trainer.fast_dev_run=true    # single batch test run
 uv run activity-graphs train.loss.type=bce          # loss: bpr (default) or bce
 uv run activity-graphs train.loss.neg_sampler=hard  # hard near-home BPR negatives
 uv run activity-graphs train.wandb=false            # disable Weights & Biases logging

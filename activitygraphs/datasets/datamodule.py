@@ -113,6 +113,7 @@ class VisitDataModule(L.LightningDataModule):
         split: Strategy assigning the users to the train, validation and test splits.
         seed: Random seed for the train/validation split.
         batch_size: Number of graphs per DataLoader batch.
+        num_workers: Number of DataLoader worker processes.
         project_root: Optional override for the project root path.
     """
 
@@ -122,6 +123,7 @@ class VisitDataModule(L.LightningDataModule):
         split: SplitStrategy,
         seed: int,
         batch_size: int,
+        num_workers: int,
         project_root: Path | None = None,
     ):
         super().__init__()
@@ -129,6 +131,7 @@ class VisitDataModule(L.LightningDataModule):
         self.split = split
         self.seed = seed
         self.batch_size = batch_size
+        self.num_workers = num_workers
         self.project_root = project_root
 
         self._train_dataset: VisitDataset | None = None
@@ -161,17 +164,19 @@ class VisitDataModule(L.LightningDataModule):
     def train_dataloader(self) -> pyg.loader.DataLoader:
         """Return a shuffled loader over the training split."""
         assert self._train_dataset is not None
-        return pyg.loader.DataLoader(self._train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8)
+        return pyg.loader.DataLoader(
+            self._train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers
+        )
 
     def val_dataloader(self) -> pyg.loader.DataLoader:
         """Return a loader over the validation split."""
         assert self._val_dataset is not None
-        return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size, num_workers=8)
+        return pyg.loader.DataLoader(self._val_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
     def test_dataloader(self) -> pyg.loader.DataLoader:
         """Return a loader over the test split."""
         assert self._test_dataset is not None
-        return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size, num_workers=8)
+        return pyg.loader.DataLoader(self._test_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
     @property
     def train_dataset(self) -> VisitDataset:

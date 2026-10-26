@@ -20,6 +20,8 @@ from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
 HOME_PE_BINS = 8
+HOME_PE_MAX_HOPS = 40
+CALIBRATION_BINS = 15
 
 
 def extract_features(
@@ -29,6 +31,7 @@ def extract_features(
     use_demographics: bool = True,
     home_hop_distance: torch.Tensor | None = None,
     home_pe_bins: int = HOME_PE_BINS,
+    home_pe_max_hops: int = HOME_PE_MAX_HOPS,
 ) -> torch.Tensor:
     """Return node features for a batch.
 
@@ -46,7 +49,9 @@ def extract_features(
     x = batch.x
 
     if home_hop_distance is not None:
-        home_pe = create_home_distance_encoding(batch, home_hop_distance, is_home_idx, n_bins=home_pe_bins)
+        home_pe = create_home_distance_encoding(
+            batch, home_hop_distance, is_home_idx, n_bins=home_pe_bins, max_hops=home_pe_max_hops
+        )
         x = torch.cat([x, home_pe], dim=-1)
 
     if use_demographics:
@@ -96,14 +101,19 @@ def compute_home_hops(batch: UserBatch, home_hop_distance: torch.Tensor, is_home
 
 
 def create_home_distance_encoding(
-    batch: UserBatch, home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = 8
+    batch: UserBatch,
+    home_hop_distance: torch.Tensor,
+    is_home_idx: int,
+    n_bins: int = HOME_PE_BINS,
+    max_hops: int = HOME_PE_MAX_HOPS,
 ) -> torch.Tensor:
     """Positional encoding based on distance from user home (single anchor), shape ``[num_nodes, n_bins]``.
 
-    RBF expansion of the number of hops to home for each node.
+    RBF expansion of the number of hops to home for each node, capped at ``max_hops``, with ``n_bins`` centres spread
+    evenly over ``[0, max_hops]``.
     """
-    hops = compute_home_hops(batch, home_hop_distance, is_home_idx).clamp(max=40)
-    centers = torch.linspace(0, 40, n_bins, device=batch.x.device)
+    hops = compute_home_hops(batch, home_hop_distance, is_home_idx).clamp(max=max_hops)
+    centers = torch.linspace(0, max_hops, n_bins, device=batch.x.device)
 
     return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)  # [num_nodes, n_bins]
 
@@ -155,11 +165,14 @@ class RankingModule(L.LightningModule):
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
         recall_ks: Rank cutoffs of the logged ``recall@k``.
         weight_decay: AdamW weight decay.
-        schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
+        lr_scheduler: Keyword arguments of a ReduceLROnPlateau scheduler on the loss's monitored metric. None trains
+            without a scheduler.
         home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix, read for the per-positive hop
             distances and the home-anchored positional encodings.
         use_home_pe: use home-anchored positional encodings in features, default False.
         home_pe_bins: number of bins for the RBF expansion of the home PEs, default ``HOME_PE_BINS``.
+        home_pe_max_hops: hop distance at which the home PEs are capped, default ``HOME_PE_MAX_HOPS``.
+        calibration_bins: number of probability bins of the calibration error, default ``CALIBRATION_BINS``.
         compile_model: torch.compile the inner NN, default False.
         store_score_vectors: retain each test user's full per-node score vector.
         log_train_ranking: log ``train_avg_recall@K`` on the training batches, default True. Turn it off when per-user
@@ -181,9 +194,11 @@ class RankingModule(L.LightningModule):
         full_info: bool = False,
         use_demographics: bool = True,
         weight_decay: float = 1e-4,
-        schedule_lr: bool = False,
+        lr_scheduler: dict | None = None,
         use_home_pe: bool = False,
         home_pe_bins: int = HOME_PE_BINS,
+        home_pe_max_hops: int = HOME_PE_MAX_HOPS,
+        calibration_bins: int = CALIBRATION_BINS,
         compile_model: bool = False,
         store_score_vectors: bool = False,
         log_train_ranking: bool = True,
@@ -197,7 +212,7 @@ class RankingModule(L.LightningModule):
         self.use_demographics = use_demographics
         self.max_recall_k = max_recall_k
         self.weight_decay = weight_decay
-        self.schedule_lr = schedule_lr
+        self.lr_scheduler = lr_scheduler
 
         # Metrics: General setup
         metrics = MetricCollection({
@@ -211,8 +226,8 @@ class RankingModule(L.LightningModule):
         self.log_train_ranking = log_train_ranking
         self.train_avg_recall = MeanMetric() if log_train_ranking else None
 
-        self.val_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
-        self.test_calibration = BinaryCalibrationError(n_bins=15, norm="l1")
+        self.val_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
+        self.test_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
 
         self.is_home_idx = is_home_idx
         self.register_buffer(
@@ -230,6 +245,7 @@ class RankingModule(L.LightningModule):
         # Training: Home-anchored positional encodings injection
         self.use_home_pe = use_home_pe
         self.home_pe_bins = home_pe_bins
+        self.home_pe_max_hops = home_pe_max_hops
 
         # Training: torch.compile (applied in configure_model, not here)
         self.compile_model = compile_model
@@ -401,9 +417,9 @@ class RankingModule(L.LightningModule):
 
         # Only add a scheduler if not trying to overfit (i.e. not in diagnostic mode). Validation error is not a useful
         # signal when purposefully overfitting
-        if self.trainer.overfit_batches == 0 and self.schedule_lr:  # pyrefly: ignore[missing-attribute]
+        if self.trainer.overfit_batches == 0 and self.lr_scheduler is not None:  # pyrefly: ignore[missing-attribute]
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode=self.loss.monitor_mode, factor=0.5, patience=5
+                optimizer, mode=self.loss.monitor_mode, **self.lr_scheduler
             )
 
             return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": self.loss.monitor}}
@@ -421,5 +437,6 @@ class RankingModule(L.LightningModule):
             use_demographics=self.use_demographics,
             home_hop_distance=home_hop_distance,
             home_pe_bins=self.home_pe_bins,
+            home_pe_max_hops=self.home_pe_max_hops,
         )
         return self(x, batch.edge_index, batch.edge_attr, batch.batch)

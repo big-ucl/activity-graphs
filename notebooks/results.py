@@ -972,7 +972,7 @@ def _(mo):
     mo.md(r"""
     ### Overfit health
     Best `train_avg_recall@K` reached on the training batches. On a run made with
-    `train.overfit_batches > 0` this asks whether a model can fit a batch it is allowed to memorise;
+    `trainer.overfit_batches > 0` this asks whether a model can fit a batch it is allowed to memorise;
     on a normal run it is the train side of the train/val ranking gap. Needs
     `train.log_train_ranking=true`.
     """)

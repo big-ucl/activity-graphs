@@ -11,9 +11,20 @@ paths:
   overfit: ${..paths.reports}/overfit
   figures: ${..paths.reports}/figures
 
+# Keyword arguments of the Lightning Trainer of every learned model. Add other Trainer arguments with `+trainer.<arg>=`.
+trainer:
+  # Number of training epochs. Replaced by `train.overfit_epochs` while overfitting.
+  max_epochs: 50
+  accelerator: auto
+  gradient_clip_val: 1.0
+  # Enables Lightning fast-dev-run (no training but all code parts are run).
+  fast_dev_run: false
+  # Number of batches to train on (to test model overfit), disabled when = 0.
+  overfit_batches: 0
+  enable_progress_bar: true
+  enable_model_summary: false
+
 train:
-  # Number of training epochs
-  epochs: 50
   # Dataset split seed: kept same across models to ensure same data evaluation.
   split_seed: 42
   # Training seeds; each model is trained once per entry. Use several to measure run-to-run spread.
@@ -27,24 +38,32 @@ train:
   # GATSkip message-passing depths for the depth sweep (a NodeMLP depth-0 anchor is always included).
   depths: [ 2, 4, 8 ]
 
-  # Batch size (number of user "graphs" per batch).
-  batch_size: 64
+  # DataLoader settings of every split.
+  loader:
+    # Batch size (number of user "graphs" per batch).
+    batch_size: 64
+    num_workers: 8
   # Size of the validation set (as a fraction of the total dataset size).
   val_size: 0.1
   # Size of the test set.
   test_size: 0.2
 
-
-  # Enables Lightning fast-dev-run (no training but all code parts are run).
-  fast_dev_run: false
-  # Number of batches to train on (to test model overfit), disabled when = 0.
-  overfit_batches: 0
   # Learning rate forced on every architecture while overfitting. Set to null to keep the per-model rates.
   overfit_lr: 1e-2
   # Epochs to run while overfitting.
   overfit_epochs: 500
-  # Use the ReduceLROnPlateau scheduler.
+  # Use the ReduceLROnPlateau scheduler on the loss's monitored metric. Never used while overfitting.
   schedule_lr: true
+  # Keyword arguments of ReduceLROnPlateau.
+  lr_scheduler:
+    factor: 0.5
+    patience: 5
+  # Home-anchored positional encoding: an RBF expansion of the hop distance to home, capped at `max_hops`.
+  home_pe:
+    bins: 8
+    max_hops: 40
+  # Number of probability bins of the calibration error.
+  calibration_bins: 15
   # Enable PyTorch model compilation (Dynamo).
   compile: true
   # Enable the `OverfitDebugCallback` statistics, prints at the start and end of training.

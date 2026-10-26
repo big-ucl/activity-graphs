@@ -2,13 +2,44 @@
 
 import copy
 
+import lightning as L
 import polars as pl
 
 from activitygraphs.analysis import check_overfit_health
 from activitygraphs.config import Config
 from activitygraphs.experiments.results import save_results
-from activitygraphs.experiments.setup import setup_experiment, with_overrides
-from activitygraphs.experiments.variants import Variant, run_variants
+from activitygraphs.experiments.setup import ExperimentSetup, setup_experiment, with_overrides
+from activitygraphs.experiments.training import train_and_evaluate_model
+from activitygraphs.experiments.variants import Variant, build_model
+
+
+def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.DataFrame]:
+    """Train every variant once per training seed and return the seed-tagged result frames.
+
+    Only training is reseeded, so the seed spread across repeated runs of one variant measures
+    training stochasticity alone rather than split variance.
+    """
+    cfg = setup.cfg
+    results = []
+
+    for train_seed in setup.train_seeds:
+        L.seed_everything(train_seed, workers=True)
+
+        for variant in variants:
+            frame = train_and_evaluate_model(
+                model=build_model(variant, setup.datamodule.train_dataset, cfg.train.home_pe.bins),
+                variant=variant,
+                datamodule=setup.datamodule,
+                loss=setup.loss,
+                cfg=cfg,
+                run_dir=setup.run_dir,
+                wandb_params=setup.wandb_params,
+                debug=setup.debug,
+                run_tag=f"seed{train_seed}" if len(setup.train_seeds) > 1 else None,
+            )
+            results.append(frame.with_columns(seed=pl.lit(train_seed, dtype=pl.Int64)))
+
+    return results
 
 
 def comparison_experiment(cfg: Config):
@@ -92,7 +123,7 @@ def demographics_ablation_experiment(cfg: Config):
 def overfit_health_experiment(cfg: Config):
     """Check if each architecture can overfit on a single batch.
 
-    Forces ``train.overfit_batches`` and requires ``train.log_train_ranking``, since the check is read entirely off
+    Forces ``trainer.overfit_batches`` and requires ``train.log_train_ranking``, since the check is read entirely off
     ``train_avg_recall@K``. A healthy model drives ``train_avg_recall@K`` to ~1.0 on a batch it has memorised; failure
     is capacity or optimisation rather than data, and invalidates every downstream reading. Runs one seed and no
     baselines.
@@ -100,7 +131,7 @@ def overfit_health_experiment(cfg: Config):
     cfg = copy.deepcopy(cfg)
     cfg.train.experiment = "overfit_health"
     cfg.train.log_train_ranking = True
-    cfg.train.overfit_batches = max(1, cfg.train.overfit_batches)
+    cfg.trainer.overfit_batches = max(1, cfg.trainer.overfit_batches)
     cfg.train.train_seeds = cfg.train.train_seeds[:1]
 
     setup = setup_experiment(cfg, with_baselines=False)

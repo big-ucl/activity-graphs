@@ -13,7 +13,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(scope="module")
 def datamodule(load_or_skip) -> VisitDataModule:
     def build(cfg, root) -> VisitDataModule:
-        dm = VisitDataModule(cfg, HouseholdSplit(val_size=0.2, test_size=0.1), seed=42, batch_size=64)
+        dm = VisitDataModule(cfg, HouseholdSplit(val_size=0.2, test_size=0.1), seed=42, batch_size=64, num_workers=0)
         dm.prepare_data()
         dm.setup()
         return dm

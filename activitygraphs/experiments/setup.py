@@ -39,7 +39,6 @@ class ExperimentSetup:
     baseline_results: list[pl.DataFrame]
     home_distances: pl.DataFrame
     train_seeds: list[int]
-    num_epochs: int
     debug: bool
     wandb_params: WandBParams
 
@@ -55,9 +54,9 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     Configure logging, build the datamodule, loss, baselines, and the training settings shared by every model, and
     create the run directory with the config the run uses.
 
-    The architectures and their hyperparameters are read from ``cfg.models``. When ``cfg.train.overfit_batches > 0``,
+    The architectures and their hyperparameters are read from ``cfg.models``. When ``cfg.trainer.overfit_batches > 0``,
     every architecture's dropout and weight decay are set to 0 and its learning rate to ``cfg.train.overfit_lr``,
-    unless that is null. The split is drawn with ``cfg.train.split_seed`` and is never reseeded, so every model in
+    unless that is null, and ``cfg.trainer.max_epochs`` is set to ``cfg.train.overfit_epochs``. The split is drawn with ``cfg.train.split_seed`` and is never reseeded, so every model in
     every experiment is scored on the same test users.
 
     ``with_baselines=False`` skips fitting the frequency baselines.
@@ -72,28 +71,30 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     L.seed_everything(split_seed, workers=True)
     torch.set_float32_matmul_precision("high")
 
-    datamodule = VisitDataModule(cfg, split, seed=split_seed, batch_size=cfg.train.batch_size)
+    datamodule = VisitDataModule(
+        cfg,
+        split,
+        seed=split_seed,
+        batch_size=cfg.train.loader.batch_size,
+        num_workers=cfg.train.loader.num_workers,
+    )
     datamodule.prepare_data()
     datamodule.setup()
 
     train_dataset = datamodule.train_dataset
 
     home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
-    max_recall_k = cfg.train.max_recall_k
-    recall_ks = list(cfg.analysis.recall_curve_ks)
-    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, max_recall_k)
+    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, cfg.train.max_recall_k)
 
-    overfitting = cfg.train.overfit_batches > 0
+    overfitting = cfg.trainer.overfit_batches > 0
     models = dict(cfg.models)
 
     if overfitting:
-        epochs = cfg.train.overfit_epochs
+        cfg = cast(Config, OmegaConf.merge(cfg, {"trainer": {"max_epochs": cfg.train.overfit_epochs}}))
         overrides: dict = {"weight_decay": 0.0, "dropout": 0.0}
         if cfg.train.overfit_lr is not None:
             overrides["lr"] = cfg.train.overfit_lr
         models = {key: with_overrides(model, overrides) for key, model in models.items()}
-    else:
-        epochs = cfg.train.epochs
 
     if run_dir is not None:
         save_config(run_dir, cfg, models)
@@ -110,20 +111,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     )
 
     num_nodes = train_dataset.num_nodes
-    baseline_results = (
-        measure_baselines(
-            num_nodes,
-            datamodule,
-            loss,
-            max_recall_k,
-            recall_ks,
-            train_seeds,
-            wandb_params,
-            cfg.train.save_score_vectors,
-        )
-        if with_baselines
-        else []
-    )
+    baseline_results = measure_baselines(num_nodes, datamodule, loss, cfg, wandb_params) if with_baselines else []
 
     return ExperimentSetup(
         cfg=cfg,
@@ -134,7 +122,6 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         baseline_results=baseline_results,
         home_distances=home_distance_frame(datamodule),
         train_seeds=train_seeds,
-        num_epochs=epochs,
         debug=overfitting or cfg.train.debug,
         wandb_params=wandb_params,
     )

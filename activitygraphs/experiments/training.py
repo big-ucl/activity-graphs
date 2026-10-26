@@ -1,17 +1,20 @@
-"""Training orchestration: run_experiment, evaluate_baseline, and shared feature/weight helpers."""
+"""Training orchestration: train_and_evaluate_model, evaluate_baseline, and their result frames."""
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import lightning as L
 import polars as pl
 import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.config import Config
 from activitygraphs.datasets import VisitDataModule
+from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.ml.baselines.gravity import unscale_distances
 from activitygraphs.ml.callbacks import EpochMetricsCollector, OverfitDebugCallback
 from activitygraphs.ml.lightning_module import RankingModule
@@ -118,10 +121,8 @@ def evaluate_baseline(
     datamodule: VisitDataModule,
     loss: Loss,
     name: str,
-    max_recall_k: int,
-    recall_ks: Sequence[int],
-    wandb_params: WandBParams | None = None,
-    store_score_vectors: bool = False,
+    cfg: Config,
+    wandb_params: WandBParams,
     full_info: bool = False,
     run_tag: str | None = None,
 ) -> pl.DataFrame:
@@ -136,10 +137,9 @@ def evaluate_baseline(
         datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance, for the BCE and the monitored metric.
         name: Baseline name used for logging and in the returned frame.
-        max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
-        recall_ks: Rank cutoffs of the logged ``recall@k``.
-        wandb_params: parameters to configure WandB logging; None disables it.
-        store_score_vectors: retain each test user's full per-node score vector.
+        cfg: The config used by the experiment, read for the evaluation settings under ``train`` and the
+            ``recall@k`` cutoffs under ``analysis``.
+        wandb_params: parameters to configure WandB logging.
         full_info: Append each node's distance from home as the last feature column, for the distance baselines.
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
@@ -148,15 +148,16 @@ def evaluate_baseline(
         model=baseline,
         lr=0.0,
         loss=loss,
-        max_recall_k=max_recall_k,
-        recall_ks=recall_ks,
+        max_recall_k=cfg.train.max_recall_k,
+        recall_ks=list(cfg.analysis.recall_curve_ks),
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
-        store_score_vectors=store_score_vectors,
+        calibration_bins=cfg.train.calibration_bins,
+        store_score_vectors=cfg.train.save_score_vectors,
         full_info=full_info,
     )
 
-    if wandb_params and wandb_params.use_wandb:
+    if wandb_params.use_wandb:
         logger = WandbLogger(
             project=wandb_params.project,
             entity=wandb_params.entity,
@@ -181,7 +182,7 @@ def evaluate_baseline(
         (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
         (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
     finally:
-        if wandb_params and wandb_params.use_wandb:
+        if wandb_params.use_wandb:
             import wandb
 
             wandb.finish()
@@ -200,61 +201,30 @@ def evaluate_baseline(
 
 def train_and_evaluate_model(
     model: torch.nn.Module,
+    variant: Variant,
     datamodule: VisitDataModule,
     loss: Loss,
-    max_recall_k: int,
-    recall_ks: Sequence[int],
-    num_epochs: int = 10,
-    verbose: int = 1,
-    name: str | None = None,
-    lr: float = 0.01,
-    full_info: bool = False,
-    use_demographics: bool = True,
-    run_dir: Path | None = None,
-    fast_dev_run: bool = False,
-    overfit_batches: int = 0,
-    weight_decay: float = 1e-4,
-    schedule_lr: bool = False,
-    use_home_pe: bool = False,
-    store_score_vectors: bool = False,
-    log_train_ranking: bool = True,
-    hyperparams: dict | None = None,
-    compile_model: bool = True,
-    wandb_params: WandBParams | None = None,
-    debug: bool = False,
+    cfg: Config,
+    run_dir: Path | None,
+    wandb_params: WandBParams,
+    debug: bool,
     run_tag: str | None = None,
 ) -> pl.DataFrame:
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
-    Uses AdamW with weight decay 1e-4 and ReduceLROnPlateau scheduling.
-
     Args:
         model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
+        variant: The variant ``model`` was built from, giving its name, optimiser settings and input features.
         datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
-        max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
-        recall_ks: Rank cutoffs of the logged ``recall@k``.
-        num_epochs: Number of training epochs.
-        verbose: Non-zero enables the Lightning progress bar.
-        name: Experiment name used for logging and checkpoint directory.
-        lr: Initial learning rate.
-        full_info: Passed to ``extract_features`` to optionally include home/distance features.
-        use_demographics: concatenate the per-user demographics onto the node features.
+        cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, ``cfg.train`` the
+            training and evaluation settings, and ``analysis.recall_curve_ks`` the ``recall@k`` cutoffs.
         run_dir: Run directory. Checkpoints are written to ``checkpoints/<run name>/`` (``best.ckpt``,
             ``last.ckpt``) and the logs to ``logs/``. None disables both.
-        fast_dev_run: If True, runs 1 train batch and 1 val batch then exits; result DataFrame is empty.
-        overfit_batches: Number of batches to overfit on; 0 disables (normal training).
-        weight_decay: Weight decay parameter to AdamW, defaults to 1e-4.
-        schedule_lr: add a ReduceLROnPlateau scheduler to the optimizer, defaults to False.
-        use_home_pe: if true, add home-anchored positional encodings to features
-        store_score_vectors: retain each test user's full per-node score vector.
-        log_train_ranking: log ``train_avg_recall@K`` on the training batches.
-        compile_model: use PyTorch Dynamo compilation on the model
         wandb_params: parameters to configure WandB logging.
-        hyperparams: values to log alongside the run config, e.g. the architecture and the input flags of the variant.
-        debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training, defaults to False.
+        debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training.
         run_tag: Suffix distinguishing repeated runs of the same model (e.g. per training seed). It
-            qualifies the checkpoint directory and logger run name only; ``name`` still identifies
+            qualifies the checkpoint directory and logger run name only; the variant name still identifies
             the model in the returned frame, so repeated runs group together.
 
     Returns:
@@ -263,29 +233,33 @@ def train_and_evaluate_model(
         ``stage="test"`` row carrying the ``test_*`` metrics and one ``stage="test_user"`` row per
         test user carrying that user's ``r_precision``. Columns: ``name``, ``stage``,
         ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_id``, ``n_pos``, ``r_precision``;
-        cells absent for a row's stage are null. Empty when ``fast_dev_run`` is True.
+        cells absent for a row's stage are null. Empty on a ``fast_dev_run``.
     """
-    name = name or model.__class__.__name__
+    name = variant.name
     run_name = name if run_tag is None else f"{name}-{run_tag}"
+    train = cfg.train
 
     datamodule.setup()
 
     lit_model = RankingModule(
         model=model,
-        lr=lr,
+        lr=variant.model.lr,
         loss=loss,
-        full_info=full_info,
-        use_demographics=use_demographics,
-        max_recall_k=max_recall_k,
-        recall_ks=recall_ks,
-        weight_decay=weight_decay,
-        schedule_lr=schedule_lr,
+        full_info=variant.full_info,
+        use_demographics=variant.use_demographics,
+        max_recall_k=train.max_recall_k,
+        recall_ks=list(cfg.analysis.recall_curve_ks),
+        weight_decay=variant.model.weight_decay,
+        lr_scheduler=cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None,
         home_hop_distance=datamodule.train_dataset.home_hop_distance,
         is_home_idx=datamodule.train_dataset.is_home_col_idx,
-        use_home_pe=use_home_pe,
-        compile_model=compile_model,
-        store_score_vectors=store_score_vectors,
-        log_train_ranking=log_train_ranking,
+        use_home_pe=variant.use_home_pe,
+        home_pe_bins=train.home_pe.bins,
+        home_pe_max_hops=train.home_pe.max_hops,
+        calibration_bins=train.calibration_bins,
+        compile_model=train.compile,
+        store_score_vectors=train.save_score_vectors,
+        log_train_ranking=train.log_train_ranking,
     )
 
     # Build the callbacks
@@ -312,7 +286,7 @@ def train_and_evaluate_model(
 
     # Configure logging
 
-    if wandb_params and wandb_params.use_wandb:
+    if wandb_params.use_wandb:
         logger = WandbLogger(
             project=wandb_params.project,
             entity=wandb_params.entity,
@@ -326,31 +300,21 @@ def train_and_evaluate_model(
             "run_dir": wandb_params.run_dir,
             "model": name,
             "run_tag": run_tag,
-            **(hyperparams or {}),
+            **variant_hyperparams(variant),
         })
     else:
         logger = CSVLogger(save_dir=log_dir, name=run_name)
 
     # Create trainer and fit
 
-    trainer = L.Trainer(
-        max_epochs=num_epochs,
-        logger=logger,
-        callbacks=callbacks,
-        accelerator="auto",
-        gradient_clip_val=1.0,
-        enable_progress_bar=bool(verbose),
-        enable_model_summary=False,
-        fast_dev_run=fast_dev_run,
-        overfit_batches=overfit_batches,
-    )
+    trainer = L.Trainer(**cast(dict, OmegaConf.to_container(cfg.trainer)), logger=logger, callbacks=callbacks)
 
     trainer.fit(lit_model, datamodule=datamodule)
 
     # Process results
 
     try:
-        if fast_dev_run:
+        if cfg.trainer.fast_dev_run:
             return pl.DataFrame()
 
         if run_dir is not None:
@@ -370,7 +334,7 @@ def train_and_evaluate_model(
 
         return results
     finally:
-        if wandb_params and wandb_params.use_wandb:
+        if wandb_params.use_wandb:
             import wandb
 
             wandb.finish()

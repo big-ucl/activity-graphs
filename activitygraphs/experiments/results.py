@@ -27,11 +27,11 @@ def create_output_dir(cfg: Config, started: datetime) -> Path | None:
 
     Returns:
         A new numbered directory under ``cfg.paths.runs``, or an unnumbered one under ``cfg.paths.overfit`` when
-        ``cfg.train.overfit_batches > 0``. None on a ``fast_dev_run``, which records nothing.
+        ``cfg.trainer.overfit_batches > 0``. None on a ``fast_dev_run``, which records nothing.
     """
-    if cfg.train.fast_dev_run:
+    if cfg.trainer.fast_dev_run:
         return None
-    if cfg.train.overfit_batches > 0:
+    if cfg.trainer.overfit_batches > 0:
         return create_overfit_dir(Path(cfg.paths.overfit), cfg.data.name, started)
 
     return create_run_dir(Path(cfg.paths.runs), cfg.data.name, started)

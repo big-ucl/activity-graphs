@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import polars as pl
 import torch
 
+from activitygraphs.config import Config
 from activitygraphs.datasets import VisitDataModule
 from activitygraphs.experiments.training import WandBParams, evaluate_baseline
 from activitygraphs.ml.baselines import (
@@ -34,21 +35,21 @@ def measure_baselines(
     num_nodes,
     datamodule: VisitDataModule,
     loss: Loss,
-    max_recall_k: int,
-    recall_ks: list[int],
-    train_seeds: list[int],
+    cfg: Config,
     wandb_params: WandBParams,
-    store_score_vectors: bool = False,
 ):
     """Fit and evaluate the baselines: the frequency baselines, then the distance-decay ones, then HomeZoneMF.
 
     The closed-form baselines are fitted once and their frames carry a null ``seed``. ``HomeZoneMF`` is fitted by
-    stochastic optimisation, so it is refitted once per training seed and its frames carry that seed.
+    stochastic optimisation, so it is refitted once per training seed in ``cfg.train.train_seeds`` and its frames
+    carry that seed.
 
     Returns:
         One result frame per baseline, in order, then one per training seed for ``HomeZoneMF``.
     """
     datamodule.setup()
+    max_recall_k = cfg.train.max_recall_k
+    train_seeds = list(cfg.train.train_seeds)
     train_loader = datamodule.train_dataloader()
     val_loader = datamodule.val_dataloader()
     is_home_idx = datamodule.train_dataset.is_home_col_idx
@@ -76,10 +77,8 @@ def measure_baselines(
             datamodule,
             loss,
             spec.name,
-            max_recall_k=max_recall_k,
-            recall_ks=recall_ks,
-            wandb_params=wandb_params,
-            store_score_vectors=store_score_vectors,
+            cfg,
+            wandb_params,
             full_info=spec.full_info,
         ).with_columns(seed=pl.lit(None, dtype=pl.Int64))
         for spec in baselines
@@ -93,10 +92,8 @@ def measure_baselines(
                 datamodule,
                 loss,
                 "HomeZoneMF",
-                max_recall_k=max_recall_k,
-                recall_ks=recall_ks,
-                wandb_params=wandb_params,
-                store_score_vectors=store_score_vectors,
+                cfg,
+                wandb_params,
                 run_tag=f"seed{train_seed}" if len(train_seeds) > 1 else None,
             ).with_columns(seed=pl.lit(train_seed, dtype=pl.Int64))
         )

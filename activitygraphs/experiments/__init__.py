@@ -1,11 +1,11 @@
 """[Stage 6: dataset -> trained models -> results] This package runs the experiments ``train.experiment`` selects.
 
 It is split into the following modules:
-  - ``runners``: one function per experiment, each a list of variants trained beside the baselines.
+  - ``runners``: one function per experiment, each a list of variants trained beside the baselines, and the
+    per-seed training loop.
   - ``setup``: ``setup_experiment``, the split, loss, baselines, architectures and training settings an experiment's
     models share.
-  - ``variants``: ``Variant``, an architecture from ``cfg.models`` with its input features, ``build_model`` and the
-    per-seed training loop.
+  - ``variants``: ``Variant``, an architecture from ``cfg.models`` with its input features, and ``build_model``.
   - ``architectures``: ``BUILDERS``, the registry mapping a model config's ``architecture`` key to the builder of
     its model.
   - ``baselines``: fit and evaluate every baseline.
