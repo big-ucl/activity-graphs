@@ -1,7 +1,6 @@
 """Hydra entry points: ``main`` launches to the configured experiment, ``report_results`` analyses the results."""
 
 import hydra
-from hydra.core.config_store import ConfigStore
 
 from activitygraphs.analysis import print_report
 from activitygraphs.config import Config
@@ -12,9 +11,6 @@ from activitygraphs.experiments import (
     depth_sweep_experiment,
     overfit_health_experiment,
 )
-
-cs = ConfigStore.instance()
-cs.store(name="tpg_config", node=Config)
 
 EXPERIMENTS = {
     "comparison": comparison_experiment,
