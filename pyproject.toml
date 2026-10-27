@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "altair[all]>=5.5.0",
-    "city2graph>=0.3.0",
+    "city2graph>=1.0.1",
     "contextily>=1.6.2",
     "fastexcel>=0.14.0",
     "folium>=0.12",

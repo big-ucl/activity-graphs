@@ -60,7 +60,7 @@ notebooks = [
 [package.metadata]
 requires-dist = [
     { name = "altair", extras = ["all"], specifier = ">=5.5.0" },
-    { name = "city2graph", specifier = ">=0.3.0" },
+    { name = "city2graph", specifier = ">=1.0.1" },
     { name = "contextily", specifier = ">=1.6.2" },
     { name = "fastexcel", specifier = ">=0.14.0" },
     { name = "folium", specifier = ">=0.12" },
@@ -529,7 +529,7 @@ wheels = [
 
 [[package]]
 name = "city2graph"
-version = "0.3.1"
+version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "duckdb" },
@@ -538,15 +538,17 @@ dependencies = [
     { name = "libpysal" },
     { name = "momepy" },
     { name = "networkx" },
-    { name = "osmnx" },
+    { name = "numpy" },
     { name = "overturemaps" },
+    { name = "pandas" },
+    { name = "pyproj" },
     { name = "rustworkx" },
     { name = "scipy" },
     { name = "shapely" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/17/1df9b19e10a2784413d0604594b2b42db2cf31b3d528a677b6c24d465382/city2graph-0.3.1.tar.gz", hash = "sha256:3a27c2840f1356f9e8357c103466efd7b27c7aeeb9f794197a6103e0de6c3f37", size = 95427326, upload-time = "2026-03-21T23:33:48.352Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7c/24/32852b2d82e65539eeef2202dd1938eb2aadfcef03938dec9129e56a7e0c/city2graph-1.0.1.tar.gz", hash = "sha256:c1413316d05d49bb3b2a84dbc47c0ded23bc2931f0ccf0cc4037f90fc200538c", size = 434016, upload-time = "2026-10-22T19:50:46.527Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/35/0c2655ac86dd81c59477c11327354fe407b980f06291a9e24486668f9997/city2graph-0.3.1-py3-none-any.whl", hash = "sha256:787f2634dcbbd162220ca986bfa7e4768c273a0733958737b4ee551ed5b1b75c", size = 152033, upload-time = "2026-03-21T23:33:52.486Z" },
+    { url = "https://files.pythonhosted.org/packages/53/24/a5ee72349721cc54eeda8714400d9097aafa52e094871f9823b0228ec8bc/city2graph-1.0.1-py3-none-any.whl", hash = "sha256:3f3bf0986cfb019b32d363dcccd993b857c320c404fcf4581571a5a4c938e054", size = 202239, upload-time = "2026-10-22T19:50:45.199Z" },
 ]
 
 [[package]]
@@ -1650,20 +1652,21 @@ wheels = [
 
 [[package]]
 name = "momepy"
-version = "0.11.0"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "geopandas" },
     { name = "libpysal" },
     { name = "networkx" },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "pandas" },
     { name = "shapely" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bc/31/e5cd0b01ed021c306786bccebd4e8d06201cb297b22d128d7aa4f78add7a/momepy-0.11.0.tar.gz", hash = "sha256:4994794295b06449117ed07c8929d3109df0efdba03f647d889738c4d744835f", size = 31431528, upload-time = "2025-12-23T21:36:02.977Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/4c/3f584740e13a70b3e8df3ea6b6cc25d0b81647a0321f515efcfe06edcb20/momepy-1.0.0.tar.gz", hash = "sha256:7bc2289a4b2d97f2c1267a9ee318cf1c94998e7098d1c6ad6c662a01bc3d9fe6", size = 3514827, upload-time = "2026-07-02T10:53:29.199Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/cd/ec3a5a491da5c91da54625e116b5f86361a2f3d708720d59f182bd452c01/momepy-0.11.0-py3-none-any.whl", hash = "sha256:f150ada632e579d3e63f6a11b15c3de5c40658888dc72cb73556df07136027d2", size = 1740209, upload-time = "2025-12-23T21:36:01.286Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/74/d10191d77e8bb9350c5af095af192f237de74c5f62644ae998cc852936bf/momepy-1.0.0-py3-none-any.whl", hash = "sha256:daa81719f89acaefc52b791959f6fb41e646ec57b748c104e71fa23d0d5617be", size = 1691964, upload-time = "2026-07-02T10:53:27.47Z" },
 ]
 
 [[package]]
@@ -2174,23 +2177,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0d/ba/a23b82a0a8d0ed7bed4e5f5035aae751cad4ff6a1e8d2ecd14d8860f5929/orjson-3.11.9-cp314-cp314-win32.whl", hash = "sha256:e30ab17845bb9fa54ccf67fa4f9f5282652d54faa6d17452f47d0f369d038673", size = 131638, upload-time = "2026-05-06T15:11:03.696Z" },
     { url = "https://files.pythonhosted.org/packages/f3/c3/0c6798456bade745c75c452342dabacce5798196483e77e643be1f53877d/orjson-3.11.9-cp314-cp314-win_amd64.whl", hash = "sha256:32ef5f4283a3be81913947d19608eacb7c6608026851123790cd9cc8982af34b", size = 127078, upload-time = "2026-05-06T15:11:05.123Z" },
     { url = "https://files.pythonhosted.org/packages/16/21/5a3f1e8913103b703a436a5664238e5b965ec392b555fe68943ea3691e6b/orjson-3.11.9-cp314-cp314-win_arm64.whl", hash = "sha256:eebdbdeef0094e4f5aefa20dcd4eb2368ab5e7a3b4edea27f1e7b2892e009cf9", size = 126687, upload-time = "2026-05-06T15:11:06.602Z" },
-]
-
-[[package]]
-name = "osmnx"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "geopandas" },
-    { name = "networkx" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "requests" },
-    { name = "shapely" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/30/65083209545c8ca40f9d2fc76d39d4ef9153aa380c62881ed1971123990c/osmnx-2.1.0.tar.gz", hash = "sha256:0175ab8710bb973cb7cc76c33eeddd670d9d2f4b444da08a1080c470844add2b", size = 90147, upload-time = "2026-02-16T22:51:06.522Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/4d/ee50f0b6b4532d44c0db5415b7ad896a4d9651dcd7aa9f5729a25fc6f502/osmnx-2.1.0-py3-none-any.whl", hash = "sha256:9d6e7692321a4e40c5ca68ef8b85fbfb550244c4135fe9b55cfd4f810a5c8e2e", size = 104405, upload-time = "2026-02-16T22:51:05.386Z" },
 ]
 
 [[package]]
