@@ -36,7 +36,7 @@ USER_NODE_FEATURE_NAMES = ["is_home"]
 
 @dataclass(frozen=True)
 class SurveyTensors:
-    """Bundle of tensors used by ML pipeline: the (shared) PyG graph and the (per-user) tensors for a survey.
+    """The shared PyG graph and per-user tensors of a survey, with the survey ids of the users and nodes.
 
     Attributes:
         pyg_graph: The shared PyG graph, with node features ``x``, ``edge_index`` and ``edge_attr``.
@@ -45,6 +45,8 @@ class SurveyTensors:
         user_attributes: Per-user attributes, ``[n_users, n_attr]``.
         distances: Per-user distance from home, ``[n_users, n_nodes, 1]``.
         group_ids: Per-user group/hh-ids, ``[n_users]``.
+        user_ids: Survey ``user_id`` and ``hh_id`` of each user, one row per tensor row.
+        node_ids: Survey ``loc_id`` of each node, one row per graph node.
     """
 
     pyg_graph: pyg.data.Data
@@ -53,6 +55,8 @@ class SurveyTensors:
     user_attributes: torch.Tensor
     distances: torch.Tensor
     group_ids: torch.Tensor
+    user_ids: pl.DataFrame
+    node_ids: pl.DataFrame
 
 
 # =========================================
@@ -172,11 +176,33 @@ def build_group_ids(survey: SurveyData) -> torch.Tensor:
 # =========================================
 
 
+def build_user_ids(survey: SurveyData) -> pl.DataFrame:
+    """Return the survey ``user_id`` and ``hh_id`` of each user, in tensor row order."""
+    user_ids = survey.users_df.select("user_id", "hh_id")
+    assert user_ids["user_id"].equals(survey.user_ids)
+
+    return user_ids
+
+
+def build_node_ids(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+    """Return the survey ``loc_id`` of each graph node, in node order.
+
+    Raises:
+        ValueError: The graph's nodes are not the survey locations in ``loc_id`` order, the order of the per-user
+            tensors.
+    """
+    node_ids = pl.DataFrame({"loc_id": nodes_gdf.index.to_list()})
+    if not node_ids["loc_id"].equals(survey.locations_df["loc_id"]):
+        raise ValueError("The graph's nodes are not the survey locations in `loc_id` order.")
+
+    return node_ids
+
+
 def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gpd.GeoDataFrame) -> SurveyTensors:
     """Convert the graph and the survey into PyG and tensor form.
 
     Returns:
-        The shared PyG graph and the per-user tensors.
+        The shared PyG graph, the per-user tensors and the survey ids of the users and nodes.
     """
     user_node_features = build_home_indicator(survey)
     visit_labels = build_visit_labels(survey, list(Purpose))
@@ -202,4 +228,6 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         user_attributes=user_attributes,
         distances=distances,
         group_ids=hh_ids,
+        user_ids=build_user_ids(survey),
+        node_ids=build_node_ids(survey, nodes_gdf),
     )

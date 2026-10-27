@@ -1,25 +1,29 @@
 """This module contains VisitDataset, the ``load_dataset`` cache entry point, and the split/scaler cache fingerprints."""
 
 import hashlib
+import json
 from collections.abc import Callable
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from typing import cast
 
 import numpy as np
+import polars as pl
 import torch
 import torch_geometric as pyg
 from omegaconf import OmegaConf
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import shortest_path
 
-from activitygraphs.config import Config
+from activitygraphs.config import Config, DataConfig
 from activitygraphs.graph import load_graph
 from activitygraphs.surveys.registry import load_survey
 from activitygraphs.tensors import USER_NODE_FEATURE_NAMES, SurveyTensors, build_tensors
 from activitygraphs.utils import get_project_root
 
 type Fingerprint = dict
+
+FINGERPRINT_FILE = "fingerprint.json"
 
 
 def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
@@ -42,20 +46,35 @@ class VisitDataset(pyg.data.Dataset):
         "user_attributes.pt",
         "distances.pt",
         "group_ids.pt",
+        "user_ids.parquet",
+        "node_ids.parquet",
+        FINGERPRINT_FILE,
     ]
 
     def __init__(
         self,
         root: str,
-        tensors: SurveyTensors | None = None,
+        build: Callable[[], SurveyTensors] | None = None,
         transform: Callable | None = None,
         pre_transform: Callable | None = None,
         pre_filter: Callable | None = None,
     ):
-        self._tensors_in = tensors
+        """Load the cached tensors under ``root``, building and caching them first if any is missing.
+
+        Args:
+            root: Dataset directory; the tensors are cached in the ``processed`` subdirectory.
+            build: Returns the survey tensors, called only when the cache is incomplete. ``None`` for a caller that
+                only reads the cache.
+            transform: PyG transform applied to each item.
+            pre_transform: PyG transform applied once to the shared graph before caching.
+            pre_filter: PyG pre-filter, unused.
+
+        Raises:
+            ValueError: The cache is incomplete and no ``build`` is given.
+        """
+        self._build = build
 
         super().__init__(root, transform, pre_transform, pre_filter)
-        del self._tensors_in  # pyrefly: ignore[unsupported-delete]
 
         processed_dir = Path(self.processed_dir)
         self.pyg_graph: pyg.data.Data = torch.load(processed_dir / "pyg_graph.pt", weights_only=False)
@@ -64,6 +83,8 @@ class VisitDataset(pyg.data.Dataset):
         self.user_attributes: torch.Tensor = torch.load(processed_dir / "user_attributes.pt", weights_only=True)
         self.distances: torch.Tensor = torch.load(processed_dir / "distances.pt", weights_only=True)
         self.group_ids: torch.Tensor = torch.load(processed_dir / "group_ids.pt", weights_only=True)
+        self.user_ids: pl.DataFrame = pl.read_parquet(processed_dir / "user_ids.parquet")
+        self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / "node_ids.parquet")
 
         # Check that each user has one and only one home node
         home_counts = self.user_node_features[:, :, self.is_home_user_node_idx].sum(dim=1)
@@ -144,16 +165,17 @@ class VisitDataset(pyg.data.Dataset):
         pass
 
     def process(self):
-        """Apply the pre-transform to the graph and write all tensors to the cache."""
-        if self._tensors_in is None:
-            raise ValueError("First-time construction requires the survey tensors to be passed to init.")
+        """Build the survey tensors, apply the pre-transform to the graph and write everything to the cache."""
+        if self._build is None:
+            raise ValueError(f"The tensors at `{self.processed_dir}` are not cached and no `build` was given.")
 
-        graph = self._tensors_in.pyg_graph
-        unf = self._tensors_in.user_node_features
-        vl = self._tensors_in.visit_labels
-        attr = self._tensors_in.user_attributes
-        dist = self._tensors_in.distances
-        group_ids = self._tensors_in.group_ids
+        tensors = self._build()
+        graph = tensors.pyg_graph
+        unf = tensors.user_node_features
+        vl = tensors.visit_labels
+        attr = tensors.user_attributes
+        dist = tensors.distances
+        group_ids = tensors.group_ids
 
         num_unf_users, num_unf_nodes, _ = unf.shape
         num_vl_users, num_vl_nodes, num_vl_labels = vl.shape
@@ -175,6 +197,11 @@ class VisitDataset(pyg.data.Dataset):
             raise ValueError(f"visit_labels last dim must be 1, got {num_vl_labels}.")
         if num_di_feat != 1:
             raise ValueError(f"distances last dim must be 1, got {num_di_feat}.")
+        if tensors.user_ids.height != num_unf_users or tensors.node_ids.height != num_unf_nodes:
+            raise ValueError(
+                f"Id count mismatch: {tensors.user_ids.height} user ids for {num_unf_users} users, "
+                f"{tensors.node_ids.height} node ids for {num_unf_nodes} nodes."
+            )
 
         if self.pre_transform is not None:
             graph = self.pre_transform(graph)
@@ -186,6 +213,9 @@ class VisitDataset(pyg.data.Dataset):
         torch.save(attr, processed_dir / "user_attributes.pt")
         torch.save(dist, processed_dir / "distances.pt")
         torch.save(group_ids, processed_dir / "group_ids.pt")
+        tensors.user_ids.write_parquet(processed_dir / "user_ids.parquet")
+        tensors.node_ids.write_parquet(processed_dir / "node_ids.parquet")
+        (processed_dir / FINGERPRINT_FILE).write_text(json.dumps(tensors_fingerprint(tensors), indent=2))
 
     def len(self) -> int:
         """Return the number of users."""
@@ -241,38 +271,61 @@ def compute_home_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> np.nd
     return shortest_path(adjacency, method="D", unweighted=True, directed=False)
 
 
+def build_survey_tensors(cfg: DataConfig, project_root: Path) -> SurveyTensors:
+    """Return the tensors of the survey and graph described by ``cfg``, loading or building their caches."""
+    survey = load_survey(cfg, project_root).with_filter("zone")
+    nodes_gdf, edges_gdf = load_graph(survey, cfg, project_root)
+
+    return build_tensors(survey, nodes_gdf, edges_gdf)
+
+
 def load_dataset(
     cfg: Config,
     project_root: Path | None = None,
-    **build_kwargs,
+    **dataset_kwargs,
 ) -> VisitDataset:
-    """Construct an ``VisitDataset`` rooted at ``cfg.data.paths.tensors``."""
+    """Return the ``VisitDataset`` rooted at ``cfg.data.paths.tensors``, building its cache from the survey if needed."""
     project_root = get_project_root(project_root)
-    dataset_path = project_root / cfg.data.paths.tensors
+    build = partial(build_survey_tensors, cfg.data, project_root)
 
-    if not all((dataset_path / file).exists() for file in VisitDataset.PROCESSED_FILE_NAMES):
-        survey = load_survey(cfg.data, project_root).with_filter("zone")
-        nodes_gdf, edges_gdf = load_graph(survey, cfg.data, project_root)
-        tensors = build_tensors(survey, nodes_gdf, edges_gdf)
-
-        return VisitDataset(str(dataset_path), tensors, **build_kwargs)
-
-    return VisitDataset(root=str(dataset_path), **build_kwargs)
+    return VisitDataset(str(project_root / cfg.data.paths.tensors), build, **dataset_kwargs)
 
 
-def dataset_fingerprint(cfg: Config, dataset: VisitDataset) -> Fingerprint:
-    """Returns a fingerprint of the dataset for comparison with caches, based on the data config and dataset properties.
+# =========================================
+# Fingerprints
+# =========================================
 
-    Only ``cfg.data`` is hashed, so training hyperparameters do not invalidate the caches. Must be
-    called before ``apply_scalers``, which rewrites the feature tensors in place.
+
+def tensors_fingerprint(tensors: SurveyTensors) -> Fingerprint:
+    """Return the identity of ``tensors`` stored beside the cache: their shapes and a hash of the user and node ids."""
+    ids = tensors.user_ids.write_csv() + tensors.node_ids.write_csv()
+
+    return {
+        "n_users": tensors.user_attributes.shape[0],
+        "n_nodes": tensors.user_node_features.shape[1],
+        "n_user_node_cols": tensors.user_node_features.shape[-1],
+        "n_user_attribute_cols": tensors.user_attributes.shape[-1],
+        "n_groups": len(tensors.group_ids.unique()),
+        "ids": hashlib.blake2b(ids.encode(), digest_size=16).hexdigest(),
+    }
+
+
+def dataset_fingerprint(cfg: Config, tensors_fp: Fingerprint) -> Fingerprint:
+    """Return the fingerprint the split and scaler caches are checked against: ``tensors_fp`` and the data config.
+
+    Only ``cfg.data`` is hashed, so training hyperparameters do not invalidate the caches.
     """
     config_str = OmegaConf.to_yaml(cfg.data, resolve=True, sort_keys=True)
 
-    return {
-        "n_users": len(dataset),
-        "n_nodes": dataset.num_nodes,
-        "n_user_node_cols": int(dataset.user_node_features.shape[-1]),
-        "n_user_attribute_cols": int(dataset.user_attributes.shape[-1]),
-        "n_groups": len(dataset.group_ids.unique()),
-        "data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest(),
-    }
+    return tensors_fp | {"data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest()}
+
+
+def read_fingerprint(cfg: Config, project_root: Path) -> Fingerprint:
+    """Return the ``dataset_fingerprint`` of the cached tensors of ``cfg``, without loading them.
+
+    Raises:
+        FileNotFoundError: The tensors are not cached.
+    """
+    path = project_root / cfg.data.paths.tensors / "processed" / FINGERPRINT_FILE
+
+    return dataset_fingerprint(cfg, json.loads(path.read_text()))

@@ -7,6 +7,7 @@ dataset, scaling or feature-assembly path can be checked to leave them unchanged
 
 import datetime as dt
 import itertools
+import json
 from pathlib import Path
 
 import city2graph as c2g
@@ -19,8 +20,9 @@ import torch_geometric as pyg
 from shapely.geometry import box
 
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
+from activitygraphs.datasets import HouseholdSplit, datamodule
 from activitygraphs.datasets.datamodule import positional_encodings
-from activitygraphs.datasets.dataset import VisitDataset
+from activitygraphs.datasets.dataset import FINGERPRINT_FILE, VisitDataset, load_dataset
 from activitygraphs.datasets.scalers import apply_scalers, fit_scalers
 from activitygraphs.ml.lightning_module import extract_features
 from activitygraphs.schema import TensorSchema
@@ -141,7 +143,9 @@ def build_dataset(survey_name: str, root: Path) -> VisitDataset:
     survey_cls = CMAPSurvey if survey_name == "cmap" else NoDemographicsSurvey
     survey = survey_cls(zones, build_journeys(users, loc_ids), users).with_filter("zone")
 
-    return VisitDataset(str(root), build_tensors(survey, nodes_gdf, edges_gdf), pre_transform=positional_encodings())
+    tensors = build_tensors(survey, nodes_gdf, edges_gdf)
+
+    return VisitDataset(str(root), lambda: tensors, pre_transform=positional_encodings())
 
 
 def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
@@ -203,6 +207,42 @@ def test_the_shared_graph_is_undirected(tmp_path):
     assert pyg.utils.is_undirected(dataset.edge_index, num_nodes=dataset.num_nodes)
     assert dataset.edge_index.size(1) == 2 * len(edges_gdf)
     assert dataset.pyg_graph.random_walk_pe.abs().sum() > 0
+
+
+def test_the_cache_carries_the_survey_ids_and_the_fingerprint(tmp_path):
+    dataset = build_dataset("cmap", tmp_path)
+    zones = build_zones()
+    users = build_users(zones["loc_id"].tolist())
+
+    assert dataset.user_ids.equals(users.sort("user_id").select("user_id", "hh_id"))
+    assert dataset.node_ids["loc_id"].to_list() == zones["loc_id"].tolist()
+
+    fingerprint = json.loads((Path(dataset.processed_dir) / FINGERPRINT_FILE).read_text())
+    assert fingerprint["n_users"] == NUM_USERS
+    assert fingerprint["n_groups"] == NUM_HOUSEHOLDS
+
+
+def test_reading_an_uncached_dataset_without_a_builder_raises(tmp_path):
+    with pytest.raises(ValueError, match="no `build` was given"):
+        VisitDataset(str(tmp_path))
+
+
+def test_prepare_splits_loads_the_dataset_only_while_a_cache_is_stale(tmp_path, compose_config, monkeypatch):
+    cfg = compose_config("data=cmap")
+    build_dataset("cmap", tmp_path / cfg.data.paths.tensors)
+    loads = []
+
+    def counting_load_dataset(*args, **kwargs):
+        loads.append(args)
+        return load_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(datamodule, "load_dataset", counting_load_dataset)
+    split = HouseholdSplit(val_size=0.2, test_size=0.2)
+
+    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+
+    assert len(loads) == 1
 
 
 def test_snapshot_covers_every_flag_combination(snapshot):

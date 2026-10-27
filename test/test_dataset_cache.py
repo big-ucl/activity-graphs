@@ -3,40 +3,66 @@
 import json
 from dataclasses import dataclass
 
+import polars as pl
 import pytest
 import torch
+import torch_geometric as pyg
 from omegaconf import OmegaConf
 
-from activitygraphs.datasets.dataset import dataset_fingerprint
+from activitygraphs.datasets.dataset import (
+    FINGERPRINT_FILE,
+    Fingerprint,
+    dataset_fingerprint,
+    read_fingerprint,
+    tensors_fingerprint,
+)
 from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
+from activitygraphs.tensors import SurveyTensors
 
 
 @dataclass
 class FakeDataset:
-    """Minimal stand-in exposing only what ``dataset_fingerprint`` and ``load_split_indices`` read."""
+    """Minimal stand-in exposing only what ``load_split_indices`` reads, beside the tensors it stands for."""
 
-    user_node_features: torch.Tensor
-    user_attributes: torch.Tensor
-    num_nodes: int
-    group_ids: torch.Tensor
+    tensors: SurveyTensors
+
+    @property
+    def group_ids(self) -> torch.Tensor:
+        return self.tensors.group_ids
 
     def __len__(self) -> int:
-        return self.user_attributes.shape[0]
+        return self.tensors.user_attributes.shape[0]
 
 
-def make_dataset(n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_per_group: int = 1) -> FakeDataset:
+def make_dataset(
+    n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_per_group: int = 1, user_id_prefix: str = "u"
+) -> FakeDataset:
     """Build a fake dataset whose users are laid out in consecutive groups of ``users_per_group``.
 
     ``users_per_group=1`` reproduces the ungrouped case (TPG, where ``hh_id`` is ``user_id``).
     """
     group_ids = torch.arange(n_users) // users_per_group
+    user_ids = pl.DataFrame({
+        "user_id": [f"{user_id_prefix}{i}" for i in range(n_users)],
+        "hh_id": [f"h{g}" for g in group_ids.tolist()],
+    })
 
     return FakeDataset(
-        user_node_features=torch.zeros((n_users, n_nodes, 4)),
-        user_attributes=torch.zeros((n_users, n_demo)),
-        num_nodes=n_nodes,
-        group_ids=group_ids,
+        SurveyTensors(
+            pyg_graph=pyg.data.Data(num_nodes=n_nodes),
+            user_node_features=torch.zeros((n_users, n_nodes, 4)),
+            visit_labels=torch.zeros((n_users, n_nodes, 1)),
+            user_attributes=torch.zeros((n_users, n_demo)),
+            distances=torch.zeros((n_users, n_nodes, 1)),
+            group_ids=group_ids,
+            user_ids=user_ids,
+            node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),
+        )
     )
+
+
+def fingerprint_of(cfg, dataset: FakeDataset) -> Fingerprint:
+    return dataset_fingerprint(cfg, tensors_fingerprint(dataset.tensors))
 
 
 def make_cfg(name: str = "TPG", epochs: int = 50):
@@ -60,28 +86,44 @@ def cfg():
 class TestDatasetFingerprint:
     def test_is_stable_across_calls(self, cfg):
         dataset = make_dataset()
-        assert dataset_fingerprint(cfg, dataset) == dataset_fingerprint(cfg, dataset)
+        assert fingerprint_of(cfg, dataset) == fingerprint_of(cfg, dataset)
 
     def test_detects_a_changed_user_count(self, cfg):
-        assert dataset_fingerprint(cfg, make_dataset(n_users=40)) != dataset_fingerprint(cfg, make_dataset(n_users=41))
+        assert fingerprint_of(cfg, make_dataset(n_users=40)) != fingerprint_of(cfg, make_dataset(n_users=41))
 
     def test_detects_a_changed_node_universe(self, cfg):
-        assert dataset_fingerprint(cfg, make_dataset(n_nodes=12)) != dataset_fingerprint(
-            cfg, make_dataset(n_nodes=2448)
-        )
+        assert fingerprint_of(cfg, make_dataset(n_nodes=12)) != fingerprint_of(cfg, make_dataset(n_nodes=2448))
 
     def test_detects_a_changed_demographic_width(self, cfg):
         # The case that would otherwise surface as an sklearn feature-count mismatch inside apply_scalers.
-        assert dataset_fingerprint(cfg, make_dataset(n_demo=5)) != dataset_fingerprint(cfg, make_dataset(n_demo=9))
+        assert fingerprint_of(cfg, make_dataset(n_demo=5)) != fingerprint_of(cfg, make_dataset(n_demo=9))
 
     def test_detects_a_changed_data_config(self):
         dataset = make_dataset()
-        assert dataset_fingerprint(make_cfg(name="cmap"), dataset) != dataset_fingerprint(make_cfg(), dataset)
+        assert fingerprint_of(make_cfg(name="cmap"), dataset) != fingerprint_of(make_cfg(), dataset)
 
     def test_ignores_training_hyperparameters(self):
         # Only cfg.data is hashed: an epochs/loss override must not invalidate the caches.
         dataset = make_dataset()
-        assert dataset_fingerprint(make_cfg(epochs=500), dataset) == dataset_fingerprint(make_cfg(epochs=50), dataset)
+        assert fingerprint_of(make_cfg(epochs=500), dataset) == fingerprint_of(make_cfg(epochs=50), dataset)
+
+    def test_detects_changed_ids_at_equal_counts(self, cfg):
+        # A cohort change that keeps every count must still invalidate the cached row indices.
+        assert fingerprint_of(cfg, make_dataset(user_id_prefix="u")) != fingerprint_of(
+            cfg, make_dataset(user_id_prefix="v")
+        )
+
+    def test_is_read_back_from_the_file_beside_the_tensors(self, tmp_path, cfg):
+        dataset = make_dataset()
+        processed = tmp_path / cfg.data.paths.tensors / "processed"
+        processed.mkdir(parents=True)
+        (processed / FINGERPRINT_FILE).write_text(json.dumps(tensors_fingerprint(dataset.tensors)))
+
+        assert read_fingerprint(cfg, tmp_path) == fingerprint_of(cfg, dataset)
+
+    def test_reading_an_uncached_fingerprint_raises(self, tmp_path, cfg):
+        with pytest.raises(FileNotFoundError):
+            read_fingerprint(cfg, tmp_path)
 
     def test_resolves_interpolations(self, cfg):
         # Renaming the dataset moves every interpolated path, so the digest must not hash a raw "${..name}".
@@ -92,7 +134,7 @@ class TestSplitIndicesCache:
     def test_reuses_a_matching_cache(self, tmp_path, cfg):
         dataset = make_dataset()
         cache = tmp_path / "splits_42_val0.2_test0.1.json"
-        fingerprint = dataset_fingerprint(cfg, dataset)
+        fingerprint = fingerprint_of(cfg, dataset)
 
         first = load_split_indices(dataset, SPLIT, 42, fingerprint, cache_path=cache)
         second = load_split_indices(dataset, SPLIT, 42, fingerprint, cache_path=cache)
@@ -103,20 +145,20 @@ class TestSplitIndicesCache:
     def test_re_splits_when_the_dataset_changed(self, tmp_path, cfg):
         cache = tmp_path / "splits_42_val0.2_test0.1.json"
         old = make_dataset(n_users=40)
-        load_split_indices(old, SPLIT, 42, dataset_fingerprint(cfg, old), cache_path=cache)
+        load_split_indices(old, SPLIT, 42, fingerprint_of(cfg, old), cache_path=cache)
 
         new = make_dataset(n_users=60)
-        train, val, test = load_split_indices(new, SPLIT, 42, dataset_fingerprint(cfg, new), cache_path=cache)
+        train, val, test = load_split_indices(new, SPLIT, 42, fingerprint_of(cfg, new), cache_path=cache)
 
         assert sorted(train + val + test) == list(range(60))
 
     def test_rebuilt_cache_is_reused_on_the_next_load(self, tmp_path, cfg):
         cache = tmp_path / "splits_42_val0.2_test0.1.json"
         old = make_dataset(n_users=40)
-        load_split_indices(old, SPLIT, 42, dataset_fingerprint(cfg, old), cache_path=cache)
+        load_split_indices(old, SPLIT, 42, fingerprint_of(cfg, old), cache_path=cache)
 
         new = make_dataset(n_users=60)
-        new_fingerprint = dataset_fingerprint(cfg, new)
+        new_fingerprint = fingerprint_of(cfg, new)
         rebuilt = load_split_indices(new, SPLIT, 42, new_fingerprint, cache_path=cache)
 
         assert load_split_indices(new, SPLIT, 42, new_fingerprint, cache_path=cache) == rebuilt
@@ -124,7 +166,7 @@ class TestSplitIndicesCache:
     def test_split_is_unchanged_by_fingerprinting(self, tmp_path, cfg):
         # The existing caches are deleted when this lands; the rebuilt split must reproduce the old one.
         dataset = make_dataset()
-        fingerprint = dataset_fingerprint(cfg, dataset)
+        fingerprint = fingerprint_of(cfg, dataset)
         cached = load_split_indices(dataset, SPLIT, 42, fingerprint, cache_path=tmp_path / "splits.json")
         uncached = load_split_indices(dataset, SPLIT, 42, fingerprint)
 
@@ -132,7 +174,7 @@ class TestSplitIndicesCache:
 
     def test_detects_a_changed_grouping(self, cfg):
         # An ungrouped cache must not be silently reused for a grouped run, and vice versa.
-        assert dataset_fingerprint(cfg, make_dataset(users_per_group=1)) != dataset_fingerprint(
+        assert fingerprint_of(cfg, make_dataset(users_per_group=1)) != fingerprint_of(
             cfg, make_dataset(users_per_group=2)
         )
 
@@ -141,7 +183,7 @@ class TestReadSplitIndices:
     def test_reads_the_split_load_split_indices_cached(self, tmp_path, cfg):
         dataset = make_dataset()
         cache = tmp_path / "splits.json"
-        fingerprint = dataset_fingerprint(cfg, dataset)
+        fingerprint = fingerprint_of(cfg, dataset)
         cached = load_split_indices(dataset, SPLIT, 42, fingerprint, cache_path=cache)
 
         assert read_split_indices(cache, fingerprint) == cached
@@ -149,21 +191,21 @@ class TestReadSplitIndices:
     def test_raises_when_the_dataset_changed(self, tmp_path, cfg):
         cache = tmp_path / "splits.json"
         old = make_dataset(n_users=40)
-        load_split_indices(old, SPLIT, 42, dataset_fingerprint(cfg, old), cache_path=cache)
+        load_split_indices(old, SPLIT, 42, fingerprint_of(cfg, old), cache_path=cache)
 
         with pytest.raises(ValueError, match="fingerprint"):
-            read_split_indices(cache, dataset_fingerprint(cfg, make_dataset(n_users=60)))
+            read_split_indices(cache, fingerprint_of(cfg, make_dataset(n_users=60)))
 
     def test_raises_when_nothing_is_cached(self, tmp_path, cfg):
         with pytest.raises(FileNotFoundError):
-            read_split_indices(tmp_path / "splits.json", dataset_fingerprint(cfg, make_dataset()))
+            read_split_indices(tmp_path / "splits.json", fingerprint_of(cfg, make_dataset()))
 
 
 class TestGroupedSplit:
     @pytest.mark.parametrize("users_per_group", [1, 2, 5])
     def test_splits_partition_every_user(self, users_per_group, cfg):
         dataset = make_dataset(n_users=60, users_per_group=users_per_group)
-        train, val, test = load_split_indices(dataset, SPLIT, 42, dataset_fingerprint(cfg, dataset))
+        train, val, test = load_split_indices(dataset, SPLIT, 42, fingerprint_of(cfg, dataset))
 
         assert sorted(train + val + test) == list(range(60))
 
@@ -172,7 +214,7 @@ class TestGroupedSplit:
         # The leak the household-grouped split exists to prevent: co-residents share a home tract
         # and overlapping visit sets, so a household in both train and test leaks home conditioning.
         dataset = make_dataset(n_users=60, users_per_group=users_per_group)
-        train, val, test = load_split_indices(dataset, SPLIT, 42, dataset_fingerprint(cfg, dataset))
+        train, val, test = load_split_indices(dataset, SPLIT, 42, fingerprint_of(cfg, dataset))
 
         groups = {
             name: set(dataset.group_ids[idx].tolist())
@@ -187,7 +229,7 @@ class TestGroupedSplit:
         # Results are reported as mean +- sd over train seeds, so the split must be a function of
         # the split seed alone, not of the order group ids happened to be built in.
         dataset = make_dataset(n_users=60, users_per_group=2)
-        fingerprint = dataset_fingerprint(cfg, dataset)
+        fingerprint = fingerprint_of(cfg, dataset)
 
         assert load_split_indices(dataset, SPLIT, 42, fingerprint) == load_split_indices(
             dataset, SPLIT, 42, fingerprint
@@ -195,14 +237,14 @@ class TestGroupedSplit:
 
     def test_different_seeds_give_different_splits(self, cfg):
         dataset = make_dataset(n_users=60, users_per_group=2)
-        fingerprint = dataset_fingerprint(cfg, dataset)
+        fingerprint = fingerprint_of(cfg, dataset)
 
         assert load_split_indices(dataset, SPLIT, 42, fingerprint) != load_split_indices(dataset, SPLIT, 7, fingerprint)
 
     def test_splits_are_roughly_the_requested_sizes(self, cfg):
         # Grouping quantises the split, so only assert the sizes are in the right neighbourhood.
         dataset = make_dataset(n_users=600, users_per_group=2)
-        train, val, test = load_split_indices(dataset, SPLIT, 42, dataset_fingerprint(cfg, dataset))
+        train, val, test = load_split_indices(dataset, SPLIT, 42, fingerprint_of(cfg, dataset))
 
         assert len(test) == pytest.approx(60, abs=10)
         assert len(val) == pytest.approx(120, abs=10)
@@ -212,6 +254,6 @@ class TestGroupedSplit:
         # GroupShuffleSplit returns numpy arrays; the cache write must not choke on them.
         dataset = make_dataset(n_users=60, users_per_group=2)
         cache = tmp_path / "splits.json"
-        load_split_indices(dataset, SPLIT, 42, dataset_fingerprint(cfg, dataset), cache_path=cache)
+        load_split_indices(dataset, SPLIT, 42, fingerprint_of(cfg, dataset), cache_path=cache)
 
         assert json.loads(cache.read_text())["train"]

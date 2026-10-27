@@ -10,7 +10,7 @@ import torch_geometric as pyg
 import torch_geometric.transforms as T
 
 from activitygraphs.config import Config
-from activitygraphs.datasets.dataset import VisitDataset, dataset_fingerprint, load_dataset
+from activitygraphs.datasets.dataset import Fingerprint, VisitDataset, load_dataset, read_fingerprint
 from activitygraphs.datasets.scalers import FittedScalers, apply_scalers, fit_scalers
 from activitygraphs.datasets.splits import SplitStrategy, load_split_indices, read_split_indices
 from activitygraphs.utils import get_project_root
@@ -38,20 +38,37 @@ def prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: P
     project_root = get_project_root(project_root)
     splits_cache, scalers_cache = split_cache_paths(cfg, split, seed, project_root)
 
-    dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
-    fingerprint = dataset_fingerprint(cfg, dataset)
+    dataset = None
+    try:
+        fingerprint = read_fingerprint(cfg, project_root)
+    except FileNotFoundError:
+        dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
+        fingerprint = read_fingerprint(cfg, project_root)
+
+    if _caches_match(splits_cache, scalers_cache, fingerprint):
+        return
+
+    if dataset is None:
+        dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
 
     train_idx, _, _ = load_split_indices(dataset, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
+    scalers = fit_scalers(
+        dataset, train_idx, exclude_user_node_cols=[dataset.is_home_user_node_idx], fingerprint=fingerprint
+    )
+    scalers.save(scalers_cache)
 
-    scalers = None
-    if scalers_cache.exists():
-        scalers = FittedScalers.read(scalers_cache)
 
-    if scalers is None or scalers.fingerprint != fingerprint:
-        scalers = fit_scalers(
-            dataset, train_idx, exclude_user_node_cols=[dataset.is_home_user_node_idx], fingerprint=fingerprint
-        )
-        scalers.save(scalers_cache)
+def _caches_match(splits_cache: Path, scalers_cache: Path, fingerprint: Fingerprint) -> bool:
+    """Return whether the split indices and scalers are both cached for the dataset ``fingerprint``."""
+    if not (splits_cache.exists() and scalers_cache.exists()):
+        return False
+
+    try:
+        read_split_indices(splits_cache, fingerprint)
+    except ValueError:
+        return False
+
+    return FittedScalers.read(scalers_cache).fingerprint == fingerprint
 
 
 def read_splits(
@@ -71,7 +88,7 @@ def read_splits(
     splits_cache, scalers_cache = split_cache_paths(cfg, split, seed, project_root)
 
     dataset = VisitDataset(root=str(project_root / cfg.data.paths.tensors), pre_transform=positional_encodings())
-    fingerprint = dataset_fingerprint(cfg, dataset)
+    fingerprint = read_fingerprint(cfg, project_root)
 
     train_idx, val_idx, test_idx = read_split_indices(splits_cache, fingerprint)
 
@@ -90,7 +107,7 @@ def read_splits(
 
 
 def _compute_home_coverage(train_dataset: VisitDataset, test_dataset: VisitDataset) -> pl.DataFrame:
-    """Compute each _test_ user's home node and whether any training user also has a home there."""
+    """Compute each _test_ user's survey ``user_id``, home node and whether any training user also has a home there."""
     # Index of the home node of every user in the survey: [n_users].
     home_node_idx = train_dataset.user_node_features[:, :, train_dataset.is_home_user_node_idx].argmax(dim=1)
 
@@ -100,6 +117,7 @@ def _compute_home_coverage(train_dataset: VisitDataset, test_dataset: VisitDatas
 
     return pl.DataFrame({
         "user_id": test_idx.tolist(),
+        "survey_user_id": train_dataset.user_ids["user_id"].gather(test_idx.numpy()),
         "home_node": home_node_idx[test_idx].tolist(),
     }).with_columns(home_seen_in_train=pl.col("home_node").is_in(train_home_idx))
 
@@ -144,9 +162,6 @@ class VisitDataModule(L.LightningDataModule):
 
     def prepare_data(self) -> None:
         """Build and cache the dataset tensors, split indices and scalers that are missing or stale."""
-        if self._train_dataset is not None:
-            return
-
         prepare_splits(self.cfg, self.split, self.seed, self.project_root)
 
     def setup(self, stage: str | None = None) -> None:

@@ -68,7 +68,7 @@ def _(
 
     dataset_path = project_root / cfg.data.paths.tensors
 
-    dataset = VisitDataset(dataset_path, survey_tensors)
+    dataset = VisitDataset(str(dataset_path), lambda: survey_tensors)
     return dataset, edges_gdf, nodes_gdf, survey, tables
 
 
