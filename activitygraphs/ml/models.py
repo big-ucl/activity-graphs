@@ -1,4 +1,4 @@
-"""PyTorch GNN architectures: GATSkip (primary), GraphTransformer, NodeMLP, and helpers."""
+"""PyTorch GNN architectures: GAT (primary), GraphTransformer, NodeMLP, and helpers."""
 
 import functools
 import itertools
@@ -9,10 +9,11 @@ import torch.nn.functional as F
 import torch_geometric as pyg
 from torch import Tensor
 from torch.nn import Module
-from torch_geometric.nn.conv import GATConv, GCNConv, GPSConv
+from torch_geometric.nn.conv import GATConv, GATv2Conv, GPSConv
 
 EDGE_ATTR_CONVS = [
     GATConv,
+    GATv2Conv,
 ]
 
 
@@ -57,8 +58,8 @@ def build_module_list(
     return modules
 
 
-class GCN(torch.nn.Module):
-    """Multi-layer graph convolutional network with optional residual connections and leaky-ReLU activations."""
+class ConvStack(torch.nn.Module):
+    """Stack of message-passing layers with optional pre-norm, identity residuals and leaky-ReLU activations."""
 
     def __init__(
         self,
@@ -66,13 +67,12 @@ class GCN(torch.nn.Module):
         in_channels: int,
         hidden_channels: int,
         out_channels: int,
+        conv: Callable[..., pyg.nn.conv.MessagePassing],
         dropout: float = 0.2,
         residuals: bool = False,
-        conv: Callable[..., pyg.nn.conv.MessagePassing] | None = None,
+        norm: Callable[[int], Module] | None = None,
     ):
         super().__init__()
-
-        conv = GCNConv if conv is None else conv
 
         if residuals and in_channels != hidden_channels:
             raise ValueError("Number of in channels must match number of hidden channels")
@@ -81,29 +81,23 @@ class GCN(torch.nn.Module):
         self.dropout = dropout
         self.convs = build_module_list(conv, num_layers, in_channels, out_channels, hidden_channels)
 
+        widths = [in_channels] + [hidden_channels] * (num_layers - 1)
+        self.norms = torch.nn.ModuleList(torch.nn.Identity() if norm is None else norm(width) for width in widths)
+
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
     ) -> torch.Tensor:
         """Return one output per node, shape ``(num_nodes, out_channels)``."""
-        # Single layer case
-        if len(self.convs) == 1:
-            return self.convolve(self.convs[0], x, edge_index, edge_attr)
+        last = len(self.convs) - 1
 
-        # Multi layer case
-        x_res = x
-        x = self.convolve(self.convs[0], x, edge_index, edge_attr)
-        x = x + x_res if self.residuals else x
-        x = F.leaky_relu(x)
-
-        for conv in self.convs[1:-1]:
+        for i, (conv, norm) in enumerate(zip(self.convs, self.norms, strict=True)):
             x_res = x
-            x = F.dropout(x, p=self.dropout, training=self.training)
-            x = self.convolve(conv, x, edge_index, edge_attr)
-            x = x + x_res if self.residuals else x
-            x = F.leaky_relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training) if i > 0 else x
+            x = self.convolve(conv, norm(x), edge_index, edge_attr)
 
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.convolve(self.convs[-1], x, edge_index, edge_attr)
+            if i < last:
+                x = x + x_res if self.residuals else x
+                x = F.leaky_relu(x)
 
         return x
 
@@ -148,8 +142,8 @@ class NodeMLP(torch.nn.Module):
         return x
 
 
-class GCNSkip(torch.nn.Module):
-    """GCN with a skip connection that concatenates raw input features to the post-GCN representation."""
+class GAT(torch.nn.Module):
+    """Primary model: GATv2 message passing between node-wise MLPs, with the raw input concatenated to the post-MLP."""
 
     def __init__(
         self,
@@ -159,16 +153,23 @@ class GCNSkip(torch.nn.Module):
         in_channels: int,
         hidden_channels: int,
         out_channels: int,
+        edge_dim: int,
         dropout: float = 0.2,
         residuals: bool = False,
-        conv: Callable[..., pyg.nn.conv.MessagePassing] | None = None,
+        norm: Callable[[int], Module] | None = None,
     ):
         super().__init__()
 
-        self.dropout = dropout
         self.pre_lin = NodeMLP(num_pre_layers, in_channels, hidden_channels, hidden_channels, dropout)
-        self.convs = GCN(
-            num_gcn_layers, hidden_channels, hidden_channels, hidden_channels, dropout, residuals=residuals, conv=conv
+        self.convs = ConvStack(
+            num_gcn_layers,
+            hidden_channels,
+            hidden_channels,
+            hidden_channels,
+            conv=functools.partial(GATv2Conv, edge_dim=edge_dim),
+            dropout=dropout,
+            residuals=residuals,
+            norm=norm,
         )
         self.post_lin = NodeMLP(num_post_layers, hidden_channels + in_channels, hidden_channels, out_channels, dropout)
 
@@ -185,34 +186,6 @@ class GCNSkip(torch.nn.Module):
         x = self.post_lin(x, edge_index)
 
         return x
-
-
-class GATSkip(GCNSkip):
-    """Primary model: ``GCNSkip`` with GAT convolutions and edge features. Preferred over ``GCNSkip``."""
-
-    def __init__(
-        self,
-        num_pre_layers: int,
-        num_gcn_layers: int,
-        num_post_layers: int,
-        in_channels: int,
-        hidden_channels: int,
-        out_channels: int,
-        edge_dim: int,
-        dropout: float = 0.2,
-        residuals: bool = False,
-    ):
-        super().__init__(
-            num_pre_layers,
-            num_gcn_layers,
-            num_post_layers,
-            in_channels,
-            hidden_channels,
-            out_channels,
-            dropout,
-            residuals,
-            conv=functools.partial(GATConv, edge_dim=edge_dim),
-        )
 
 
 class GPSLayer(torch.nn.Module):

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 
 from activitygraphs.config import GATConfig, GPSConfig, MLPConfig, ModelConfig
-from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
+from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
 
 
 @dataclass(frozen=True)
@@ -35,9 +35,22 @@ def build_mlp(config: MLPConfig, sizes: ModelSizes) -> NodeMLP:
     )
 
 
-def build_gat(config: GATConfig, sizes: ModelSizes) -> GATSkip:
-    """Instantiate a ``GATSkip`` from ``config``, sized by ``sizes``."""
-    return GATSkip(
+NORMS: dict[str, Callable[[int], torch.nn.Module]] = {
+    "layer_norm": torch.nn.LayerNorm,
+    "batch_norm": torch.nn.BatchNorm1d,
+}
+
+
+def build_gat(config: GATConfig, sizes: ModelSizes) -> GAT:
+    """Instantiate a ``GAT`` from ``config``, sized by ``sizes``.
+
+    Raises:
+        KeyError: If ``config.norm`` is neither None nor a key of ``NORMS``.
+    """
+    if config.norm is not None and config.norm not in NORMS:
+        raise KeyError(f"No normalisation registered under {config.norm!r}, expected one of {sorted(NORMS)}")
+
+    return GAT(
         num_pre_layers=config.num_pre_layers,
         num_gcn_layers=config.num_gcn_layers,
         num_post_layers=config.num_post_layers,
@@ -47,6 +60,7 @@ def build_gat(config: GATConfig, sizes: ModelSizes) -> GATSkip:
         edge_dim=sizes.edge_dim,
         dropout=config.dropout,
         residuals=config.residuals,
+        norm=None if config.norm is None else NORMS[config.norm],
     )
 
 

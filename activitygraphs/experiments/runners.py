@@ -46,7 +46,7 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
 
 
 def comparison_experiment(cfg: Config):
-    """Compare the prediction performance of MLP, GATSkip, and GPS variants plus baselines.
+    """Compare the prediction performance of MLP, GAT, and GPS variants plus baselines.
 
     Every model is trained once per seed in ``cfg.train.train_seeds``; the baselines are deterministic,
     so they are evaluated once.
@@ -78,7 +78,7 @@ def comparison_experiment(cfg: Config):
 
 
 def depth_sweep_experiment(cfg: Config):
-    """Sweep number of message passing layers of the GATSkip (with HPE and home distance) over ``cfg.experiment.depths``."""
+    """Sweep number of message passing layers of the GAT (with HPE and home distance) over ``cfg.experiment.depths``."""
     setup = setup_experiment(cfg)
     gat = setup.models["gat"]
 

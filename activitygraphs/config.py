@@ -309,10 +309,10 @@ class ExperimentConfig:
 
 @dataclass
 class DepthSweepConfig(ExperimentConfig):
-    """Config for the GATSkip depth sweep.
+    """Config for the GAT depth sweep.
 
     Attributes:
-        depths: GATSkip message-passing depths swept.
+        depths: GAT message-passing depths swept.
     """
 
     depths: list[int]
@@ -352,19 +352,21 @@ class MLPConfig(ModelConfig):
 
 @dataclass
 class GATConfig(ModelConfig):
-    """Config for the GAT with skip connections (``GATSkip``).
+    """Config for the GATv2 with skip connections (``GAT``).
 
     Attributes:
         num_pre_layers: Number of linear layers before message passing.
         num_gcn_layers: Number of message-passing layers.
         num_post_layers: Number of linear layers after message passing.
         residuals: Add residual connections around the message-passing layers.
+        norm: Normalisation applied to each message-passing layer's input, or None for none.
     """
 
     num_pre_layers: int
     num_gcn_layers: int
     num_post_layers: int
     residuals: bool
+    norm: Literal["layer_norm", "batch_norm"] | None
 
 
 @dataclass

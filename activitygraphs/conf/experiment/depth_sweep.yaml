@@ -1,6 +1,6 @@
 # @package _global_
-# GATSkip receptive-field sweep over `experiment.depths`, beside the baselines.
+# GAT receptive-field sweep over `experiment.depths`, beside the baselines.
 experiment:
   name: depth_sweep
-  # GATSkip message-passing depths (a NodeMLP depth-0 anchor is always included).
+  # GAT message-passing depths (a NodeMLP depth-0 anchor is always included).
   depths: [ 2, 4, 8 ]

@@ -85,7 +85,7 @@ def test_model_scheme_is_consistent():
     colours = [spec.colour for spec in ROC_MODELS]
 
     assert len(set(names)) == len(set(labels)) == len(set(colours)) == len(ROC_MODELS)
-    assert DEFAULT_MODELS[0].label == "GNN - GATSkip-8"
+    assert DEFAULT_MODELS[0].label == "GNN - GATv2-8"
     assert [spec.label for spec in ROC_MODELS if spec.name == "Uniform"] == ["Random"]
     assert all(spec.learned for spec in DEFAULT_MODELS[:3])
     assert not any(spec.learned for spec in DEFAULT_MODELS[3:])

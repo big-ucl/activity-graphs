@@ -56,7 +56,7 @@ class ModelStyle:
 
 
 DEFAULT_MODELS: tuple[ModelStyle, ...] = (
-    ModelStyle("GATSkip-8-res-hpe-dist", "GNN - GATSkip-8", "#d1242f", learned=True),
+    ModelStyle("GATv2-8-hpe-dist", "GNN - GATv2-8", "#d1242f", learned=True),
     ModelStyle("MLP-dist", "MLP-dist", "#1f6feb", learned=True),
     ModelStyle("HomeZoneMF", "MTF-BPR", "#2da44e", learned=True),
     ModelStyle("Gravity", "Gravity", "#8c7b6b", learned=False),

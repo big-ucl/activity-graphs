@@ -28,7 +28,7 @@ from activitygraphs.experiments.training import WandBParams
 from activitygraphs.experiments.variants import Variant, build_model, variant_hyperparams
 from activitygraphs.main import EXPERIMENTS
 from activitygraphs.ml.lightning_module import HOME_PE_BINS
-from activitygraphs.ml.models import GATSkip, GraphTransformer, NodeMLP
+from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.utils import get_project_root
 
@@ -125,10 +125,10 @@ class TestVariant:
     def test_name_appends_the_feature_flags_in_order(self, cfg):
         gat = cfg.models.gat
 
-        assert Variant(gat).name == "GATSkip-8-res"
-        assert Variant(gat, full_info=True).name == "GATSkip-8-res-dist"
-        assert Variant(gat, use_home_pe=True).name == "GATSkip-8-res-hpe"
-        assert Variant(gat, full_info=True, use_home_pe=True).name == "GATSkip-8-res-hpe-dist"
+        assert Variant(gat).name == "GATv2-8"
+        assert Variant(gat, full_info=True).name == "GATv2-8-dist"
+        assert Variant(gat, use_home_pe=True).name == "GATv2-8-hpe"
+        assert Variant(gat, full_info=True, use_home_pe=True).name == "GATv2-8-hpe-dist"
 
     def test_suffix_comes_last(self, cfg):
         assert Variant(cfg.models.mlp, full_info=True, suffix="nodemo").name == "MLP-dist-nodemo"
@@ -136,8 +136,8 @@ class TestVariant:
     def test_name_follows_an_overridden_depth(self, cfg):
         gat = with_overrides(cfg.models.gat, {"num_gcn_layers": 4})
 
-        assert Variant(gat).name == "GATSkip-4-res"
-        assert cfg.models.gat.name == "GATSkip-8-res"
+        assert Variant(gat).name == "GATv2-4"
+        assert cfg.models.gat.name == "GATv2-8"
 
 
 class TestBuildModel:
@@ -161,8 +161,19 @@ class TestBuildModel:
         gat = build_model(Variant(cfg.models.gat), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
         gps = build_model(Variant(cfg.models.gps), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
 
-        assert isinstance(gat, GATSkip) and isinstance(gps, GraphTransformer)
+        assert isinstance(gat, GAT) and isinstance(gps, GraphTransformer)
         assert gps.edge_proj.in_features == 2
+
+    def test_gat_norm_follows_the_config(self, cfg):
+        normed = build_model(Variant(cfg.models.gat), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
+        plain = build_model(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
+
+        assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.convs.norms)  # type: ignore[union-attr]
+        assert all(isinstance(norm, torch.nn.Identity) for norm in plain.convs.norms)  # type: ignore[union-attr]
+
+    def test_unknown_gat_norm_raises(self, cfg):
+        with pytest.raises(KeyError, match="normalisation"):
+            build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
 
 
 class TestTrainerConfig:
@@ -220,7 +231,7 @@ class TestRunVariants:
         frames = run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
 
         assert len(frames) == 4
-        assert [call["variant"].name for call in calls] == ["MLP", "GATSkip-8-res-dist", "MLP", "GATSkip-8-res-dist"]
+        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-8-dist", "MLP", "GATv2-8-dist"]
 
     def test_tags_each_frame_with_its_training_seed(self, cfg, monkeypatch):
         record_training(monkeypatch)
@@ -302,7 +313,7 @@ class TestDemographicsAblation:
     def test_runs_both_arms_of_each_architecture(self, cfg, monkeypatch):
         names = {call["variant"].name for call in self._recorded(cfg, monkeypatch)}
 
-        assert names == {"MLP-dist-demo", "MLP-dist-nodemo", "GATSkip-8-res-dist-demo", "GATSkip-8-res-dist-nodemo"}
+        assert names == {"MLP-dist-demo", "MLP-dist-nodemo", "GATv2-8-dist-demo", "GATv2-8-dist-nodemo"}
 
     def test_the_arms_differ_only_in_use_demographics(self, cfg, monkeypatch):
         variants = {call["variant"].name: call["variant"] for call in self._recorded(cfg, monkeypatch)}
@@ -347,7 +358,7 @@ class TestDepthSweep:
     def test_each_depth_is_named_after_it(self, cfg, monkeypatch):
         names = [call["variant"].name for call in self._recorded(cfg, monkeypatch, [2, 4])]
 
-        assert names == ["MLP-dist", "GATSkip-2-res-hpe-dist", "GATSkip-4-res-hpe-dist"]
+        assert names == ["MLP-dist", "GATv2-2-hpe-dist", "GATv2-4-hpe-dist"]
 
 
 class TestWandBParams:
