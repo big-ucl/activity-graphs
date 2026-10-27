@@ -25,6 +25,7 @@ from activitygraphs.base import (
     Purpose,
 )
 from activitygraphs.config import CMAPDataConfig
+from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.surveys.base import NA, DataFrameStore, SurveyData, SurveyLoader, build_special_locations
 from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import (
@@ -35,18 +36,21 @@ from activitygraphs.utils import (
     invert_mapping,
 )
 
-DEMOGRAPHIC_COLUMNS = [
-    "has_missing_demographics",
-    "age",
-    "is_employed",
-    "is_student",
-    "can_drive",
-    "hh_num_adults",
-    "hh_num_children",
-    "hh_num_vehicles",
-    "hh_num_bicycle",
-    "hh_income_kusd",
-]
+CMAP_DEMOGRAPHICS_SCHEMA = TensorSchema(
+    "user_attributes",
+    (
+        ColumnSpec("has_missing_demographics", ColumnKind.BINARY),
+        ColumnSpec("age", ColumnKind.CONTINUOUS),
+        ColumnSpec("is_employed", ColumnKind.BINARY),
+        ColumnSpec("is_student", ColumnKind.BINARY),
+        ColumnSpec("can_drive", ColumnKind.BINARY),
+        ColumnSpec("hh_num_adults", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_children", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_vehicles", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_bicycle", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_income_kusd", ColumnKind.CONTINUOUS),
+    ),
+)
 
 CMAP_COUNTY_FP_CODES = [
     "031",  # Cook
@@ -170,9 +174,9 @@ class CMAPSurvey(SurveyData, DataFrameStore):
         return self.users_df["user_id"].sort()
 
     @property
-    def demographic_columns(self) -> list[str]:
-        """Names of the demographic columns in ``users_df``."""
-        return DEMOGRAPHIC_COLUMNS
+    def demographics_schema(self) -> TensorSchema:
+        """Schema of the demographic columns in ``users_df``, in tensor column order."""
+        return CMAP_DEMOGRAPHICS_SCHEMA
 
     def _copy(self, filters: list[str] | None = None) -> Self:
         return type(self)(self._locations_gdf, self._user_journeys_df, self.users_df, filters)

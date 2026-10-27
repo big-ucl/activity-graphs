@@ -18,6 +18,7 @@ import polars.selectors as cs
 
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, LOCATIONS_SCHEMA, USER_JOURNEY_SCHEMA, Mode, Purpose
 from activitygraphs.config import THATSDataConfig
+from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.surveys.base import NA, DataFrameStore, SurveyData, SurveyLoader, build_special_locations
 from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import (
@@ -30,14 +31,17 @@ from activitygraphs.utils import (
 
 TORONTO_CMA = 535
 
-DEMOGRAPHIC_COLUMNS = [
-    "has_driving_license",
-    "has_pt_pass",
-    "hh_num_adults",
-    "hh_num_children",
-    "hh_num_vehicles",
-    "hh_num_bikes",
-]
+THATS_DEMOGRAPHICS_SCHEMA = TensorSchema(
+    "user_attributes",
+    (
+        ColumnSpec("has_driving_license", ColumnKind.BINARY),
+        ColumnSpec("has_pt_pass", ColumnKind.BINARY),
+        ColumnSpec("hh_num_adults", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_children", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_vehicles", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_bikes", ColumnKind.CONTINUOUS),
+    ),
+)
 
 MODE_MAP = {
     "AIR_OR_HSR": Mode.OTHER,
@@ -195,9 +199,9 @@ class THATSSurvey(SurveyData, DataFrameStore):
         return self.users_df["user_id"].sort()
 
     @property
-    def demographic_columns(self) -> list[str]:
-        """Names of the demographic columns in ``users_df``."""
-        return DEMOGRAPHIC_COLUMNS
+    def demographics_schema(self) -> TensorSchema:
+        """Schema of the demographic columns in ``users_df``, in tensor column order."""
+        return THATS_DEMOGRAPHICS_SCHEMA
 
     @cached_property
     def num_obs_days_per_user(self) -> pl.DataFrame:

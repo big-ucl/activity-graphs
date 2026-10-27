@@ -13,7 +13,7 @@ from activitygraphs.base import CRS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Pur
 from activitygraphs.surveys.base import NA
 from activitygraphs.surveys.cmap import (
     AGE_MIDPOINTS,
-    DEMOGRAPHIC_COLUMNS,
+    CMAP_DEMOGRAPHICS_SCHEMA,
     EXCLUDED_CENSUS_TRACTS,
     INCOME_MIDPOINTS_KUSD,
     MODE_MAP,
@@ -343,19 +343,19 @@ class TestCMAPSurveyViews:
     def test_every_users_df_column_is_a_feature_or_an_identifier(self, cmap_survey):
         # Fails the moment a column is added to build_cmap_users without being classified, which is
         # the only way hh_id (or any other identifier) could reach the user attributes tensor.
-        assert set(cmap_survey.demographic_columns) | IDENTIFIER_COLUMNS == set(cmap_survey.users_df.columns)
+        assert set(cmap_survey.demographics_schema.names) | IDENTIFIER_COLUMNS == set(cmap_survey.users_df.columns)
 
     def test_hh_id_never_reaches_the_user_attributes_tensor(self, cmap_survey):
         # hh_id lives on users_df for the grouped split; it is an identifier, not a feature.
-        assert "hh_id" not in cmap_survey.demographic_columns
+        assert "hh_id" not in cmap_survey.demographics_schema.names
 
         user_attributes = build_user_attributes(cmap_survey)
-        assert user_attributes.shape == (len(cmap_survey.user_ids), len(cmap_survey.demographic_columns))
+        assert user_attributes.shape == (len(cmap_survey.user_ids), len(cmap_survey.demographics_schema.columns))
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder
         # would let a stale scaler cache be applied to the wrong columns.
-        assert cmap_survey.demographic_columns == DEMOGRAPHIC_COLUMNS
+        assert cmap_survey.demographics_schema == CMAP_DEMOGRAPHICS_SCHEMA
 
     def test_group_ids_are_shared_by_co_residents_only(self, cmap_survey):
         group_ids = build_group_ids(cmap_survey)

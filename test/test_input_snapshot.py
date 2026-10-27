@@ -23,6 +23,7 @@ from activitygraphs.datasets.datamodule import positional_encodings
 from activitygraphs.datasets.dataset import VisitDataset
 from activitygraphs.datasets.scalers import apply_scalers, fit_scalers
 from activitygraphs.ml.lightning_module import extract_features
+from activitygraphs.schema import TensorSchema
 from activitygraphs.surveys.cmap import CMAPSurvey
 from activitygraphs.tensors import build_tensors
 from activitygraphs.utils import add_lon_lat_from_centroid
@@ -43,9 +44,9 @@ class NoDemographicsSurvey(CMAPSurvey):
     """A ``CMAPSurvey`` without demographic columns, as TPG has none."""
 
     @property
-    def demographic_columns(self) -> list[str]:
-        """No demographic columns."""
-        return []
+    def demographics_schema(self) -> TensorSchema:
+        """An empty schema."""
+        return TensorSchema("user_attributes", ())
 
 
 def build_zones() -> gpd.GeoDataFrame:

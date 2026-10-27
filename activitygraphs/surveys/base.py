@@ -18,6 +18,7 @@ from activitygraphs.base import (
     Purpose,
 )
 from activitygraphs.config import DataConfig
+from activitygraphs.schema import TensorSchema
 from activitygraphs.utils import check_schema
 
 NA_LON, NA_LAT = 6.1709475192397605, 46.24348817355701
@@ -116,9 +117,9 @@ class SurveyData(ABC):
         )
 
     @property
-    def demographic_columns(self) -> list[str]:
-        """Names of the demographic columns in ``users_df``; none by default."""
-        return []
+    def demographics_schema(self) -> TensorSchema:
+        """Schema of the demographic columns in ``users_df``, in tensor column order; empty by default."""
+        return TensorSchema("user_attributes", ())
 
     @cached_property
     def user_ids(self) -> pl.Series:

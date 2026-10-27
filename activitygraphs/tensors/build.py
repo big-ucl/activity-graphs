@@ -146,13 +146,14 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 def build_user_attributes(survey: SurveyData) -> torch.Tensor:
     """Create the user attribute float32 tensor of shape ``[n_users, n_attr]`` from SurveyData.
 
-    Columns follow ``survey.demographic_columns``. If there are none (e.g. TPG), returns a (n_users, 1) dummy tensor
-    of ones.
+    Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), returns a (n_users, 1) dummy
+    tensor of ones.
     """
-    if len(survey.demographic_columns) == 0:
+    col_names = survey.demographics_schema.names
+    if not col_names:
         return torch.ones((len(survey.user_ids), 1), dtype=torch.float32)
 
-    user_attributes = survey.users_df.select(survey.demographic_columns)
+    user_attributes = survey.users_df.select(col_names)
 
     return torch.tensor(user_attributes.to_numpy(), dtype=torch.float32)
 
