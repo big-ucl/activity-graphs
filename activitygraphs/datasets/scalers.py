@@ -39,7 +39,6 @@ def fit_scalers(
     train_idx: list[int],
     fingerprint: Fingerprint,
     exclude_user_node_cols: list[int],
-    exclude_user_attribute_cols: list[int] | None = None,
 ) -> FittedScalers:
     """Fit ``StandardScaler`` instances on the training split of each feature group.
 
@@ -47,7 +46,6 @@ def fit_scalers(
         dataset: The full ``VisitDataset`` (not yet scaled).
         train_idx: Indices of training users.
         exclude_user_node_cols: Column indices excluded from user node scaler fitting (e.g. ``[is_home_user_node_idx]``).
-        exclude_user_attribute_cols: Column indices excluded from user attribute scaler fitting.
         fingerprint: Identity of the dataset being fitted on, stored for cache validation.
 
     Returns:
@@ -72,9 +70,6 @@ def fit_scalers(
 
     # User attributes: user-specific, fit only on train
     attr_train = dataset.user_attributes[train_idx]
-    if exclude_user_attribute_cols:
-        keep = [c for c in range(attr_train.shape[-1]) if c not in exclude_user_attribute_cols]
-        attr_train = attr_train[..., keep]
     attr_scaler = StandardScaler()
     attr_scaler.fit(attr_train.float().numpy())
 
