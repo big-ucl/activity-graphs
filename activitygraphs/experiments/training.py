@@ -261,6 +261,7 @@ def train_and_evaluate_model(
         compile_model=train.compile,
         store_score_vectors=train.save_score_vectors,
         log_train_ranking=train.log_train_ranking,
+        use_rwpe=variant.use_rwpe,
     )
 
     # Build the callbacks

@@ -123,6 +123,30 @@ def demographics_ablation_experiment(cfg: Config):
     save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
 
 
+def rwpe_control_experiment(cfg: Config):
+    """Test whether graph structure helps beyond node features, against an MLP without the random-walk PE.
+
+    Trains ``MLP-dist`` with and without the random-walk positional encoding, ``MLP-hpe-dist`` and the GAT with the
+    same features, every one once per training seed, beside the baselines.
+    """
+    setup = setup_experiment(cfg)
+    mlp, gat = setup.models["mlp"], setup.models["gat"]
+
+    variants = [
+        Variant(mlp, full_info=True, use_rwpe=False),
+        Variant(mlp, full_info=True),
+        Variant(mlp, full_info=True, use_home_pe=True),
+        Variant(gat, full_info=True, use_home_pe=True),
+    ]
+
+    model_results = run_variants(setup, variants)
+
+    if setup.run_dir is None:
+        return
+
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
+
+
 def overfit_health_experiment(cfg: Config):
     """Check if each architecture can overfit on a single batch.
 

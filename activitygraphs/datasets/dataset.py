@@ -104,6 +104,11 @@ class VisitDataset(pyg.data.Dataset):
         return self.location_x.shape[1]
 
     @property
+    def num_rwpe_features(self) -> int:
+        """Number of columns of the random-walk positional encoding, ``random_walk_pe``."""
+        return self.pyg_graph.random_walk_pe.shape[1]
+
+    @property
     def is_home_user_node_idx(self) -> int:
         """Column index of ``is_home`` within the per-user node feature block."""
         return USER_NODE_FEATURE_NAMES.index("is_home")

@@ -32,6 +32,7 @@ def recall_at_k(scores, labels, k):
 NUM_NODE_FEATURES = 6
 NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
+NUM_RWPE_FEATURES = 4
 IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
 # Column of the per-user ``is_home`` indicator in the synthetic ``x``, mirroring the real dataset,
 # where the user node block starts with ``is_home`` (see ``VisitDataset.is_home_col_idx``).
@@ -73,6 +74,7 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
             user_id=torch.tensor([start_user_id + g], dtype=torch.long),
         )
         data.user_attr = torch.rand(1, NUM_DEMO_FEATURES, generator=rng)
+        data.random_walk_pe = torch.rand(num_nodes, NUM_RWPE_FEATURES, generator=rng)
         graphs.append(data)
     return pyg.data.Batch.from_data_list(graphs)
 
@@ -285,6 +287,43 @@ class TestUseDemographics:
         without_demo = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
 
         assert with_demo.shape[1] == without_demo.shape[1] + NUM_DEMO_FEATURES
+
+
+class TestRwpe:
+    """The random-walk PE is appended to the model input when ``use_rwpe`` is set, and only then."""
+
+    def _module(self) -> RankingModule:
+        model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS + NUM_RWPE_FEATURES, hidden_channels=8, out_channels=1)
+
+        return RankingModule(
+            model=model,
+            lr=1e-3,
+            loss=BCELoss,
+            is_home_idx=IS_HOME_IDX,
+            home_hop_distance=chain_hop_distance(),
+            max_recall_k=MAX_RECALL_K,
+            recall_ks=RECALL_KS,
+            use_rwpe=True,
+        )
+
+    def test_appends_the_encoding_after_x(self):
+        batch = make_batch(num_graphs=2, num_nodes=8)
+        x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False, use_rwpe=True)
+
+        torch.testing.assert_close(x, torch.cat([batch.x, batch.random_walk_pe], dim=-1))
+
+    def test_left_out_by_default(self):
+        batch = make_batch(num_graphs=2, num_nodes=8)
+        x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
+
+        torch.testing.assert_close(x, batch.x)
+
+    def test_a_model_built_with_rwpe_trains(self, monkeypatch):
+        batch = make_batch(num_graphs=2, num_nodes=8)
+        module = self._module()
+        monkeypatch.setattr(module, "log", lambda *a, **kw: None)
+
+        assert torch.isfinite(module.training_step(batch, 0))
 
 
 class TestTrainRanking:
@@ -661,6 +700,7 @@ def fake_dataset(num_features: int = 6, num_demo: int = 3, num_dist: int = 1) ->
         num_features=num_features,
         user_attributes=torch.zeros(1, num_demo),
         distances=torch.zeros(1, num_dist),
+        num_rwpe_features=4,
     )
 
 
@@ -715,6 +755,11 @@ class TestHomePositionalEncoding:
         base = extracted_features_dim(ds, use_home_pe=False)
         with_pe = extracted_features_dim(ds, use_home_pe=True)
         assert with_pe - base == HOME_PE_BINS
+
+    def test_extracted_features_dim_adds_the_rwpe(self):
+        ds = fake_dataset()
+
+        assert extracted_features_dim(ds, use_rwpe=True) - extracted_features_dim(ds) == 4
 
     def test_training_step_is_finite(self, monkeypatch):
         """A full training_step with the PE enabled returns a finite scalar loss."""

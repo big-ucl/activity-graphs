@@ -32,11 +32,14 @@ def extract_features(
     home_hop_distance: torch.Tensor | None = None,
     home_pe_bins: int = HOME_PE_BINS,
     home_pe_max_hops: int = HOME_PE_MAX_HOPS,
+    use_rwpe: bool = False,
 ) -> torch.Tensor:
     """Return node features for a batch.
 
     Starts with ``batch.x`` (which already contains the location features and the per-user
     ``is_home`` indicator).
+
+    If ``use_rwpe`` is True, the random-walk positional encoding (``batch.random_walk_pe``) is appended.
 
      If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
      hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column for the home index.
@@ -47,6 +50,9 @@ def extract_features(
     If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column.
     """
     x = batch.x
+
+    if use_rwpe:
+        x = torch.cat([x, batch.random_walk_pe], dim=-1)
 
     if home_hop_distance is not None:
         home_pe = create_home_distance_encoding(
@@ -69,10 +75,13 @@ def extracted_features_dim(
     full_info: bool = False,
     use_home_pe: bool = False,
     n_bins: int = HOME_PE_BINS,
+    use_rwpe: bool = False,
 ) -> int:
     """Output width of extract_features for this dataset, given the same flags."""
     dim = dataset.num_features
 
+    if use_rwpe:
+        dim += dataset.num_rwpe_features
     if use_home_pe:
         dim += n_bins
     if use_demographics:
@@ -177,6 +186,7 @@ class RankingModule(L.LightningModule):
         store_score_vectors: retain each test user's full per-node score vector.
         log_train_ranking: log ``train_avg_recall@K`` on the training batches, default True. Turn it off when per-user
             computation becomes expensive.
+        use_rwpe: append the random-walk positional encoding to the node features, default False.
     """
 
     model: torch.nn.Module
@@ -202,6 +212,7 @@ class RankingModule(L.LightningModule):
         compile_model: bool = False,
         store_score_vectors: bool = False,
         log_train_ranking: bool = True,
+        use_rwpe: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "loss", "home_hop_distance"])
@@ -246,6 +257,9 @@ class RankingModule(L.LightningModule):
         self.use_home_pe = use_home_pe
         self.home_pe_bins = home_pe_bins
         self.home_pe_max_hops = home_pe_max_hops
+
+        # Training: other positional encodings injection
+        self.use_rwpe = use_rwpe
 
         # Training: torch.compile (applied in configure_model, not here)
         self.compile_model = compile_model
@@ -434,5 +448,6 @@ class RankingModule(L.LightningModule):
             home_hop_distance=home_hop_distance,
             home_pe_bins=self.home_pe_bins,
             home_pe_max_hops=self.home_pe_max_hops,
+            use_rwpe=self.use_rwpe,
         )
         return self(x, batch.edge_index, batch.edge_attr, batch.batch)

@@ -15,11 +15,13 @@ from activitygraphs.datasets.scalers import FittedScalers, apply_scalers, fit_sc
 from activitygraphs.datasets.splits import SplitStrategy, load_split_indices, read_split_indices
 from activitygraphs.utils import get_project_root
 
+RWPE_WALK_LENGTH = 20
+
 
 def positional_encodings() -> T.Compose:
-    """Return the pre-transform adding the positional encodings to the shared graph's node features."""
+    """Return the pre-transform adding the positional encodings to the shared graph, as a separate node features."""
     return T.Compose([
-        T.AddRandomWalkPE(walk_length=20, attr_name=None),
+        T.AddRandomWalkPE(walk_length=RWPE_WALK_LENGTH),
         # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
     ])
 

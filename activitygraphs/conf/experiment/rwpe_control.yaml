@@ -1,0 +1,4 @@
+# @package _global_
+# MLP with and without the random-walk PE, MLP with the home PE and the GAT, beside the baselines.
+experiment:
+  name: rwpe_control

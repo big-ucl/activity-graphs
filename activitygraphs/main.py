@@ -10,12 +10,14 @@ from activitygraphs.experiments import (
     demographics_ablation_experiment,
     depth_sweep_experiment,
     overfit_health_experiment,
+    rwpe_control_experiment,
 )
 
 EXPERIMENTS = {
     "comparison": comparison_experiment,
     "depth_sweep": depth_sweep_experiment,
     "demographics_ablation": demographics_ablation_experiment,
+    "rwpe_control": rwpe_control_experiment,
     "overfit_health": overfit_health_experiment,
     "baselines": baselines_experiment,
 }

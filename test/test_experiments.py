@@ -65,6 +65,7 @@ def make_dataset(num_features: int = 6, num_attributes: int = 3, num_edge_featur
         user_attributes=torch.zeros(4, num_attributes),
         distances=torch.zeros(4, 5, 1),
         edge_attr=torch.zeros(8, num_edge_features),
+        num_rwpe_features=2,
     )
 
 
@@ -133,6 +134,9 @@ class TestVariant:
     def test_suffix_comes_last(self, cfg):
         assert Variant(cfg.models.mlp, full_info=True, suffix="nodemo").name == "MLP-dist-nodemo"
 
+    def test_rwpe_free_variant_is_named_norwpe(self, cfg):
+        assert Variant(cfg.models.mlp, full_info=True, use_rwpe=False).name == "MLP-dist-norwpe"
+
     def test_name_follows_an_overridden_depth(self, cfg):
         gat = with_overrides(cfg.models.gat, {"num_gcn_layers": 4})
 
@@ -153,8 +157,15 @@ class TestBuildModel:
         dist = build_model(Variant(cfg.models.mlp, full_info=True), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
 
         assert isinstance(plain, NodeMLP) and isinstance(dist, NodeMLP)
-        assert plain.lins[0].in_features == 6
-        assert dist.lins[0].in_features == 6 + 3 + 1
+        assert plain.lins[0].in_features == 6 + 2
+        assert dist.lins[0].in_features == 6 + 2 + 3 + 1
+
+    def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
+        dataset = make_dataset(num_features=6, num_attributes=3)
+        model = build_model(Variant(cfg.models.mlp, full_info=True, use_rwpe=False), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
+
+        assert isinstance(model, NodeMLP)
+        assert model.lins[0].in_features == 6 + 3 + 1
 
     def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
         dataset = make_dataset(num_edge_features=2)
