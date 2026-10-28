@@ -10,8 +10,8 @@ import torch_geometric as pyg
 from omegaconf import OmegaConf
 
 from activitygraphs.datasets.dataset import (
-    FINGERPRINT_FILE,
     Fingerprint,
+    ProcessedFile,
     dataset_fingerprint,
     read_fingerprint,
     tensors_fingerprint,
@@ -144,7 +144,7 @@ class TestDatasetFingerprint:
         dataset = make_dataset()
         processed = tmp_path / cfg.data.paths.tensors / "processed"
         processed.mkdir(parents=True)
-        (processed / FINGERPRINT_FILE).write_text(json.dumps(tensors_fingerprint(dataset.tensors)))
+        (processed / ProcessedFile.FINGERPRINT).write_text(json.dumps(tensors_fingerprint(dataset.tensors)))
 
         assert read_fingerprint(cfg, tmp_path) == fingerprint_of(cfg, dataset)
 

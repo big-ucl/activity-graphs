@@ -23,7 +23,7 @@ from shapely.geometry import box
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
 from activitygraphs.datasets import HouseholdSplit, datamodule
 from activitygraphs.datasets.datamodule import positional_encodings
-from activitygraphs.datasets.dataset import FINGERPRINT_FILE, VisitDataset, load_dataset
+from activitygraphs.datasets.dataset import ProcessedFile, VisitDataset, load_dataset
 from activitygraphs.datasets.scalers import apply_scalers, fit_scalers
 from activitygraphs.ml.lightning_module import extract_features
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
@@ -225,7 +225,7 @@ def test_the_cache_carries_the_survey_ids_and_the_fingerprint(tmp_path):
     assert dataset.user_ids.equals(users.sort("user_id").select("user_id", "hh_id"))
     assert dataset.node_ids["loc_id"].to_list() == zones["loc_id"].tolist()
 
-    fingerprint = json.loads((Path(dataset.processed_dir) / FINGERPRINT_FILE).read_text())
+    fingerprint = json.loads((Path(dataset.processed_dir) / ProcessedFile.FINGERPRINT).read_text())
     assert fingerprint["n_users"] == NUM_USERS
     assert fingerprint["n_groups"] == NUM_HOUSEHOLDS
 

@@ -3,6 +3,7 @@
 import hashlib
 import json
 from collections.abc import Callable
+from enum import StrEnum
 from functools import cached_property, partial
 from pathlib import Path
 from typing import cast
@@ -24,7 +25,20 @@ from activitygraphs.utils import get_project_root
 
 type Fingerprint = dict
 
-FINGERPRINT_FILE = "fingerprint.json"
+
+class ProcessedFile(StrEnum):
+    """Names of the files cached by ``VisitDataset`` in its ``processed`` directory."""
+
+    PYG_GRAPH = "pyg_graph.pt"
+    USER_NODE_FEATURES = "user_node_features.pt"
+    VISIT_LABELS = "visit_labels.pt"
+    USER_ATTRIBUTES = "user_attributes.pt"
+    DISTANCES = "distances.pt"
+    GROUP_IDS = "group_ids.pt"
+    USER_IDS = "user_ids.parquet"
+    NODE_IDS = "node_ids.parquet"
+    SCHEMA = "schema.json"
+    FINGERPRINT = "fingerprint.json"
 
 
 def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
@@ -40,18 +54,7 @@ class VisitDataset(pyg.data.Dataset):
     ``y = visit_labels[i]``, and ``user_attr = user_attributes[i]``.
     """
 
-    PROCESSED_FILE_NAMES = [
-        "pyg_graph.pt",
-        "user_node_features.pt",
-        "visit_labels.pt",
-        "user_attributes.pt",
-        "distances.pt",
-        "group_ids.pt",
-        "user_ids.parquet",
-        "node_ids.parquet",
-        "schema.json",
-        FINGERPRINT_FILE,
-    ]
+    PROCESSED_FILE_NAMES = [str(file) for file in ProcessedFile]
 
     def __init__(
         self,
@@ -79,15 +82,19 @@ class VisitDataset(pyg.data.Dataset):
         super().__init__(root, transform, pre_transform, pre_filter)
 
         processed_dir = Path(self.processed_dir)
-        self.pyg_graph: pyg.data.Data = torch.load(processed_dir / "pyg_graph.pt", weights_only=False)
-        self.user_node_features: torch.Tensor = torch.load(processed_dir / "user_node_features.pt", weights_only=True)
-        self.visit_labels: torch.Tensor = torch.load(processed_dir / "visit_labels.pt", weights_only=True)
-        self.user_attributes: torch.Tensor = torch.load(processed_dir / "user_attributes.pt", weights_only=True)
-        self.distances: torch.Tensor = torch.load(processed_dir / "distances.pt", weights_only=True)
-        self.group_ids: torch.Tensor = torch.load(processed_dir / "group_ids.pt", weights_only=True)
-        self.user_ids: pl.DataFrame = pl.read_parquet(processed_dir / "user_ids.parquet")
-        self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / "node_ids.parquet")
-        self.schema: DatasetSchema = DatasetSchema.read(processed_dir / "schema.json")
+        self.pyg_graph: pyg.data.Data = torch.load(processed_dir / ProcessedFile.PYG_GRAPH, weights_only=False)
+        self.user_node_features: torch.Tensor = torch.load(
+            processed_dir / ProcessedFile.USER_NODE_FEATURES, weights_only=True
+        )
+        self.visit_labels: torch.Tensor = torch.load(processed_dir / ProcessedFile.VISIT_LABELS, weights_only=True)
+        self.user_attributes: torch.Tensor = torch.load(
+            processed_dir / ProcessedFile.USER_ATTRIBUTES, weights_only=True
+        )
+        self.distances: torch.Tensor = torch.load(processed_dir / ProcessedFile.DISTANCES, weights_only=True)
+        self.group_ids: torch.Tensor = torch.load(processed_dir / ProcessedFile.GROUP_IDS, weights_only=True)
+        self.user_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.USER_IDS)
+        self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.NODE_IDS)
+        self.schema: DatasetSchema = DatasetSchema.read(processed_dir / ProcessedFile.SCHEMA)
 
         # Check that each user has one and only one home node
         is_home_idx = self.schema.user_nodes.index_of("is_home")
@@ -219,16 +226,16 @@ class VisitDataset(pyg.data.Dataset):
             graph = self.pre_transform(graph)
 
         processed_dir = Path(self.processed_dir)
-        torch.save(graph, processed_dir / "pyg_graph.pt")
-        torch.save(unf, processed_dir / "user_node_features.pt")
-        torch.save(vl, processed_dir / "visit_labels.pt")
-        torch.save(attr, processed_dir / "user_attributes.pt")
-        torch.save(dist, processed_dir / "distances.pt")
-        torch.save(group_ids, processed_dir / "group_ids.pt")
-        tensors.user_ids.write_parquet(processed_dir / "user_ids.parquet")
-        tensors.node_ids.write_parquet(processed_dir / "node_ids.parquet")
-        tensors.schema.save(processed_dir / "schema.json")
-        (processed_dir / FINGERPRINT_FILE).write_text(json.dumps(tensors_fingerprint(tensors), indent=2))
+        torch.save(graph, processed_dir / ProcessedFile.PYG_GRAPH)
+        torch.save(unf, processed_dir / ProcessedFile.USER_NODE_FEATURES)
+        torch.save(vl, processed_dir / ProcessedFile.VISIT_LABELS)
+        torch.save(attr, processed_dir / ProcessedFile.USER_ATTRIBUTES)
+        torch.save(dist, processed_dir / ProcessedFile.DISTANCES)
+        torch.save(group_ids, processed_dir / ProcessedFile.GROUP_IDS)
+        tensors.user_ids.write_parquet(processed_dir / ProcessedFile.USER_IDS)
+        tensors.node_ids.write_parquet(processed_dir / ProcessedFile.NODE_IDS)
+        tensors.schema.save(processed_dir / ProcessedFile.SCHEMA)
+        (processed_dir / ProcessedFile.FINGERPRINT).write_text(json.dumps(tensors_fingerprint(tensors), indent=2))
 
     def len(self) -> int:
         """Return the number of users."""
@@ -341,6 +348,6 @@ def read_fingerprint(cfg: Config, project_root: Path) -> Fingerprint:
     Raises:
         FileNotFoundError: The tensors are not cached.
     """
-    path = project_root / cfg.data.paths.tensors / "processed" / FINGERPRINT_FILE
+    path = project_root / cfg.data.paths.tensors / "processed" / ProcessedFile.FINGERPRINT
 
     return dataset_fingerprint(cfg, json.loads(path.read_text()))
