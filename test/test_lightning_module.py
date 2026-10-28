@@ -633,7 +633,7 @@ class TestCheckpoint:
 
         assert hparams["lr"] == 1e-3
         assert hparams["lr_scheduler"] == LR_SCHEDULER
-        assert not {"model", "encoder", "loss", "home_hop_distance"} & set(hparams)
+        assert not {"model", "feature_encoder", "loss", "home_hop_distance"} & set(hparams)
 
     def test_compiling_keeps_the_state_dict_keys(self):
         module = make_module()
@@ -659,7 +659,11 @@ class TestCheckpoint:
 
         model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
         reloaded = RankingModule.load_from_checkpoint(
-            path, model=model, encoder=make_default_encoder(), loss=BCELoss, home_hop_distance=chain_hop_distance()
+            path,
+            model=model,
+            feature_encoder=make_default_encoder(),
+            loss=BCELoss,
+            home_hop_distance=chain_hop_distance(),
         )
 
         assert reloaded.lr_scheduler == LR_SCHEDULER

@@ -20,7 +20,7 @@ class SplitStrategy(Protocol):
 
     @property
     def key(self) -> str:
-        """Name of the strategy and its parameters in the split and scaler cache file names."""
+        """Name of the strategy and its parameters in the split and transform cache file names."""
         ...
 
     def split(self, dataset: VisitDataset, seed: int) -> SplitIndices:

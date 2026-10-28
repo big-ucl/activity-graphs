@@ -1,4 +1,4 @@
-"""This module contains VisitDataset, the ``load_dataset`` cache entry point, and the split/scaler cache fingerprints."""
+"""This module contains VisitDataset, the ``load_dataset`` cache entry point, and the split/transform cache fingerprints."""
 
 import hashlib
 import json
@@ -55,7 +55,7 @@ class VisitDataset(pyg.data.Dataset):
       - ``x_user_node = user_node_features[i]``,
       - ``y = visit_labels[i]``,
       - ``user_attr = user_attributes[i]``,
-      - ``distances = distances[i]``, the model feature, scaled once the scalers are applied, and
+      - ``distances = distances[i]``, the model feature, scaled once the transforms are applied, and
       - ``distances_m = distances_m[i]``, the same distances in metres, never scaled.
     """
 
@@ -336,7 +336,7 @@ def tensors_fingerprint(tensors: SurveyTensors) -> Fingerprint:
 
 
 def dataset_fingerprint(cfg: Config, tensors_fp: Fingerprint) -> Fingerprint:
-    """Return the fingerprint the split and scaler caches are checked against: ``tensors_fp`` and the data config.
+    """Return the fingerprint the split and transform caches are checked against: ``tensors_fp`` and the data config.
 
     Only ``cfg.data`` is hashed, so training hyperparameters do not invalidate the caches.
     """

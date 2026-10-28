@@ -1,4 +1,4 @@
-"""Unit tests for split and scaler cache fingerprinting."""
+"""Unit tests for split and transform cache fingerprinting."""
 
 import json
 from dataclasses import dataclass
@@ -117,7 +117,7 @@ class TestDatasetFingerprint:
         assert fingerprint_of(cfg, make_dataset(n_nodes=12)) != fingerprint_of(cfg, make_dataset(n_nodes=2448))
 
     def test_detects_a_changed_demographic_width(self, cfg):
-        # The case that would otherwise surface as an sklearn feature-count mismatch inside apply_scalers.
+        # The case that would otherwise surface as an sklearn feature-count mismatch inside FeatureTransforms.apply.
         assert fingerprint_of(cfg, make_dataset(n_demo=5)) != fingerprint_of(cfg, make_dataset(n_demo=9))
 
     def test_detects_a_changed_data_config(self):

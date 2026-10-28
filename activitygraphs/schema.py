@@ -165,6 +165,11 @@ class DatasetSchema:
         """Return the schema of every tensor group, in field order."""
         return tuple(getattr(self, field.name) for field in fields(self))
 
+    @property
+    def feature_groups(self) -> tuple[TensorSchema, ...]:
+        """Return the schema of every feature group, i.e. every group but ``targets``, in field order."""
+        return tuple(schema for schema in self.groups if schema is not self.targets)
+
     def to_dict(self) -> dict[str, Any]:
         """Return the schemas as a JSON-serialisable dict, keyed by group."""
         return {schema.group: schema.to_dict() for schema in self.groups}

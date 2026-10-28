@@ -354,7 +354,7 @@ class TestCMAPSurveyViews:
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder
-        # would let a stale scaler cache be applied to the wrong columns.
+        # would let a stale transform cache be applied to the wrong columns.
         assert cmap_survey.demographics_schema == CMAP_DEMOGRAPHICS_SCHEMA
 
     def test_group_ids_are_shared_by_co_residents_only(self, cmap_survey):

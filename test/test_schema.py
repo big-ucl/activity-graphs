@@ -121,6 +121,17 @@ class TestDatasetSchema:
 
         assert [schema.group for schema in groups] == [field.name for field in fields(DatasetSchema)]
 
+    def test_feature_groups_are_every_group_but_the_targets(self):
+        feature_groups = dataset_schema().feature_groups
+
+        assert [schema.group for schema in feature_groups] == [
+            "locations",
+            "edges",
+            "user_nodes",
+            "user_attributes",
+            "distances",
+        ]
+
     def test_a_schema_must_sit_in_its_own_group(self):
         groups = {schema.group: schema for schema in dataset_schema().groups}
         groups["edges"] = TensorSchema("locations", ())

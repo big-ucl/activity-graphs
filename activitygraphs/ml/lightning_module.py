@@ -82,7 +82,7 @@ class RankingModule(L.LightningModule):
             computation becomes expensive.
 
     Raises:
-        ValueError: ``encoder`` is None for a model that is not a ``Baseline``, or given for a ``Baseline``.
+        ValueError: ``feature_encoder`` is None for a model that is not a ``Baseline``, or given for a ``Baseline``.
     """
 
     model: torch.nn.Module
@@ -109,7 +109,7 @@ class RankingModule(L.LightningModule):
         if (feature_encoder is None) != isinstance(model, Baseline):
             raise ValueError("Every model but a `Baseline` takes a `FeatureEncoder`, and a `Baseline` takes none.")
 
-        self.save_hyperparameters(ignore=["model", "encoder", "loss", "home_hop_distance"])
+        self.save_hyperparameters(ignore=["model", "feature_encoder", "loss", "home_hop_distance"])
         self.model = model
         self.encoder = feature_encoder
         self.lr = lr

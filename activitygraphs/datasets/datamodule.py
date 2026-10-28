@@ -11,8 +11,8 @@ import torch_geometric.transforms as T
 
 from activitygraphs.config import Config
 from activitygraphs.datasets.dataset import Fingerprint, VisitDataset, load_dataset, read_fingerprint
-from activitygraphs.datasets.scalers import FittedScalers, apply_scalers, fit_scalers
 from activitygraphs.datasets.splits import SplitStrategy, load_split_indices, read_split_indices
+from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.utils import get_project_root
 
 RWPE_WALK_LENGTH = 20
@@ -27,16 +27,16 @@ def positional_encodings() -> T.Compose:
 
 
 def split_cache_paths(cfg: Config, split: SplitStrategy, seed: int, project_root: Path) -> tuple[Path, Path]:
-    """Return the paths of the cached split indices (``splits_*.json``) and scalers (``scalers_*.pkl``)."""
+    """Return the paths of the cached split indices (``splits_*.json``) and transforms (``transforms_*.pkl``)."""
     tensors_dir = project_root / cfg.data.paths.tensors
 
-    return tensors_dir / f"splits_{seed}_{split.key}.json", tensors_dir / f"scalers_{seed}_{split.key}.pkl"
+    return tensors_dir / f"splits_{seed}_{split.key}.json", tensors_dir / f"transforms_{seed}_{split.key}.pkl"
 
 
 def prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None) -> None:
-    """Build and cache the dataset tensors, split indices and training-split scalers that are missing or stale."""
+    """Build and cache the dataset tensors, split indices and training-split transforms that are missing or stale."""
     project_root = get_project_root(project_root)
-    splits_cache, scalers_cache = split_cache_paths(cfg, split, seed, project_root)
+    splits_cache, transforms_cache = split_cache_paths(cfg, split, seed, project_root)
 
     dataset = None
     try:
@@ -45,22 +45,21 @@ def prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: P
         dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
         fingerprint = read_fingerprint(cfg, project_root)
 
-    if _caches_match(splits_cache, scalers_cache, fingerprint):
+    if _caches_match(splits_cache, transforms_cache, fingerprint):
         return
 
     if dataset is None:
         dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
 
     train_idx, _, _ = load_split_indices(dataset, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
-    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
 
-    scalers = fit_scalers(dataset, train_idx, exclude_user_node_cols=[is_home_idx], fingerprint=fingerprint)
-    scalers.save(scalers_cache)
+    transforms = fit_transforms(dataset, train_idx, fingerprint=fingerprint)
+    transforms.save(transforms_cache)
 
 
-def _caches_match(splits_cache: Path, scalers_cache: Path, fingerprint: Fingerprint) -> bool:
-    """Return whether the split indices and scalers are both cached for the dataset ``fingerprint``."""
-    if not (splits_cache.exists() and scalers_cache.exists()):
+def _caches_match(splits_cache: Path, transforms_cache: Path, fingerprint: Fingerprint) -> bool:
+    """Return whether the split indices and the current transforms are both cached for the dataset ``fingerprint``."""
+    if not (splits_cache.exists() and transforms_cache.exists()):
         return False
 
     try:
@@ -68,41 +67,43 @@ def _caches_match(splits_cache: Path, scalers_cache: Path, fingerprint: Fingerpr
     except ValueError:
         return False
 
-    return FittedScalers.read(scalers_cache).fingerprint == fingerprint
+    return FeatureTransforms.read(transforms_cache).is_current(fingerprint)
 
 
 def read_splits(
     cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None
-) -> tuple[VisitDataset, VisitDataset, VisitDataset, FittedScalers]:
-    """Read the dataset, split indices and scalers cached by ``prepare_splits``, and return the scaled splits.
+) -> tuple[VisitDataset, VisitDataset, VisitDataset, FeatureTransforms]:
+    """Read the dataset, split indices and transforms cached by ``prepare_splits``, and return the transformed splits.
 
     Returns:
-        Tuple ``(train_dataset, val_dataset, test_dataset, scalers)``.
+        Tuple ``(train_dataset, val_dataset, test_dataset, transforms)``.
 
     Raises:
-        FileNotFoundError: The split indices or scalers are not cached.
-        ValueError: The dataset tensors are not cached, or the cached split indices or scalers were built for another
-            dataset.
+        FileNotFoundError: The split indices or transforms are not cached.
+        ValueError: The dataset tensors are not cached, the cached split indices or transforms were built for another
+            dataset, or the cached transforms follow another transform policy.
     """
     project_root = get_project_root(project_root)
-    splits_cache, scalers_cache = split_cache_paths(cfg, split, seed, project_root)
+    splits_cache, transforms_cache = split_cache_paths(cfg, split, seed, project_root)
 
     dataset = VisitDataset(root=str(project_root / cfg.data.paths.tensors), pre_transform=positional_encodings())
     fingerprint = read_fingerprint(cfg, project_root)
 
     train_idx, val_idx, test_idx = read_split_indices(splits_cache, fingerprint)
 
-    scalers = FittedScalers.read(scalers_cache)
-    if scalers.fingerprint != fingerprint:
-        raise ValueError(f"Cached scalers at `{scalers_cache.name}` do not match the dataset fingerprint.")
+    transforms = FeatureTransforms.read(transforms_cache)
+    if not transforms.is_current(fingerprint):
+        raise ValueError(
+            f"Cached transforms at `{transforms_cache.name}` do not match the dataset fingerprint or the transform policy."
+        )
 
-    apply_scalers(dataset, scalers)
+    transforms.apply(dataset)
 
     return (
         cast(VisitDataset, dataset[train_idx]),
         cast(VisitDataset, dataset[val_idx]),
         cast(VisitDataset, dataset[test_idx]),
-        scalers,
+        transforms,
     )
 
 
@@ -159,19 +160,19 @@ class VisitDataModule(L.LightningDataModule):
         self._train_dataset: VisitDataset | None = None
         self._val_dataset: VisitDataset | None = None
         self._test_dataset: VisitDataset | None = None
-        self._scalers: FittedScalers | None = None
+        self._transforms: FeatureTransforms | None = None
         self._home_coverage: pl.DataFrame | None = None
 
     def prepare_data(self) -> None:
-        """Build and cache the dataset tensors, split indices and scalers that are missing or stale."""
+        """Build and cache the dataset tensors, split indices and transforms that are missing or stale."""
         prepare_splits(self.cfg, self.split, self.seed, self.project_root)
 
     def setup(self, stage: str | None = None) -> None:
-        """Read the splits and scalers cached by ``prepare_data`` and compute the home coverage, once."""
+        """Read the splits and transforms cached by ``prepare_data`` and compute the home coverage, once."""
         if self._train_dataset is not None:
             return
 
-        self._train_dataset, self._val_dataset, self._test_dataset, self._scalers = read_splits(
+        self._train_dataset, self._val_dataset, self._test_dataset, self._transforms = read_splits(
             self.cfg, self.split, self.seed, self.project_root
         )
 
@@ -219,11 +220,11 @@ class VisitDataModule(L.LightningDataModule):
         return self._test_dataset
 
     @property
-    def scalers(self) -> FittedScalers:
-        """The scalers fitted on the training split."""
-        if self._scalers is None:
-            raise RuntimeError("Call setup() before accessing scalers.")
-        return self._scalers
+    def transforms(self) -> FeatureTransforms:
+        """The transforms fitted on the training split."""
+        if self._transforms is None:
+            raise RuntimeError("Call setup() before accessing transforms.")
+        return self._transforms
 
     @property
     def home_coverage(self) -> pl.DataFrame:

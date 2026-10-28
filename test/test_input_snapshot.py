@@ -25,7 +25,7 @@ from activitygraphs.config import HomePEConfig, read_config
 from activitygraphs.datasets import HouseholdSplit, datamodule
 from activitygraphs.datasets.datamodule import positional_encodings
 from activitygraphs.datasets.dataset import ProcessedFile, VisitDataset, load_dataset
-from activitygraphs.datasets.scalers import apply_scalers, fit_scalers
+from activitygraphs.datasets.transforms import fit_transforms
 from activitygraphs.experiments.variants import Variant, build_feature_encoder
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA, CMAPSurvey
@@ -169,9 +169,7 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
         combination of ``FLAGS``, keyed by the active flags joined with ``+`` (``"none"`` for no flags).
     """
     dataset = build_dataset(survey_name, root)
-    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
-    scalers = fit_scalers(dataset, TRAIN_IDX, fingerprint={}, exclude_user_node_cols=[is_home_idx])
-    apply_scalers(dataset, scalers)
+    fit_transforms(dataset, TRAIN_IDX, fingerprint={}).apply(dataset)
 
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
     mlp = read_config(get_project_root(), verbose=False).models.mlp
@@ -242,12 +240,11 @@ def test_an_item_carries_the_location_and_user_node_features_apart(tmp_path):
 def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path):
     dataset = build_dataset("cmap", tmp_path)
     metres = dataset.distances.clone()
-    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
-    scalers = fit_scalers(dataset, TRAIN_IDX, fingerprint={}, exclude_user_node_cols=[is_home_idx])
-    apply_scalers(dataset, scalers)
+    transforms = fit_transforms(dataset, TRAIN_IDX, fingerprint={})
+    transforms.apply(dataset)
     item = dataset[3]
 
-    scaled = torch.from_numpy(scalers.distances.transform(metres[3].numpy())).float()
+    scaled = transforms.groups["distances"].apply(metres[3])
     torch.testing.assert_close(item.distances_m, metres[3])
     torch.testing.assert_close(item.distances, scaled)
 
