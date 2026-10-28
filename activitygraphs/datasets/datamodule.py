@@ -52,9 +52,9 @@ def prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: P
         dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
 
     train_idx, _, _ = load_split_indices(dataset, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
-    scalers = fit_scalers(
-        dataset, train_idx, exclude_user_node_cols=[dataset.is_home_user_node_idx], fingerprint=fingerprint
-    )
+    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
+
+    scalers = fit_scalers(dataset, train_idx, exclude_user_node_cols=[is_home_idx], fingerprint=fingerprint)
     scalers.save(scalers_cache)
 
 
@@ -108,8 +108,10 @@ def read_splits(
 
 def _compute_home_coverage(train_dataset: VisitDataset, test_dataset: VisitDataset) -> pl.DataFrame:
     """Compute each _test_ user's survey ``user_id``, home node and whether any training user also has a home there."""
+    is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
+
     # Index of the home node of every user in the survey: [n_users].
-    home_node_idx = train_dataset.user_node_features[:, :, train_dataset.is_home_user_node_idx].argmax(dim=1)
+    home_node_idx = train_dataset.user_node_features[:, :, is_home_idx].argmax(dim=1)
 
     train_idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
     test_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)

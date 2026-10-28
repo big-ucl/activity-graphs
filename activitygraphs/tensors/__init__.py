@@ -6,6 +6,6 @@ It exposes ``SurveyTensors``, a bundle of Tensors used by the ML pipeline, i.e.:
   - the per-user tensors (user attributes and household group IDs)
 """
 
-from activitygraphs.tensors.build import USER_NODE_FEATURE_NAMES, SurveyTensors, build_tensors
+from activitygraphs.tensors.build import USER_NODE_SCHEMA, SurveyTensors, build_tensors
 
-__all__ = ["USER_NODE_FEATURE_NAMES", "SurveyTensors", "build_tensors"]
+__all__ = ["USER_NODE_SCHEMA", "SurveyTensors", "build_tensors"]

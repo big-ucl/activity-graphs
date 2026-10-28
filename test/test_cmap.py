@@ -350,7 +350,7 @@ class TestCMAPSurveyViews:
         assert "hh_id" not in cmap_survey.demographics_schema.names
 
         user_attributes = build_user_attributes(cmap_survey)
-        assert user_attributes.shape == (len(cmap_survey.user_ids), len(cmap_survey.demographics_schema.columns))
+        assert user_attributes.shape == (len(cmap_survey.user_ids), cmap_survey.demographics_schema.width)
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder

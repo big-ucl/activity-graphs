@@ -78,6 +78,10 @@ class TestTensorSchema:
         with pytest.raises(KeyError, match="no column `gender`"):
             user_attributes().index_of("gender")
 
+    def test_width_counts_the_columns(self):
+        assert user_attributes().width == 5
+        assert TensorSchema("targets", ()).width == 0
+
     def test_names_follow_column_order(self):
         schema = user_attributes()
 
@@ -112,8 +116,13 @@ class TestDatasetSchema:
         assert income.categories == ("low", "mid", "high")
         assert income.kind is CATEGORICAL
 
+    def test_groups_hold_one_schema_per_field_in_field_order(self):
+        groups = dataset_schema().groups
+
+        assert [schema.group for schema in groups] == [field.name for field in fields(DatasetSchema)]
+
     def test_a_schema_must_sit_in_its_own_group(self):
-        groups = {field.name: getattr(dataset_schema(), field.name) for field in fields(DatasetSchema)}
+        groups = {schema.group: schema for schema in dataset_schema().groups}
         groups["edges"] = TensorSchema("locations", ())
 
         with pytest.raises(ValueError, match="`edges` schema is labelled with group `locations`"):

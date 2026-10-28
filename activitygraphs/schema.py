@@ -100,6 +100,11 @@ class TensorSchema:
         """Column names, in column order."""
         return [column.name for column in self.columns]
 
+    @property
+    def width(self) -> int:
+        """Schema width, i.e. number of columns."""
+        return len(self.columns)
+
     def index_of(self, name: str) -> int:
         """Return the column index of ``name``.
 
@@ -151,15 +156,22 @@ class DatasetSchema:
 
     def __post_init__(self) -> None:
         """Check that each schema is labelled with the group it is stored in."""
-        for field in fields(self):
-            group = getattr(self, field.name).group
-            if group != field.name:
-                raise ValueError(f"The `{field.name}` schema is labelled with group `{group}`.")
+        for field, schema in zip(fields(self), self.groups, strict=True):
+            if schema.group != field.name:
+                raise ValueError(f"The `{field.name}` schema is labelled with group `{schema.group}`.")
+
+    @property
+    def groups(self) -> tuple[TensorSchema, ...]:
+        """Return the schema of every tensor group, in field order."""
+        return tuple(getattr(self, field.name) for field in fields(self))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the schemas as a JSON-serialisable dict, keyed by group."""
+        return {schema.group: schema.to_dict() for schema in self.groups}
 
     def save(self, path: Path) -> None:
         """Write the schemas to ``path`` as JSON."""
-        schemas = {field.name: getattr(self, field.name).to_dict() for field in fields(self)}
-        path.write_text(json.dumps(schemas, indent=2))
+        path.write_text(json.dumps(self.to_dict(), indent=2))
 
     @classmethod
     def read(cls, path: Path) -> Self:

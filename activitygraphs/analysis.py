@@ -1193,7 +1193,8 @@ def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int]
         users_per_node, p50, p90, max, share_users_ge_10/25/60``.
     """
     n_nodes = dataset.num_nodes
-    home_nodes = dataset.user_node_features[:, :, dataset.is_home_user_node_idx].argmax(dim=1)
+    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
+    home_nodes = dataset.user_node_features[:, :, is_home_idx].argmax(dim=1)
     occupancy_thresholds = (
         DEFAULT_ANALYSIS.occupancy_thresholds if occupancy_thresholds is None else occupancy_thresholds
     )

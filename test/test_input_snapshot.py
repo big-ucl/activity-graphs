@@ -5,6 +5,7 @@ dataset, scaling or feature-assembly path can be checked to leave them unchanged
 ``uv run python test/test_input_snapshot.py`` only when a change to the inputs is intended.
 """
 
+import dataclasses
 import datetime as dt
 import itertools
 import json
@@ -25,9 +26,10 @@ from activitygraphs.datasets.datamodule import positional_encodings
 from activitygraphs.datasets.dataset import FINGERPRINT_FILE, VisitDataset, load_dataset
 from activitygraphs.datasets.scalers import apply_scalers, fit_scalers
 from activitygraphs.ml.lightning_module import extract_features
-from activitygraphs.schema import TensorSchema
-from activitygraphs.surveys.cmap import CMAPSurvey
-from activitygraphs.tensors import build_tensors
+from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
+from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA, CMAPSurvey
+from activitygraphs.tensors import SurveyTensors, build_tensors
+from activitygraphs.tensors.build import NO_DEMOGRAPHICS_SCHEMA
 from activitygraphs.utils import add_lon_lat_from_centroid
 
 SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "model_inputs.pt"
@@ -134,8 +136,8 @@ def build_journeys(users: pl.DataFrame, loc_ids: list[str]) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=USER_JOURNEY_SCHEMA)
 
 
-def build_dataset(survey_name: str, root: Path) -> VisitDataset:
-    """Return the unscaled ``VisitDataset`` of the synthetic survey ``survey_name``, processed under ``root``."""
+def build_survey_tensors(survey_name: str) -> SurveyTensors:
+    """Return the tensors of the synthetic survey ``survey_name``."""
     zones = build_zones()
     nodes_gdf, edges_gdf = build_graph(zones)
     loc_ids = zones["loc_id"].tolist()
@@ -143,7 +145,12 @@ def build_dataset(survey_name: str, root: Path) -> VisitDataset:
     survey_cls = CMAPSurvey if survey_name == "cmap" else NoDemographicsSurvey
     survey = survey_cls(zones, build_journeys(users, loc_ids), users).with_filter("zone")
 
-    tensors = build_tensors(survey, nodes_gdf, edges_gdf)
+    return build_tensors(survey, nodes_gdf, edges_gdf)
+
+
+def build_dataset(survey_name: str, root: Path) -> VisitDataset:
+    """Return the unscaled ``VisitDataset`` of the synthetic survey ``survey_name``, processed under ``root``."""
+    tensors = build_survey_tensors(survey_name)
 
     return VisitDataset(str(root), lambda: tensors, pre_transform=positional_encodings())
 
@@ -160,7 +167,8 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
         combination of ``FLAGS``, keyed by the active flags joined with ``+`` (``"none"`` for no flags).
     """
     dataset = build_dataset(survey_name, root)
-    scalers = fit_scalers(dataset, TRAIN_IDX, fingerprint={}, exclude_user_node_cols=[dataset.is_home_user_node_idx])
+    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
+    scalers = fit_scalers(dataset, TRAIN_IDX, fingerprint={}, exclude_user_node_cols=[is_home_idx])
     apply_scalers(dataset, scalers)
 
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
@@ -220,6 +228,36 @@ def test_the_cache_carries_the_survey_ids_and_the_fingerprint(tmp_path):
     fingerprint = json.loads((Path(dataset.processed_dir) / FINGERPRINT_FILE).read_text())
     assert fingerprint["n_users"] == NUM_USERS
     assert fingerprint["n_groups"] == NUM_HOUSEHOLDS
+
+
+@pytest.mark.parametrize(
+    ("survey_name", "user_attributes"),
+    [("cmap", CMAP_DEMOGRAPHICS_SCHEMA), ("no_demographics", NO_DEMOGRAPHICS_SCHEMA)],
+)
+def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attributes, tmp_path):
+    dataset = build_dataset(survey_name, tmp_path)
+    schema = dataset.schema
+
+    assert schema.user_attributes == user_attributes
+    assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential"]
+    assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2]
+    assert schema.locations.width == dataset.location_x.shape[1]
+    assert schema.edges.width == dataset.edge_attr.shape[1]
+    assert schema.user_nodes.width == dataset.user_node_features.shape[-1]
+    assert schema.user_attributes.width == dataset.user_attributes.shape[-1]
+    assert schema.distances.width == dataset.distances.shape[-1]
+    assert schema.targets.width == dataset.visit_labels.shape[-1]
+    assert dataset.is_home_col_idx == schema.locations.width + schema.user_nodes.index_of("is_home")
+
+
+def test_a_tensor_whose_width_differs_from_its_schema_raises(tmp_path):
+    tensors = build_survey_tensors("cmap")
+    extra_column = ColumnSpec("extra", ColumnKind.BINARY)
+    user_nodes = TensorSchema("user_nodes", (*tensors.schema.user_nodes.columns, extra_column))
+    tensors = dataclasses.replace(tensors, schema=dataclasses.replace(tensors.schema, user_nodes=user_nodes))
+
+    with pytest.raises(ValueError, match="`user_nodes` tensor has 1 columns but its schema has 2"):
+        VisitDataset(str(tmp_path), lambda: tensors)
 
 
 def test_reading_an_uncached_dataset_without_a_builder_raises(tmp_path):

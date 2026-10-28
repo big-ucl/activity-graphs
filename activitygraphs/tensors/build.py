@@ -12,6 +12,7 @@ import torch
 import torch_geometric as pyg
 
 from activitygraphs.base import Purpose
+from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema, infer_schema
 from activitygraphs.surveys.base import SurveyData
 
 COLS_EXCLUDED_FROM_FEATURES = [
@@ -27,11 +28,11 @@ COLS_EXCLUDED_FROM_FEATURES = [
     "original_geometry",
 ]
 
-# Single source of truth for the per-user node feature columns, in the order they are
-# appended after the graph's node features in the concatenated node feature matrix `x`.
-# `is_home` must stay first so that the derived home-column index (see VisitDataset)
-# remains valid for `is_home_node_mask`, the conditional baseline and the home exclusion.
-USER_NODE_FEATURE_NAMES = ["is_home"]
+USER_NODE_SCHEMA = TensorSchema("user_nodes", (ColumnSpec("is_home", ColumnKind.BINARY),))
+EDGE_SCHEMA = TensorSchema("edges", (ColumnSpec("weight", ColumnKind.COUNT),))
+DISTANCE_SCHEMA = TensorSchema("distances", (ColumnSpec("home_distance", ColumnKind.COUNT),))
+TARGET_SCHEMA = TensorSchema("targets", (ColumnSpec("is_visited", ColumnKind.BINARY),))
+NO_DEMOGRAPHICS_SCHEMA = TensorSchema("user_attributes", (ColumnSpec("constant", ColumnKind.BINARY),))
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class SurveyTensors:
         group_ids: Per-user group/hh-ids, ``[n_users]``.
         user_ids: Survey ``user_id`` and ``hh_id`` of each user, one row per tensor row.
         node_ids: Survey ``loc_id`` of each node, one row per graph node.
+        schema: Column schema of each tensor group.
     """
 
     pyg_graph: pyg.data.Data
@@ -57,6 +59,7 @@ class SurveyTensors:
     group_ids: torch.Tensor
     user_ids: pl.DataFrame
     node_ids: pl.DataFrame
+    schema: DatasetSchema
 
 
 # =========================================
@@ -151,7 +154,7 @@ def build_user_attributes(survey: SurveyData) -> torch.Tensor:
     """Create the user attribute float32 tensor of shape ``[n_users, n_attr]`` from SurveyData.
 
     Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), returns a (n_users, 1) dummy
-    tensor of ones.
+    tensor of ones, described by ``NO_DEMOGRAPHICS_SCHEMA``.
     """
     col_names = survey.demographics_schema.names
     if not col_names:
@@ -198,11 +201,37 @@ def build_node_ids(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame) -> pl.DataFr
     return node_ids
 
 
+def build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_cols: list[str]) -> DatasetSchema:
+    """Return the final dataset schema. Extracts schema from ``survey`` and infers schema on ``nodes_gdf``.
+
+    Args:
+        survey: The survey which is the source of the demographics schema.
+        nodes_gdf: The graph nodes that contain the location feature columns.
+        node_feature_cols: The columns names of the location features, in tensor column order.
+
+    Returns:
+        The dataset schema.
+    """
+    locations_schema = infer_schema("locations", nodes_gdf, node_feature_cols, {})
+    demographics_schema = survey.demographics_schema
+    user_attributes_schema = demographics_schema if demographics_schema.columns else NO_DEMOGRAPHICS_SCHEMA
+
+    return DatasetSchema(
+        locations=locations_schema,
+        edges=EDGE_SCHEMA,
+        user_nodes=USER_NODE_SCHEMA,
+        user_attributes=user_attributes_schema,
+        distances=DISTANCE_SCHEMA,
+        targets=TARGET_SCHEMA,
+    )
+
+
 def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gpd.GeoDataFrame) -> SurveyTensors:
     """Convert the graph and the survey into PyG and tensor form.
 
     Returns:
-        The shared PyG graph, the per-user tensors and the survey ids of the users and nodes.
+        Bundle containing the shared PyG graph, the per-user tensors, the survey ids of the users and nodes,
+        and the dataset schema.
     """
     user_node_features = build_home_indicator(survey)
     visit_labels = build_visit_labels(survey, list(Purpose))
@@ -216,7 +245,7 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         nodes_gdf,
         edges_gdf,
         node_feature_cols=node_feature_cols,
-        edge_feature_cols=["weight"],
+        edge_feature_cols=EDGE_SCHEMA.names,
         keep_geom=False,
         device="cpu",
     )
@@ -230,4 +259,5 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         group_ids=hh_ids,
         user_ids=build_user_ids(survey),
         node_ids=build_node_ids(survey, nodes_gdf),
+        schema=build_schema(survey, nodes_gdf, node_feature_cols),
     )

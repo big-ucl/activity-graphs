@@ -50,6 +50,7 @@ from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import NodeMLP
 from activitygraphs.runs import PER_USER_FILE, RESULTS_FILE, SCORES_FILE
+from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"
@@ -88,12 +89,19 @@ def make_per_user() -> pl.DataFrame:
 
 
 @dataclass
+class FakeSchema:
+    """Minimal stand-in for the ``DatasetSchema`` of a ``FakeDataset``."""
+
+    user_nodes: TensorSchema
+
+
+@dataclass
 class FakeDataset:
     """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``VisitDataset``."""
 
     user_node_features: torch.Tensor
     num_nodes: int
-    is_home_user_node_idx: int
+    schema: FakeSchema
 
 
 def make_dataset(home_nodes: list[int], n_nodes: int = 3, is_home_idx: int = 1) -> FakeDataset:
@@ -102,7 +110,10 @@ def make_dataset(home_nodes: list[int], n_nodes: int = 3, is_home_idx: int = 1) 
     for user, node in enumerate(home_nodes):
         user_node[user, node, is_home_idx] = 1.0
 
-    return FakeDataset(user_node_features=user_node, num_nodes=n_nodes, is_home_user_node_idx=is_home_idx)
+    columns = tuple(ColumnSpec(f"flag_{c}", ColumnKind.BINARY) for c in range(is_home_idx))
+    user_nodes = TensorSchema("user_nodes", (*columns, ColumnSpec("is_home", ColumnKind.BINARY)))
+
+    return FakeDataset(user_node_features=user_node, num_nodes=n_nodes, schema=FakeSchema(user_nodes))
 
 
 def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:

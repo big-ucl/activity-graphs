@@ -17,6 +17,7 @@ from activitygraphs.datasets.dataset import (
     tensors_fingerprint,
 )
 from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
+from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
 from activitygraphs.tensors import SurveyTensors
 
 
@@ -34,8 +35,28 @@ class FakeDataset:
         return self.tensors.user_attributes.shape[0]
 
 
+def make_group(group: str, width: int, kind: ColumnKind = ColumnKind.CONTINUOUS) -> TensorSchema:
+    return TensorSchema(group, tuple(ColumnSpec(f"{group}_{i}", kind) for i in range(width)))
+
+
+def make_schema(n_user_node: int, n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
+    return DatasetSchema(
+        locations=make_group("locations", 0),
+        edges=make_group("edges", 0),
+        user_nodes=make_group("user_nodes", n_user_node),
+        user_attributes=make_group("user_attributes", n_demo, demo_kind),
+        distances=make_group("distances", 1),
+        targets=make_group("targets", 1),
+    )
+
+
 def make_dataset(
-    n_users: int = 40, n_nodes: int = 12, n_demo: int = 5, users_per_group: int = 1, user_id_prefix: str = "u"
+    n_users: int = 40,
+    n_nodes: int = 12,
+    n_demo: int = 5,
+    users_per_group: int = 1,
+    user_id_prefix: str = "u",
+    demo_kind: ColumnKind = ColumnKind.CONTINUOUS,
 ) -> FakeDataset:
     """Build a fake dataset whose users are laid out in consecutive groups of ``users_per_group``.
 
@@ -57,6 +78,7 @@ def make_dataset(
             group_ids=group_ids,
             user_ids=user_ids,
             node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),
+            schema=make_schema(4, n_demo, demo_kind),
         )
     )
 
@@ -111,6 +133,11 @@ class TestDatasetFingerprint:
         # A cohort change that keeps every count must still invalidate the cached row indices.
         assert fingerprint_of(cfg, make_dataset(user_id_prefix="u")) != fingerprint_of(
             cfg, make_dataset(user_id_prefix="v")
+        )
+
+    def test_detects_a_changed_column_kind_at_equal_widths(self, cfg):
+        assert fingerprint_of(cfg, make_dataset(demo_kind=ColumnKind.CONTINUOUS)) != fingerprint_of(
+            cfg, make_dataset(demo_kind=ColumnKind.BINARY)
         )
 
     def test_is_read_back_from_the_file_beside_the_tensors(self, tmp_path, cfg):

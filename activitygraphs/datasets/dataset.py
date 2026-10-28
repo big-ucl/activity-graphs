@@ -17,8 +17,9 @@ from scipy.sparse.csgraph import shortest_path
 
 from activitygraphs.config import Config, DataConfig
 from activitygraphs.graph import load_graph
+from activitygraphs.schema import DatasetSchema
 from activitygraphs.surveys.registry import load_survey
-from activitygraphs.tensors import USER_NODE_FEATURE_NAMES, SurveyTensors, build_tensors
+from activitygraphs.tensors import SurveyTensors, build_tensors
 from activitygraphs.utils import get_project_root
 
 type Fingerprint = dict
@@ -48,6 +49,7 @@ class VisitDataset(pyg.data.Dataset):
         "group_ids.pt",
         "user_ids.parquet",
         "node_ids.parquet",
+        "schema.json",
         FINGERPRINT_FILE,
     ]
 
@@ -85,9 +87,11 @@ class VisitDataset(pyg.data.Dataset):
         self.group_ids: torch.Tensor = torch.load(processed_dir / "group_ids.pt", weights_only=True)
         self.user_ids: pl.DataFrame = pl.read_parquet(processed_dir / "user_ids.parquet")
         self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / "node_ids.parquet")
+        self.schema: DatasetSchema = DatasetSchema.read(processed_dir / "schema.json")
 
         # Check that each user has one and only one home node
-        home_counts = self.user_node_features[:, :, self.is_home_user_node_idx].sum(dim=1)
+        is_home_idx = self.schema.user_nodes.index_of("is_home")
+        home_counts = self.user_node_features[:, :, is_home_idx].sum(dim=1)
         if not torch.all(home_counts == 1):
             num_bad = int((home_counts != 1).sum())
             raise ValueError(f"{num_bad} users do not have exactly one home node. Expected one per user.")
@@ -130,14 +134,9 @@ class VisitDataset(pyg.data.Dataset):
         return self.pyg_graph.random_walk_pe.shape[1]
 
     @property
-    def is_home_user_node_idx(self) -> int:
-        """Column index of ``is_home`` within the per-user node feature block."""
-        return USER_NODE_FEATURE_NAMES.index("is_home")
-
-    @property
     def is_home_col_idx(self) -> int:
         """Column index of ``is_home`` within the concatenated node feature matrix ``x``."""
-        return self.num_location_features + self.is_home_user_node_idx
+        return self.num_location_features + self.schema.user_nodes.index_of("is_home")
 
     @cached_property
     def home_hop_distance(self) -> np.ndarray:
@@ -178,9 +177,9 @@ class VisitDataset(pyg.data.Dataset):
         group_ids = tensors.group_ids
 
         num_unf_users, num_unf_nodes, _ = unf.shape
-        num_vl_users, num_vl_nodes, num_vl_labels = vl.shape
+        num_vl_users, num_vl_nodes, _ = vl.shape
         num_attr_users, _ = attr.shape
-        num_di_users, num_di_nodes, num_di_feat = dist.shape
+        num_di_users, num_di_nodes, _ = dist.shape
         num_grp_users = group_ids.shape[0]
 
         if not (graph.num_nodes == num_unf_nodes == num_vl_nodes == num_di_nodes):
@@ -193,10 +192,23 @@ class VisitDataset(pyg.data.Dataset):
                 f"User count mismatch: user_node_features has {num_unf_users}, visit_labels has {num_vl_users}, "
                 f"user_attributes has {num_attr_users}, distances has {num_di_users}."
             )
-        if num_vl_labels != 1:
-            raise ValueError(f"visit_labels last dim must be 1, got {num_vl_labels}.")
-        if num_di_feat != 1:
-            raise ValueError(f"distances last dim must be 1, got {num_di_feat}.")
+
+        tensor_widths = {
+            "locations": graph.num_node_features,
+            "edges": graph.num_edge_features,
+            "user_nodes": unf.shape[-1],
+            "user_attributes": attr.shape[-1],
+            "distances": dist.shape[-1],
+            "targets": vl.shape[-1],
+        }
+
+        for group_schema in tensors.schema.groups:
+            width = tensor_widths[group_schema.group]
+            if width != group_schema.width:
+                raise ValueError(
+                    f"The `{group_schema.group}` tensor has {width} columns but its schema has {group_schema.width}."
+                )
+
         if tensors.user_ids.height != num_unf_users or tensors.node_ids.height != num_unf_nodes:
             raise ValueError(
                 f"Id count mismatch: {tensors.user_ids.height} user ids for {num_unf_users} users, "
@@ -215,6 +227,7 @@ class VisitDataset(pyg.data.Dataset):
         torch.save(group_ids, processed_dir / "group_ids.pt")
         tensors.user_ids.write_parquet(processed_dir / "user_ids.parquet")
         tensors.node_ids.write_parquet(processed_dir / "node_ids.parquet")
+        tensors.schema.save(processed_dir / "schema.json")
         (processed_dir / FINGERPRINT_FILE).write_text(json.dumps(tensors_fingerprint(tensors), indent=2))
 
     def len(self) -> int:
@@ -297,8 +310,9 @@ def load_dataset(
 
 
 def tensors_fingerprint(tensors: SurveyTensors) -> Fingerprint:
-    """Return the identity of ``tensors`` stored beside the cache: their shapes and a hash of the user and node ids."""
+    """Return the identity of ``tensors`` stored beside the cache: their shapes and hashes of the ids and the schema."""
     ids = tensors.user_ids.write_csv() + tensors.node_ids.write_csv()
+    schema = json.dumps(tensors.schema.to_dict(), sort_keys=True)
 
     return {
         "n_users": tensors.user_attributes.shape[0],
@@ -307,6 +321,7 @@ def tensors_fingerprint(tensors: SurveyTensors) -> Fingerprint:
         "n_user_attribute_cols": tensors.user_attributes.shape[-1],
         "n_groups": len(tensors.group_ids.unique()),
         "ids": hashlib.blake2b(ids.encode(), digest_size=16).hexdigest(),
+        "schema": hashlib.blake2b(schema.encode(), digest_size=16).hexdigest(),
     }
 
 
