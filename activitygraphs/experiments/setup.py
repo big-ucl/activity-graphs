@@ -84,7 +84,8 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     train_dataset = datamodule.train_dataset
 
     home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
-    loss = build_loss(cfg.train.loss, home_hop_distance, train_dataset.is_home_col_idx, cfg.train.max_recall_k)
+    is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
+    loss = build_loss(cfg.train.loss, home_hop_distance, is_home_idx, cfg.train.max_recall_k)
 
     overfitting = cfg.trainer.overfit_batches > 0
     models = dict(cfg.models)

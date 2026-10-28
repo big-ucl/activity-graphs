@@ -43,24 +43,24 @@ def bce_loss(
 BCELoss = Loss(name="bce", loss_fn=bce_loss, monitor="val_bce", monitor_mode="min")
 
 
-def build_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_col_index: int, max_recall_k: int) -> Loss:
+def build_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_idx: int, max_recall_k: int) -> Loss:
     """Build the loss selected by ``cfg.type``."""
     if cfg.type == "bce":
         return BCELoss
     if cfg.type == "bpr":
-        return _build_bpr_loss(cfg, distance_matrix, is_home_col_index, max_recall_k)
+        return _build_bpr_loss(cfg, distance_matrix, is_home_idx, max_recall_k)
 
     raise ValueError(f"Unknown loss type {cfg.type}")
 
 
-def _build_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_col_idx: int, max_recall_k: int) -> Loss:
+def _build_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_idx: int, max_recall_k: int) -> Loss:
     def _uniform_bpr_loss(logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None):
         return bpr_loss(logits, batch.y, batch.batch, n_pairs=cfg.n_pairs, generator=generator)
 
     def _hard_neg_bpr_loss(
         logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
-        neg_restrict = _near_home_negative_mask(batch, distance_matrix, is_home_col_idx, cfg.is_near_threshold)
+        neg_restrict = _near_home_negative_mask(batch, distance_matrix, is_home_idx, cfg.is_near_threshold)
         return bpr_loss(logits, batch.y, batch.batch, cfg.n_pairs, neg_restrict, generator)
 
     _bpr_loss = _hard_neg_bpr_loss if cfg.neg_sampler == "hard" else _uniform_bpr_loss
@@ -140,11 +140,11 @@ def _near_home_negative_mask(
     Built from the same home-index logic as ``compute_home_hops``. Rows whose near-home
     pool is empty are left all-False; the caller falls back to all unvisited for those users.
     """
-    device = batch.x.device
+    device = batch.x_user_node.device
     distance_matrix = distance_matrix.to(device)
 
     node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
-    is_home = is_home_node_mask(batch.x, is_home_idx)
+    is_home = is_home_node_mask(batch.x_user_node, is_home_idx)
 
     home_idx_per_graph = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
     home_idx_per_graph[batch.batch[is_home]] = node_idx[is_home]

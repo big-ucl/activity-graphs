@@ -374,13 +374,14 @@ class TestPerUserRanking:
 class TestPerUserColumnsInModule:
     def _make_graph(self):
         """One 5-node graph; node 0 is home, positives at hop 0 and hop 3."""
-        x = torch.zeros(5, 2)
-        x[0, 0] = 1.0  # is_home at column 0, node 0
-        x[:, 1] = torch.rand(5)
+        x_user_node = torch.zeros(5, 1)
+        x_user_node[0, 0] = 1.0  # is_home at column 0, node 0
         y = torch.zeros(5, 1)
         y[0] = 1.0
         y[3] = 1.0
-        graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
+        graph = pyg.data.Data(
+            x_loc=torch.rand(5, 1), x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y
+        )
         graph.user_attr = torch.zeros(1, 2)
         graph.user_id = torch.tensor([0])
         return graph

@@ -879,12 +879,12 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
     generator = torch.Generator().manual_seed(0)
     graphs = []
     for user in range(num_graphs):
-        x = torch.rand(num_nodes, 2, generator=generator)
-        x[:, 0] = 0.0
-        x[0, 0] = 1.0
+        x_loc = torch.rand(num_nodes, 1, generator=generator)
+        x_user_node = torch.zeros(num_nodes, 1)
+        x_user_node[0, 0] = 1.0
         y = (torch.rand(num_nodes, 1, generator=generator) < 0.2).float()
         y[0] = 1.0
-        graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
+        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
         graph.user_attr = torch.zeros(1, 1)
         graph.user_id = torch.tensor([user])
         graphs.append(graph)

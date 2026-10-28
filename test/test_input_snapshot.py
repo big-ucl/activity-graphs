@@ -181,7 +181,7 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
         inputs[key] = extract_features(
             batch,
             full_info=flags["full_info"],
-            is_home_idx=dataset.is_home_col_idx,
+            is_home_idx=is_home_idx,
             use_demographics=flags["use_demographics"],
             home_hop_distance=home_hop_distance if flags["use_home_pe"] else None,
             use_rwpe=flags["use_rwpe"],
@@ -230,6 +230,19 @@ def test_the_cache_carries_the_survey_ids_and_the_fingerprint(tmp_path):
     assert fingerprint["n_groups"] == NUM_HOUSEHOLDS
 
 
+def test_an_item_carries_the_location_and_user_node_features_apart(tmp_path):
+    dataset = build_dataset("cmap", tmp_path)
+    item = dataset[3]
+    batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
+
+    assert "x" not in item
+    torch.testing.assert_close(item.x_loc, dataset.location_x)
+    torch.testing.assert_close(item.x_user_node, dataset.user_node_features[3])
+    assert item.num_nodes == dataset.num_nodes
+    assert batch.num_nodes == NUM_USERS * dataset.num_nodes
+    assert dataset.num_features == dataset.schema.locations.width + dataset.schema.user_nodes.width
+
+
 @pytest.mark.parametrize(
     ("survey_name", "user_attributes"),
     [("cmap", CMAP_DEMOGRAPHICS_SCHEMA), ("no_demographics", NO_DEMOGRAPHICS_SCHEMA)],
@@ -247,7 +260,7 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     assert schema.user_attributes.width == dataset.user_attributes.shape[-1]
     assert schema.distances.width == dataset.distances.shape[-1]
     assert schema.targets.width == dataset.visit_labels.shape[-1]
-    assert dataset.is_home_col_idx == schema.locations.width + schema.user_nodes.index_of("is_home")
+    assert dataset.is_home_idx_model_input == schema.locations.width + schema.user_nodes.index_of("is_home")
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises(tmp_path):

@@ -24,12 +24,18 @@ def make_graphs(num_graphs: int = 8) -> list[pyg.data.Data]:
     graphs = []
 
     for user in range(num_graphs):
-        x = torch.rand(NUM_NODES, NUM_FEATURES, generator=generator)
-        x[:, 0] = 0.0
-        x[0, 0] = 1.0
+        x_loc = torch.rand(NUM_NODES, NUM_FEATURES - 1, generator=generator)
+        x_user_node = torch.zeros(NUM_NODES, 1)
+        x_user_node[0, 0] = 1.0
         y = torch.zeros(NUM_NODES, 1)
         y[[0, 1 + user % (NUM_NODES - 1)]] = 1.0
-        graph = pyg.data.Data(x=x, edge_index=edge_index, edge_attr=torch.ones(edge_index.size(1), 1), y=y)
+        graph = pyg.data.Data(
+            x_loc=x_loc,
+            x_user_node=x_user_node,
+            edge_index=edge_index,
+            edge_attr=torch.ones(edge_index.size(1), 1),
+            y=y,
+        )
         graph.user_attr = torch.zeros(1, 1)
         graph.user_id = torch.tensor([user])
         graph.distances = torch.rand(NUM_NODES, 1, generator=generator)

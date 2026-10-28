@@ -50,8 +50,11 @@ class VisitDataset(pyg.data.Dataset):
     """Main PyG dataset for a travel survey: shared graph + per-user node features/visit labels + user attributes.
 
     Stores the graph once and slices per-user tensors on ``get()`` call.
-    Each item returned by ``get(i)`` is a ``pyg.data.Data`` with ``x = [location_features || user_node_features[i]]``,
-    ``y = visit_labels[i]``, and ``user_attr = user_attributes[i]``.
+    Each item returned by ``get(i)`` is a ``pyg.data.Data`` with additional tensors:
+      - ``x_loc = location_features``,
+      - ``x_user_node = user_node_features[i]``,
+      - ``y = visit_labels[i]``, and
+      - ``user_attr = user_attributes[i]``.
     """
 
     PROCESSED_FILE_NAMES = [str(file) for file in ProcessedFile]
@@ -132,8 +135,13 @@ class VisitDataset(pyg.data.Dataset):
 
     @property
     def num_location_features(self) -> int:
-        """Number of location node-feature columns (those preceding the user node block in ``x``)."""
+        """Number of location node-feature columns, ``x_loc``."""
         return self.location_x.shape[1]
+
+    @property
+    def num_node_features(self) -> int:
+        """Number of node feature columns of an item, ``x_loc`` and ``x_user_node`` together."""
+        return self.num_location_features + self.schema.user_nodes.width
 
     @property
     def num_rwpe_features(self) -> int:
@@ -141,8 +149,8 @@ class VisitDataset(pyg.data.Dataset):
         return self.pyg_graph.random_walk_pe.shape[1]
 
     @property
-    def is_home_col_idx(self) -> int:
-        """Column index of ``is_home`` within the concatenated node feature matrix ``x``."""
+    def is_home_idx_model_input(self) -> int:
+        """Column index of ``is_home`` within the model input built by ``extract_features``."""
         return self.num_location_features + self.schema.user_nodes.index_of("is_home")
 
     @cached_property
@@ -242,7 +250,7 @@ class VisitDataset(pyg.data.Dataset):
         return self.num_users
 
     def get(self, idx: int) -> pyg.data.Data:
-        """Return user ``idx``'s graph: shared location features joined with the user's features and labels."""
+        """Return user ``idx``'s graph: shared location features, and user's node features and labels."""
         if not 0 <= idx < self.num_users:
             raise IndexError(f"Index {idx} out of range for {self.num_users} users.")
 
@@ -254,20 +262,26 @@ class VisitDataset(pyg.data.Dataset):
             user_node_x = user_node_x.to(location_x.dtype)
 
         # Create new user-annotated graph
-        full_x = torch.cat([location_x, user_node_x], dim=1)
         y = self.visit_labels[idx]
         user_attr = self.user_attributes[idx]
         edge_index = self.edge_index
         edge_attr = self.edge_attr
 
-        data = pyg.data.Data(x=full_x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+        data = pyg.data.Data(
+            x_loc=location_x,
+            x_user_node=user_node_x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            y=y,
+            num_nodes=self.num_nodes,
+        )
 
         # Unsqueeze so batching works
         data.user_attr = user_attr.unsqueeze(0)
         data.user_id = torch.tensor([idx], dtype=torch.long)
 
         # Per-user distance-from-home
-        data.distances = self.distances[idx].to(full_x.dtype)
+        data.distances = self.distances[idx].to(location_x.dtype)
 
         # Carry over any extra attributes from the graph (pos, etc.)
         for key, value in self.pyg_graph:  # pyrefly: ignore[not-iterable]

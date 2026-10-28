@@ -24,11 +24,12 @@ class OverfitDebugCallback(L.Callback):
         assert isinstance(pl_module, RankingModule)
 
         if trainer.current_epoch == 0:
-            b_min, b_max, b_mean = batch.x.min().item(), batch.x.max().item(), batch.x.mean().item()
+            x = torch.cat([batch.x_loc, batch.x_user_node], dim=-1)
+            b_min, b_max, b_mean = x.min().item(), x.max().item(), x.mean().item()
 
             log.info("[overfit-debug] num_nodes=%d num_graphs=%d", batch.num_nodes, batch.num_graphs)
             log.info("[overfit-debug] y.sum()=%s y.numel()=%d", batch.y.sum().item(), batch.y.numel())
-            log.info("[overfit-debug] x.isnan().any()=%s", torch.isnan(batch.x).any().item())
+            log.info("[overfit-debug] x.isnan().any()=%s", torch.isnan(x).any().item())
             log.info("[overfit-debug] x.min/max/mean=%.4f/%.4f/%.4f", b_min, b_max, b_mean)
             log.info("[overfit-debug] positive rate=%.4f", batch.y.float().mean().item())
 

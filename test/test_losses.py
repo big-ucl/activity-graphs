@@ -43,10 +43,10 @@ def test_bpr_skips_users_without_positives():
 
 
 def test_bpr_selects_checkpoints_on_the_average_recall_at_the_budget():
-    loss = build_loss(LossConfig(type="bpr"), torch.zeros(4, 4), is_home_col_index=0, max_recall_k=50)
+    loss = build_loss(LossConfig(type="bpr"), torch.zeros(4, 4), is_home_idx=0, max_recall_k=50)
     assert (loss.monitor, loss.monitor_mode) == ("val_avg_recall@50", "max")
 
 
 def test_bce_selects_checkpoints_on_the_validation_bce():
-    loss = build_loss(LossConfig(type="bce"), torch.zeros(4, 4), is_home_col_index=0, max_recall_k=50)
+    loss = build_loss(LossConfig(type="bce"), torch.zeros(4, 4), is_home_idx=0, max_recall_k=50)
     assert (loss.monitor, loss.monitor_mode) == ("val_bce", "min")

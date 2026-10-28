@@ -26,12 +26,12 @@ class PerUserTensors:
     distances: torch.Tensor
 
 
-def extract_per_user_tensors(loader: pyg.loader.DataLoader, is_home_idx: int) -> PerUserTensors:
+def extract_per_user_tensors(loader: pyg.loader.DataLoader, is_home_idx_user_node: int) -> PerUserTensors:
     """Takes a dataloader and extracts the per-user information into dense CPU tensors.
 
     Args:
         loader: DataLoader over a dataset; every graph must have the same node count.
-        is_home_idx: Column index of ``is_home`` in ``batch.x``.
+        is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
 
     Returns:
         The dataloader's ``SplitTensors``.
@@ -43,7 +43,9 @@ def extract_per_user_tensors(loader: pyg.loader.DataLoader, is_home_idx: int) ->
 
     for batch in loader:
         batch = batch.to("cpu")
-        is_home, _ = to_dense_batch(is_home_node_mask(batch.x, is_home_idx), batch.batch, fill_value=False)
+        is_home, _ = to_dense_batch(
+            is_home_node_mask(batch.x_user_node, is_home_idx_user_node), batch.batch, fill_value=False
+        )
         if not is_home.any(dim=1).all():
             raise ValueError("No home node found.")
 
@@ -68,13 +70,13 @@ def graph_node_indices(x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
     return torch.arange(x.shape[0], device=x.device) - ptr[batch]
 
 
-def graph_home_indices(x: torch.Tensor, batch: torch.Tensor, is_home_idx: int) -> torch.Tensor:
+def graph_home_indices(x: torch.Tensor, batch: torch.Tensor, is_home_idx_model_input: int) -> torch.Tensor:
     """Return, for each node, the within-graph index of the corresponding home node, ``[num_nodes]``.
 
     Raises:
         ValueError: If a graph has no home node.
     """
-    is_home, _ = to_dense_batch(is_home_node_mask(x, is_home_idx), batch, fill_value=False)
+    is_home, _ = to_dense_batch(is_home_node_mask(x, is_home_idx_model_input), batch, fill_value=False)
     if not is_home.any(dim=1).all():
         raise ValueError("No home node found.")
 

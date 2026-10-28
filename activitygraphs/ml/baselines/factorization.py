@@ -35,7 +35,8 @@ class HomeZoneMFBaseline(torch.nn.Module):
 
     Args:
         num_nodes: Number of nodes in the graph.
-        is_home_idx: Column index of ``is_home`` in ``batch.x``.
+        is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
+        is_home_idx_model_input: Column index of ``is_home`` in the model input ``x`` of ``forward``.
         max_recall_k: Largest rank cutoff ``K`` of the validation ``avg_recall@K`` that selects the kept factors.
         n_factors: Latent dimension ``k``.
         lr: Adam learning rate.
@@ -58,7 +59,8 @@ class HomeZoneMFBaseline(torch.nn.Module):
     def __init__(
         self,
         num_nodes: int,
-        is_home_idx: int,
+        is_home_idx_user_node: int,
+        is_home_idx_model_input: int,
         max_recall_k: int,
         n_factors: int = N_FACTORS,
         lr: float = LEARNING_RATE,
@@ -70,7 +72,8 @@ class HomeZoneMFBaseline(torch.nn.Module):
     ):
         super().__init__()
         self.num_nodes = num_nodes
-        self.is_home_idx = is_home_idx
+        self.is_home_idx_user_node = is_home_idx_user_node
+        self.is_home_idx_model_input = is_home_idx_model_input
         self.max_recall_k = max_recall_k
         self.n_factors = n_factors
         self.lr = lr
@@ -85,8 +88,8 @@ class HomeZoneMFBaseline(torch.nn.Module):
 
         The best epoch is the one whose validation ``avg_recall`` is highest.
         """
-        train = extract_per_user_tensors(train_loader, self.is_home_idx)
-        val = extract_per_user_tensors(val_loader, self.is_home_idx)
+        train = extract_per_user_tensors(train_loader, self.is_home_idx_user_node)
+        val = extract_per_user_tensors(val_loader, self.is_home_idx_user_node)
 
         counts, _ = home_visit_counts(train.labels, train.home_idx)
         pos_weight = counts.fill_diagonal_(0)
@@ -142,5 +145,5 @@ class HomeZoneMFBaseline(torch.nn.Module):
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
     ) -> torch.Tensor:
         """Return the fitted home-by-node score of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(x, batch, self.is_home_idx)
+        homes = graph_home_indices(x, batch, self.is_home_idx_model_input)
         return self.scores.to(x.device)[homes, graph_node_indices(x, batch)].unsqueeze(1)

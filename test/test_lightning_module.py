@@ -29,13 +29,14 @@ def recall_at_k(scores, labels, k):
     return labels[top_k].sum().item() / labels.sum().item()
 
 
-NUM_NODE_FEATURES = 6
+NUM_LOCATION_FEATURES = 5
+NUM_USER_NODE_FEATURES = 1
+NUM_NODE_FEATURES = NUM_LOCATION_FEATURES + NUM_USER_NODE_FEATURES
 NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
 NUM_RWPE_FEATURES = 4
 IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
-# Column of the per-user ``is_home`` indicator in the synthetic ``x``, mirroring the real dataset,
-# where the user node block starts with ``is_home`` (see ``VisitDataset.is_home_col_idx``).
+# Column of the per-user ``is_home`` indicator in the synthetic ``x_user_node``, mirroring the real dataset.
 IS_HOME_IDX = 0
 HOME_NODE = 0
 
@@ -56,10 +57,10 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
     rng = torch.Generator().manual_seed(seed)
     graphs = []
     for g in range(num_graphs):
-        x = torch.rand(num_nodes, NUM_NODE_FEATURES, generator=rng)
+        x_loc = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=rng)
+        x_user_node = torch.zeros(num_nodes, NUM_USER_NODE_FEATURES)
         y = torch.randint(0, 2, (num_nodes, 1), generator=rng).float()
-        x[:, IS_HOME_IDX] = 0.0
-        x[HOME_NODE, IS_HOME_IDX] = 1.0
+        x_user_node[HOME_NODE, IS_HOME_IDX] = 1.0
         y[HOME_NODE] = 1.0
         # simple chain edges
         src = torch.arange(num_nodes - 1)
@@ -67,7 +68,8 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
         edge_index = torch.stack([torch.cat([src, dst]), torch.cat([dst, src])], dim=0)
         edge_attr = torch.rand(edge_index.size(1), NUM_EDGE_FEATURES, generator=rng)
         data = pyg.data.Data(
-            x=x,
+            x_loc=x_loc,
+            x_user_node=x_user_node,
             edge_index=edge_index,
             edge_attr=edge_attr,
             y=y,
@@ -310,13 +312,13 @@ class TestRwpe:
         batch = make_batch(num_graphs=2, num_nodes=8)
         x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False, use_rwpe=True)
 
-        torch.testing.assert_close(x, torch.cat([batch.x, batch.random_walk_pe], dim=-1))
+        torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node, batch.random_walk_pe], dim=-1))
 
     def test_left_out_by_default(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
         x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
 
-        torch.testing.assert_close(x, batch.x)
+        torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node], dim=-1))
 
     def test_a_model_built_with_rwpe_trains(self, monkeypatch):
         batch = make_batch(num_graphs=2, num_nodes=8)
@@ -480,7 +482,7 @@ class TestHomeExclusion:
         capture_logs(module, monkeypatch)
 
         # Each user visits their home and exactly one other node.
-        is_home = batch.x[:, IS_HOME_IDX] > 0.0
+        is_home = batch.x_user_node[:, IS_HOME_IDX] > 0.0
         batch.y = is_home.clone().float().unsqueeze(-1)
         for i in range(batch.num_graphs):
             batch.y[scored_nodes(batch, i)[0]] = 1.0
@@ -560,7 +562,7 @@ class TestRankingView:
 
     def test_no_home_node_survives_into_the_ranking_view(self, monkeypatch):
         step, batch = self._step(monkeypatch)
-        home_rows = (batch.x[:, IS_HOME_IDX] > 0.0).nonzero(as_tuple=True)[0]
+        home_rows = (batch.x_user_node[:, IS_HOME_IDX] > 0.0).nonzero(as_tuple=True)[0]
 
         assert not step.ranking.scored[home_rows].any()
         # Every user still has candidates left, so none of them drops out of the view.
@@ -662,18 +664,18 @@ def make_home_batch(
 ) -> tuple[pyg.data.Batch, torch.Tensor, int]:
     """A batch with a clean one-hot ``is_home`` column plus a chain-graph hop-distance matrix.
 
-    Column 0 of ``x`` is repurposed as ``is_home`` (one node per graph set to 1). Because the graphs
+    Column 0 of ``x_user_node`` is ``is_home`` (one node per graph set to 1). Because the graphs
     are chains 0-1-...-(N-1), hop distance between nodes i and j is ``|i - j|``, so ``home_hop_distance``
     is the ``[N, N]`` absolute-difference matrix. ``home_nodes`` picks each graph's home node index.
     """
     batch = make_batch(num_graphs=num_graphs, num_nodes=num_nodes, seed=seed)
     is_home_idx = 0
-    batch.x[:, is_home_idx] = 0.0
+    batch.x_user_node[:, is_home_idx] = 0.0
     if home_nodes is None:
         home_nodes = [0] * num_graphs
     for i, h in enumerate(home_nodes):
         graph_rows = (batch.batch == i).nonzero(as_tuple=True)[0]
-        batch.x[graph_rows[h], is_home_idx] = 1.0
+        batch.x_user_node[graph_rows[h], is_home_idx] = 1.0
 
     return batch, chain_hop_distance(num_nodes), is_home_idx
 
@@ -711,7 +713,7 @@ class TestHomePositionalEncoding:
         pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=8)
 
         assert pe.shape == (batch.num_nodes, 8)
-        home_rows = batch.x[:, is_home_idx] > 0.0
+        home_rows = batch.x_user_node[:, is_home_idx] > 0.0
         assert torch.all(pe[home_rows].argmax(dim=1) == 0)
         torch.testing.assert_close(pe[home_rows].amax(dim=1), torch.ones(int(home_rows.sum())))
 

@@ -145,14 +145,17 @@ def evaluate_baseline(
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
+    home_hop_distance = datamodule.train_dataset.home_hop_distance
+    is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
+
     baseline_module = RankingModule(
         model=baseline,
         lr=0.0,
         loss=loss,
         max_recall_k=cfg.train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
-        home_hop_distance=datamodule.train_dataset.home_hop_distance,
-        is_home_idx=datamodule.train_dataset.is_home_col_idx,
+        home_hop_distance=home_hop_distance,
+        is_home_idx=is_home_idx,
         calibration_bins=cfg.train.calibration_bins,
         store_score_vectors=cfg.train.save_score_vectors,
         full_info=full_info,
@@ -242,6 +245,10 @@ def train_and_evaluate_model(
 
     datamodule.setup()
 
+    lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
+    home_hop_distance = datamodule.train_dataset.home_hop_distance
+    is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
+
     lit_model = RankingModule(
         model=model,
         lr=variant.model.lr,
@@ -251,9 +258,9 @@ def train_and_evaluate_model(
         max_recall_k=train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
         weight_decay=variant.model.weight_decay,
-        lr_scheduler=cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None,
-        home_hop_distance=datamodule.train_dataset.home_hop_distance,
-        is_home_idx=datamodule.train_dataset.is_home_col_idx,
+        lr_scheduler=lr_scheduler,
+        home_hop_distance=home_hop_distance,
+        is_home_idx=is_home_idx,
         use_home_pe=variant.use_home_pe,
         home_pe_bins=train.home_pe.bins,
         home_pe_max_hops=train.home_pe.max_hops,

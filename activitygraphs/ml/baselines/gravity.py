@@ -81,15 +81,15 @@ class GravityBaseline(torch.nn.Module):
     beta_log: float
     beta_lin: float
 
-    def __init__(self, is_home_idx: int, distance_scaler: StandardScaler, max_iter: int = 200):
+    def __init__(self, is_home_idx_user_node: int, distance_scaler: StandardScaler, max_iter: int = 200):
         super().__init__()
-        self.is_home_idx = is_home_idx
+        self.is_home_idx_user_node = is_home_idx_user_node
         self.distance_scaler = distance_scaler
         self.max_iter = max_iter
 
     def fit(self, train_loader: pyg.loader.DataLoader):
         """Fit the intercept and the two decay parameters on ``train_loader`` with full-batch LBFGS."""
-        split = extract_per_user_tensors(train_loader, self.is_home_idx)
+        split = extract_per_user_tensors(train_loader, self.is_home_idx_user_node)
         self.popularity_logit = torch.logit(home_excluded_visit_rate(split.labels, split.home_idx))
 
         pairs = non_home_mask(split)
@@ -148,15 +148,15 @@ class GravityBinnedBaseline(torch.nn.Module):
     edges: torch.Tensor
     log_deterrence: torch.Tensor
 
-    def __init__(self, is_home_idx: int, distance_scaler: StandardScaler, n_bins: int = N_DISTANCE_BINS):
+    def __init__(self, is_home_idx_user_node: int, distance_scaler: StandardScaler, n_bins: int = N_DISTANCE_BINS):
         super().__init__()
-        self.is_home_idx = is_home_idx
+        self.is_home_idx_user_node = is_home_idx_user_node
         self.distance_scaler = distance_scaler
         self.n_bins = n_bins
 
     def fit(self, train_loader: pyg.loader.DataLoader):
         """Count the observed and expected visits per distance bin on ``train_loader``."""
-        split = extract_per_user_tensors(train_loader, self.is_home_idx)
+        split = extract_per_user_tensors(train_loader, self.is_home_idx_user_node)
         popularity = home_excluded_visit_rate(split.labels, split.home_idx)
         self.log_popularity = popularity.log()
 
@@ -202,15 +202,16 @@ class ConditionalGravityBaseline(torch.nn.Module):
     counts: torch.Tensor
     users: torch.Tensor
 
-    def __init__(self, gravity: GravityBaseline):
+    def __init__(self, gravity: GravityBaseline, is_home_idx_model_input: int):
         super().__init__()
         self.gravity = gravity
+        self.is_home_idx_model_input = is_home_idx_model_input
 
     def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
         """Count visits per home on ``train_loader`` and pick the smoothing strength on ``val_loader``."""
-        is_home_idx = self.gravity.is_home_idx
-        train = extract_per_user_tensors(train_loader, is_home_idx)
-        val = extract_per_user_tensors(val_loader, is_home_idx)
+        is_home_idx_user_node = self.gravity.is_home_idx_user_node
+        train = extract_per_user_tensors(train_loader, is_home_idx_user_node)
+        val = extract_per_user_tensors(val_loader, is_home_idx_user_node)
 
         self.counts, self.users = home_visit_counts(train.labels, train.home_idx)
 
@@ -226,7 +227,7 @@ class ConditionalGravityBaseline(torch.nn.Module):
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
     ) -> torch.Tensor:
         """Return the home-conditioned gravity logit of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(x, batch, self.gravity.is_home_idx)
+        homes = graph_home_indices(x, batch, self.is_home_idx_model_input)
         nodes = graph_node_indices(x, batch)
         prior = self.gravity(x, edge_index, edge_attr, batch).sigmoid()
 

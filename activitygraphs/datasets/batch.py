@@ -11,7 +11,8 @@ class UserBatch:
     """The tensors of a collated ``VisitDataset`` batch, typed.
 
     Attributes:
-        x: Node features, ``[num_nodes, num_features]``.
+        x_loc: Location features of each node, ``[num_nodes, num_location_features]``.
+        x_user_node: Per-user node features of each node, ``[num_nodes, num_user_node_features]``.
         edge_index: Edge list, ``[2, num_edges]``.
         edge_attr: Edge features, ``[num_edges, num_edge_features]``.
         y: Visit labels, ``[num_nodes, 1]``.
@@ -23,7 +24,8 @@ class UserBatch:
         random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, walk_length]``.
     """
 
-    x: Tensor
+    x_loc: Tensor
+    x_user_node: Tensor
     edge_index: Tensor
     edge_attr: Tensor
     y: Tensor
@@ -42,7 +44,7 @@ class UserBatch:
     @property
     def num_nodes(self) -> int:
         """Number of nodes over all graphs in the batch."""
-        return self.x.shape[0]
+        return self.x_loc.shape[0]
 
     @property
     def num_graphs(self) -> int:

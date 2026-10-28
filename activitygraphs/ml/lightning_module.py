@@ -36,20 +36,21 @@ def extract_features(
 ) -> torch.Tensor:
     """Return node features for a batch.
 
-    Starts with ``batch.x`` (which already contains the location features and the per-user
-    ``is_home`` indicator).
+    Starts with the location features ``batch.x_loc`` joined with the per-user node features ``batch.x_user_node``
+    (which contain the ``is_home`` indicator).
 
     If ``use_rwpe`` is True, the random-walk positional encoding (``batch.random_walk_pe``) is appended.
 
-     If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
-     hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column for the home index.
+    If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
+    hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column of ``is_home`` in
+     ``batch.x_user_node``.
 
     If ``use_demographics`` is True, the per-graph user attributes (``batch.user_attr``) are broadcast over
     nodes and concatenated.
 
     If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column.
     """
-    x = batch.x
+    x = torch.cat([batch.x_loc, batch.x_user_node], dim=-1)
 
     if use_rwpe:
         x = torch.cat([x, batch.random_walk_pe], dim=-1)
@@ -93,15 +94,15 @@ def extracted_features_dim(
 
 
 def _compute_node_index_within_graph(batch: UserBatch, device: torch.device) -> torch.Tensor:
-    """Index of each node within its own graph (0..N-1), aligned to batch.x row order."""
+    """Index of each node within its own graph (0..N-1), aligned to the node row order of the batch."""
     return torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
 
 
 def compute_home_hops(batch: UserBatch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
     """Hop distance from each node to the user's home node in the graph, shape ``[num_nodes]``."""
-    device = batch.x.device
+    device = batch.x_user_node.device
     node_idx = _compute_node_index_within_graph(batch, device)
-    is_home = is_home_node_mask(batch.x, is_home_idx)
+    is_home = is_home_node_mask(batch.x_user_node, is_home_idx)
 
     home = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
     home[batch.batch[is_home]] = node_idx[is_home]
@@ -122,7 +123,7 @@ def create_home_distance_encoding(
     evenly over ``[0, max_hops]``.
     """
     hops = compute_home_hops(batch, home_hop_distance, is_home_idx).clamp(max=max_hops)
-    centers = torch.linspace(0, max_hops, n_bins, device=batch.x.device)
+    centers = torch.linspace(0, max_hops, n_bins, device=batch.x_user_node.device)
 
     return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)  # [num_nodes, n_bins]
 
@@ -168,7 +169,7 @@ class RankingModule(L.LightningModule):
         model: Any ``nn.Module`` with the GNN forward signature.
         lr: Initial learning rate for AdamW.
         loss: ``Loss`` instance.
-        is_home_idx: Column index of ``is_home`` in the node feature matrix.
+        is_home_idx: Column index of ``is_home`` in ``batch.x_user_node``.
         full_info: If True, augment node features with home indicator and distances.
         use_demographics: concatenate the per-user demographics onto the node features.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
@@ -313,7 +314,7 @@ class RankingModule(L.LightningModule):
         return loss
 
     def _compute_ranking_tensors(self, batch: UserBatch, logits: Tensor) -> RankingTensors:
-        scored_mask = ~is_home_node_mask(batch.x, self.is_home_idx)
+        scored_mask = ~is_home_node_mask(batch.x_user_node, self.is_home_idx)
         flat_logits = logits.squeeze(-1)
 
         return RankingTensors(

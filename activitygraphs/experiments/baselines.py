@@ -52,18 +52,21 @@ def measure_baselines(
     train_seeds = list(cfg.train.train_seeds)
     train_loader = datamodule.train_dataloader()
     val_loader = datamodule.val_dataloader()
-    is_home_idx = datamodule.train_dataset.is_home_col_idx
+    is_home_idx_user_node = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
+    is_home_idx_model_input = datamodule.train_dataset.is_home_idx_model_input
     distance_scaler = datamodule.scalers.distances
 
-    gravity = GravityBaseline(is_home_idx, distance_scaler).fit(train_loader)
-    gravity_binned = GravityBinnedBaseline(is_home_idx, distance_scaler).fit(train_loader)
-    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes, is_home_idx)
-    conditional_gravity = ConditionalGravityBaseline(gravity)
+    gravity = GravityBaseline(is_home_idx_user_node, distance_scaler).fit(train_loader)
+    gravity_binned = GravityBinnedBaseline(is_home_idx_user_node, distance_scaler).fit(train_loader)
+    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(
+        num_nodes, is_home_idx_user_node, is_home_idx_model_input
+    )
+    conditional_gravity = ConditionalGravityBaseline(gravity, is_home_idx_model_input)
 
     baselines = [
         BaselineSpec("Uniform", UniformBaseline()),
         BaselineSpec("GlobalMarginal", GlobalBaseline().fit(train_loader)),
-        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes, is_home_idx).fit(train_loader)),
+        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes, is_home_idx_user_node).fit(train_loader)),
         BaselineSpec("ConditionalVisitFrequency", conditional_visit_frequency.fit(train_loader, val_loader)),
         BaselineSpec("DistanceDecay", DistanceDecayBaseline(distance_scaler), full_info=True),
         BaselineSpec("Gravity", gravity, full_info=True),
@@ -85,7 +88,9 @@ def measure_baselines(
     ]
 
     for train_seed in train_seeds:
-        home_zone_mf = HomeZoneMFBaseline(num_nodes, is_home_idx, max_recall_k, seed=train_seed)
+        home_zone_mf = HomeZoneMFBaseline(
+            num_nodes, is_home_idx_user_node, is_home_idx_model_input, max_recall_k, seed=train_seed
+        )
         results.append(
             evaluate_baseline(
                 home_zone_mf.fit(train_loader, val_loader),

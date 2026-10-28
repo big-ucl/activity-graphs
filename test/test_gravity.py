@@ -18,7 +18,9 @@ from activitygraphs.ml.baselines.gravity import (
 from activitygraphs.ml.lightning_module import extract_features
 from activitygraphs.ml.popularity import home_excluded_visit_rate
 
+NUM_LOCATION_FEATURES = 1
 IS_HOME_IDX = 0
+IS_HOME_IDX_MODEL_INPUT = NUM_LOCATION_FEATURES + IS_HOME_IDX
 
 
 def fit_scaler(distances: torch.Tensor) -> StandardScaler:
@@ -28,13 +30,16 @@ def fit_scaler(distances: torch.Tensor) -> StandardScaler:
 def make_graphs(
     labels: torch.Tensor, homes: torch.Tensor, distances: torch.Tensor, scaler: StandardScaler
 ) -> list[pyg.data.Data]:
-    """One graph per user, with ``is_home`` in column 0 and scaled home distances, as the dataset stores them."""
+    """One graph per user, with ``is_home`` as the only per-user node feature and scaled home distances."""
     graphs = []
     for user_labels, home, user_distances in zip(labels, homes, distances, strict=True):
         n_nodes = len(user_labels)
-        x = torch.zeros(n_nodes, 2)
-        x[home, IS_HOME_IDX] = 1.0
-        graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=user_labels.float().unsqueeze(-1))
+        x_user_node = torch.zeros(n_nodes, 1)
+        x_user_node[home, IS_HOME_IDX] = 1.0
+        x_loc = torch.zeros(n_nodes, NUM_LOCATION_FEATURES)
+        y = user_labels.float().unsqueeze(-1)
+        edge_index = torch.zeros(2, 0, dtype=torch.long)
+        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=edge_index, y=y)
         graph.user_attr = torch.zeros(1, 1)
         graph.distances = torch.from_numpy(scaler.transform(user_distances.reshape(-1, 1).numpy())).float()
         graphs.append(graph)
@@ -184,7 +189,9 @@ class TestConditionalGravity:
         scaler = fit_scaler(distances)
         graphs = make_graphs(labels, homes, distances, scaler)
         gravity = GravityBaseline(IS_HOME_IDX, scaler).fit(loader_of(graphs))
-        conditional = ConditionalGravityBaseline(gravity).fit(loader_of(graphs[:150]), loader_of(graphs[150:]))
+        conditional = ConditionalGravityBaseline(gravity, IS_HOME_IDX_MODEL_INPUT).fit(
+            loader_of(graphs[:150]), loader_of(graphs[150:])
+        )
 
         unseen_distances = 200.0 + 1000.0 * torch.rand(1, 10)
         unseen_distances[0, 9] = 0.0
@@ -205,7 +212,9 @@ class TestConditionalGravity:
         graphs = make_graphs(labels, homes, distances, scaler)
         gravity = GravityBaseline(IS_HOME_IDX, scaler).fit(loader_of(graphs))
 
-        conditional = ConditionalGravityBaseline(gravity).fit(loader_of(graphs[:150]), loader_of(graphs[150:]))
+        conditional = ConditionalGravityBaseline(gravity, IS_HOME_IDX_MODEL_INPUT).fit(
+            loader_of(graphs[:150]), loader_of(graphs[150:])
+        )
 
         assert conditional.strength is not None
         assert conditional.counts.shape == (10, 10)

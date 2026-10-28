@@ -5,9 +5,12 @@ import torch
 import torch_geometric as pyg
 
 from activitygraphs.ml.baselines.factorization import HomeZoneMFBaseline
+from activitygraphs.ml.lightning_module import extract_features
 from activitygraphs.ml.losses import dense_bpr_loss
 
+NUM_LOCATION_FEATURES = 1
 IS_HOME_IDX = 0
+IS_HOME_IDX_MODEL_INPUT = NUM_LOCATION_FEATURES + IS_HOME_IDX
 MAX_RECALL_K = 5
 
 N_NODES = 12
@@ -18,12 +21,15 @@ RESIDENTS_PER_HOME = 6
 
 
 def make_graphs(labels: torch.Tensor, homes: torch.Tensor) -> list[pyg.data.Data]:
-    """One graph per user, with ``is_home`` in column 0, as the dataset stores it."""
+    """One graph per user, with ``is_home`` as the only per-user node feature."""
     graphs = []
     for user_labels, home in zip(labels, homes, strict=True):
-        x = torch.zeros(len(user_labels), 2)
-        x[home, IS_HOME_IDX] = 1.0
-        graph = pyg.data.Data(x=x, edge_index=torch.zeros(2, 0, dtype=torch.long), y=user_labels.float().unsqueeze(-1))
+        x_user_node = torch.zeros(len(user_labels), 1)
+        x_user_node[home, IS_HOME_IDX] = 1.0
+        x_loc = torch.zeros(len(user_labels), NUM_LOCATION_FEATURES)
+        y = user_labels.float().unsqueeze(-1)
+        edge_index = torch.zeros(2, 0, dtype=torch.long)
+        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=edge_index, y=y)
         graph.distances = torch.zeros(len(user_labels), 1)
         graphs.append(graph)
     return graphs
@@ -75,7 +81,8 @@ def loaders():
 def fitted(loaders, **kwargs) -> HomeZoneMFBaseline:
     baseline = HomeZoneMFBaseline(
         num_nodes=N_NODES,
-        is_home_idx=IS_HOME_IDX,
+        is_home_idx_user_node=IS_HOME_IDX,
+        is_home_idx_model_input=IS_HOME_IDX_MODEL_INPUT,
         max_recall_k=MAX_RECALL_K,
         n_factors=4,
         n_epochs=200,
@@ -151,8 +158,9 @@ class TestHomeZoneMFBaseline:
         baseline = fitted(loaders)
         batch = next(iter(train_loader))
 
-        out = baseline(batch.x, batch.edge_index, None, batch.batch)
-        homes = batch.x[:, IS_HOME_IDX].reshape(-1, N_NODES).argmax(dim=1)
+        x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
+        out = baseline(x, batch.edge_index, None, batch.batch)
+        homes = batch.x_user_node[:, IS_HOME_IDX].reshape(-1, N_NODES).argmax(dim=1)
         expected = baseline.scores[homes.repeat_interleave(N_NODES), torch.arange(N_NODES).repeat(len(homes))]
 
         assert out.shape == (len(homes) * N_NODES, 1)

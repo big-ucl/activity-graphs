@@ -62,14 +62,14 @@ class VisitFrequencyBaseline(torch.nn.Module):
 
     logits: torch.Tensor
 
-    def __init__(self, num_nodes: int, is_home_idx: int):
+    def __init__(self, num_nodes: int, is_home_idx_user_node: int):
         super().__init__()
         self.num_nodes = num_nodes
-        self.is_home_idx = is_home_idx
+        self.is_home_idx_user_node = is_home_idx_user_node
 
     def fit(self, loader: pyg.loader.DataLoader):
         """Compute the home-excluded per-node visit rates over ``loader`` and store them as logits."""
-        per_user_tensors = extract_per_user_tensors(loader, self.is_home_idx)
+        per_user_tensors = extract_per_user_tensors(loader, self.is_home_idx_user_node)
         self.logits = popularity_logit(per_user_tensors.labels, per_user_tensors.home_idx)
 
         return self
@@ -97,15 +97,16 @@ class ConditionalVisitFrequencyBaseline(torch.nn.Module):
     strength: float
     logits: torch.Tensor
 
-    def __init__(self, num_nodes: int, is_home_idx: int):
+    def __init__(self, num_nodes: int, is_home_idx_user_node: int, is_home_idx_model_input: int):
         super().__init__()
         self.num_nodes = num_nodes
-        self.is_home_idx = is_home_idx
+        self.is_home_idx_user_node = is_home_idx_user_node
+        self.is_home_idx_model_input = is_home_idx_model_input
 
     def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
         """Count visits per home on ``train_loader`` and pick the smoothing strength on ``val_loader``."""
-        train = extract_per_user_tensors(train_loader, self.is_home_idx)
-        val = extract_per_user_tensors(val_loader, self.is_home_idx)
+        train = extract_per_user_tensors(train_loader, self.is_home_idx_user_node)
+        val = extract_per_user_tensors(val_loader, self.is_home_idx_user_node)
 
         prior = home_excluded_visit_rate(train.labels, train.home_idx)
         counts, users = home_visit_counts(train.labels, train.home_idx)
@@ -119,5 +120,5 @@ class ConditionalVisitFrequencyBaseline(torch.nn.Module):
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
     ) -> torch.Tensor:
         """Return the user's home-conditioned visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(x, batch, self.is_home_idx)
+        homes = graph_home_indices(x, batch, self.is_home_idx_model_input)
         return self.logits.to(x.device)[homes, graph_node_indices(x, batch)].unsqueeze(1)
