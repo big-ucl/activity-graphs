@@ -17,6 +17,7 @@ from activitygraphs.datasets import VisitDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.ml.baselines import Baseline
 from activitygraphs.ml.callbacks import OverfitDebugCallback
+from activitygraphs.ml.features import FeatureEncoder
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.loggers import MetricsLogger
 from activitygraphs.ml.losses import Loss
@@ -148,6 +149,7 @@ def evaluate_baseline(
 
     baseline_module = RankingModule(
         model=baseline,
+        feature_encoder=None,
         lr=0.0,
         loss=loss,
         max_recall_k=cfg.train.max_recall_k,
@@ -202,6 +204,7 @@ def evaluate_baseline(
 
 def train_and_evaluate_model(
     model: torch.nn.Module,
+    feature_encoder: FeatureEncoder,
     variant: Variant,
     datamodule: VisitDataModule,
     loss: Loss,
@@ -215,6 +218,7 @@ def train_and_evaluate_model(
 
     Args:
         model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
+        feature_encoder: Builds the inputs ``x`` for ``model`` from each batch.
         variant: The variant ``model`` was built from, giving its name, optimiser settings and input features.
         datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
@@ -248,24 +252,19 @@ def train_and_evaluate_model(
 
     lit_model = RankingModule(
         model=model,
+        feature_encoder=feature_encoder,
         lr=variant.model.lr,
         loss=loss,
-        full_info=variant.full_info,
-        use_demographics=variant.use_demographics,
         max_recall_k=train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
         weight_decay=variant.model.weight_decay,
         lr_scheduler=lr_scheduler,
         home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
-        use_home_pe=variant.use_home_pe,
-        home_pe_bins=train.home_pe.bins,
-        home_pe_max_hops=train.home_pe.max_hops,
         calibration_bins=train.calibration_bins,
         compile_model=train.compile,
         store_score_vectors=train.save_score_vectors,
         log_train_ranking=train.log_train_ranking,
-        use_rwpe=variant.use_rwpe,
     )
 
     # Build the callbacks

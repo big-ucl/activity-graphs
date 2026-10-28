@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch_geometric as pyg
+from encoders import make_encoder
 
 from activitygraphs.datasets.dataset import compute_home_hop_distance
 from activitygraphs.ml.lightning_module import RankingModule
@@ -388,9 +389,11 @@ class TestPerUserColumnsInModule:
 
     def test_per_user_columns_populated_at_test_end(self, monkeypatch):
         hop = compute_home_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
-        model = NodeMLP(num_layers=2, in_channels=4, hidden_channels=8, out_channels=1)
+        encoder = make_encoder(1, 1, 2)
+        model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
         module = RankingModule(
             model=model,
+            feature_encoder=encoder,
             lr=1e-3,
             loss=BCELoss,
             home_hop_distance=hop,

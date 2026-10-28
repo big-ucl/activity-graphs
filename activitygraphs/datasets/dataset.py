@@ -137,16 +137,6 @@ class VisitDataset(pyg.data.Dataset):
         return cast(torch.Tensor, self.pyg_graph.edge_attr)
 
     @property
-    def num_location_features(self) -> int:
-        """Number of location node-feature columns, ``x_loc``."""
-        return self.location_x.shape[1]
-
-    @property
-    def num_node_features(self) -> int:
-        """Number of node feature columns of an item, ``x_loc`` and ``x_user_node`` together."""
-        return self.num_location_features + self.schema.user_nodes.width
-
-    @property
     def num_rwpe_features(self) -> int:
         """Number of columns of the random-walk positional encoding, ``random_walk_pe``."""
         return self.pyg_graph.random_walk_pe.shape[1]

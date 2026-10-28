@@ -11,7 +11,7 @@ from activitygraphs.config import Config, DepthSweepConfig
 from activitygraphs.experiments.results import save_results
 from activitygraphs.experiments.setup import ExperimentSetup, setup_experiment, with_overrides
 from activitygraphs.experiments.training import train_and_evaluate_model
-from activitygraphs.experiments.variants import Variant, build_model
+from activitygraphs.experiments.variants import Variant, build_feature_encoder, build_model
 
 log = logging.getLogger(__name__)
 
@@ -23,14 +23,20 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
     training stochasticity alone rather than split variance.
     """
     cfg = setup.cfg
+    dataset = setup.datamodule.train_dataset
     results = []
 
     for train_seed in setup.train_seeds:
         L.seed_everything(train_seed, workers=True)
 
         for variant in variants:
-            frame = train_and_evaluate_model(
-                model=build_model(variant, setup.datamodule.train_dataset, cfg.train.home_pe.bins),
+            encoder = build_feature_encoder(variant, dataset, cfg.train.home_pe)
+            model = build_model(variant, dataset, encoder.out_dim)
+            run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
+
+            result_df = train_and_evaluate_model(
+                model=model,
+                feature_encoder=encoder,
                 variant=variant,
                 datamodule=setup.datamodule,
                 loss=setup.loss,
@@ -38,9 +44,9 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
                 run_dir=setup.run_dir,
                 wandb_params=setup.wandb_params,
                 debug=setup.debug,
-                run_tag=f"seed{train_seed}" if len(setup.train_seeds) > 1 else None,
+                run_tag=run_tag,
             )
-            results.append(frame.with_columns(seed=pl.lit(train_seed, dtype=pl.Int64)))
+            results.append(result_df.with_columns(seed=pl.lit(train_seed, dtype=pl.Int64)))
 
     return results
 

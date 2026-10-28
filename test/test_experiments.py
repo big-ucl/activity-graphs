@@ -9,10 +9,11 @@ import lightning as L
 import polars as pl
 import pytest
 import torch
+from encoders import continuous_schema
 from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.config import Config, read_config
+from activitygraphs.config import Config, HomePEConfig, read_config
 from activitygraphs.experiments import runners
 from activitygraphs.experiments.architectures import BUILDERS, architecture_builder
 from activitygraphs.experiments.results import (
@@ -25,15 +26,18 @@ from activitygraphs.experiments.results import (
 from activitygraphs.experiments.runners import run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
 from activitygraphs.experiments.training import WandBParams
-from activitygraphs.experiments.variants import Variant, build_model, variant_hyperparams
+from activitygraphs.experiments.variants import Variant, build_feature_encoder, build_model, variant_hyperparams
 from activitygraphs.main import EXPERIMENTS
-from activitygraphs.ml.lightning_module import HOME_PE_BINS
 from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
+from activitygraphs.schema import DatasetSchema
+from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.utils import get_project_root
 
 STARTED = datetime(2026, 10, 26, 15, 30, 0)
 EXPERIMENT_CONFIGS = sorted((get_project_root() / "activitygraphs/conf/experiment").glob("*.yaml"))
+HOME_PE = HomePEConfig(bins=8, max_hops=40)
+IN_CHANNELS = 10
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +46,7 @@ def cfg() -> Config:
 
 
 def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
-    """An ExperimentSetup with no datamodule; ``build_model`` is stubbed by the tests, so no data is needed."""
+    """An ExperimentSetup with no datamodule; ``build_feature_encoder`` and ``build_model`` are stubbed by the tests, so no data is needed."""
     return ExperimentSetup(
         cfg=cfg,
         run_dir=None,
@@ -57,13 +61,19 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
     )
 
 
-def make_dataset(num_features: int = 6, num_attributes: int = 3, num_edge_features: int = 2):
-    """Stand-in exposing only what ``build_model`` reads off a ``VisitDataset``."""
+def make_dataset(num_location_features: int = 5, num_attributes: int = 3, num_edge_features: int = 2):
+    """Stand-in exposing only what ``build_feature_encoder`` and ``build_model`` read off a ``VisitDataset``."""
+    schema = DatasetSchema(
+        locations=continuous_schema("locations", num_location_features),
+        edges=continuous_schema("edges", num_edge_features),
+        user_nodes=USER_NODE_SCHEMA,
+        user_attributes=continuous_schema("user_attributes", num_attributes),
+        distances=continuous_schema("distances", 1),
+        targets=continuous_schema("targets", 1),
+    )
     return types.SimpleNamespace(
-        num_features=num_features,
+        schema=schema,
         num_classes=2,
-        user_attributes=torch.zeros(4, num_attributes),
-        distances=torch.zeros(4, 5, 1),
         edge_attr=torch.zeros(8, num_edge_features),
         num_rwpe_features=2,
     )
@@ -79,7 +89,10 @@ def record_training(monkeypatch, frame=None) -> list[dict]:
         return frame(name) if frame else pl.DataFrame({"name": [name], "stage": ["test"]})
 
     monkeypatch.setattr(runners, "train_and_evaluate_model", train_and_evaluate_model)
-    monkeypatch.setattr(runners, "build_model", lambda variant, dataset, home_pe_bins: torch.nn.Linear(1, 1))
+    monkeypatch.setattr(
+        runners, "build_feature_encoder", lambda variant, dataset, home_pe_cfg: types.SimpleNamespace(out_dim=1)
+    )
+    monkeypatch.setattr(runners, "build_model", lambda variant, dataset, in_channels: torch.nn.Linear(1, 1))
 
     return calls
 
@@ -147,44 +160,56 @@ class TestVariant:
 class TestBuildModel:
     @pytest.mark.parametrize("key", ["mlp", "gat", "gps"])
     def test_every_architecture_builds(self, cfg, key):
-        model = build_model(Variant(cfg.models[key]), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
+        model = build_model(Variant(cfg.models[key]), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
 
         assert isinstance(model, torch.nn.Module)
 
     def test_input_width_follows_the_variant_features(self, cfg):
-        dataset = make_dataset(num_features=6, num_attributes=3)
-        plain = build_model(Variant(cfg.models.mlp, use_demographics=False), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
-        dist = build_model(Variant(cfg.models.mlp, full_info=True), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
+        dataset = make_dataset(num_location_features=5, num_attributes=3)
+        plain = build_feature_encoder(Variant(cfg.models.mlp, use_demographics=False), dataset, HOME_PE)  # type: ignore[arg-type]
+        dist = build_feature_encoder(Variant(cfg.models.mlp, full_info=True), dataset, HOME_PE)  # type: ignore[arg-type]
 
-        assert isinstance(plain, NodeMLP) and isinstance(dist, NodeMLP)
-        assert plain.lins[0].in_features == 6 + 2
-        assert dist.lins[0].in_features == 6 + 2 + 3 + 1
+        assert plain.out_dim == 5 + 1 + 2
+        assert dist.out_dim == 5 + 1 + 2 + 3 + 1
 
     def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
-        dataset = make_dataset(num_features=6, num_attributes=3)
-        model = build_model(Variant(cfg.models.mlp, full_info=True, use_rwpe=False), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
+        dataset = make_dataset(num_location_features=5, num_attributes=3)
+        encoder = build_feature_encoder(Variant(cfg.models.mlp, full_info=True, use_rwpe=False), dataset, HOME_PE)  # type: ignore[arg-type]
+
+        assert encoder.out_dim == 5 + 1 + 3 + 1
+
+    def test_home_pe_adds_its_bins(self, cfg):
+        dataset = make_dataset()
+        dataset.home_hop_distance = torch.zeros(4, 4)
+        plain = build_feature_encoder(Variant(cfg.models.mlp), dataset, HOME_PE)  # type: ignore[arg-type]
+        with_pe = build_feature_encoder(Variant(cfg.models.mlp, use_home_pe=True), dataset, HOME_PE)  # type: ignore[arg-type]
+
+        assert with_pe.out_dim - plain.out_dim == HOME_PE.bins
+
+    def test_the_model_takes_the_given_input_width(self, cfg):
+        model = build_model(Variant(cfg.models.mlp), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
 
         assert isinstance(model, NodeMLP)
-        assert model.lins[0].in_features == 6 + 3 + 1
+        assert model.lins[0].in_features == IN_CHANNELS
 
     def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
         dataset = make_dataset(num_edge_features=2)
-        gat = build_model(Variant(cfg.models.gat), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
-        gps = build_model(Variant(cfg.models.gps), dataset, HOME_PE_BINS)  # type: ignore[arg-type]
+        gat = build_model(Variant(cfg.models.gat), dataset, IN_CHANNELS)  # type: ignore[arg-type]
+        gps = build_model(Variant(cfg.models.gps), dataset, IN_CHANNELS)  # type: ignore[arg-type]
 
         assert isinstance(gat, GAT) and isinstance(gps, GraphTransformer)
         assert gps.edge_proj.in_features == 2
 
     def test_gat_norm_follows_the_config(self, cfg):
-        normed = build_model(Variant(cfg.models.gat), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
-        plain = build_model(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
+        normed = build_model(Variant(cfg.models.gat), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
+        plain = build_model(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
 
         assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.convs.norms)  # type: ignore[union-attr]
         assert all(isinstance(norm, torch.nn.Identity) for norm in plain.convs.norms)  # type: ignore[union-attr]
 
     def test_unknown_gat_norm_raises(self, cfg):
         with pytest.raises(KeyError, match="normalisation"):
-            build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_dataset(), HOME_PE_BINS)  # type: ignore[arg-type]
+            build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
 
 
 class TestTrainerConfig:
@@ -254,7 +279,7 @@ class TestRunVariants:
         record_training(monkeypatch)
         built: list[torch.nn.Module] = []
 
-        def build(variant, dataset, home_pe_bins):
+        def build(variant, dataset, in_channels):
             built.append(torch.nn.Linear(1, 1))
             return built[-1]
 

@@ -15,118 +15,13 @@ from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
 from activitygraphs.datasets.batch import UserBatch
-from activitygraphs.datasets.dataset import VisitDataset, is_home_node_mask
+from activitygraphs.datasets.dataset import is_home_node_mask
 from activitygraphs.ml.baselines.common import Baseline
+from activitygraphs.ml.features import FeatureEncoder, compute_home_hops
 from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
-HOME_PE_BINS = 8
-HOME_PE_MAX_HOPS = 40
 CALIBRATION_BINS = 15
-
-
-def extract_features(
-    batch: UserBatch,
-    full_info: bool,
-    is_home_idx: int,
-    use_demographics: bool = True,
-    home_hop_distance: torch.Tensor | None = None,
-    home_pe_bins: int = HOME_PE_BINS,
-    home_pe_max_hops: int = HOME_PE_MAX_HOPS,
-    use_rwpe: bool = False,
-) -> torch.Tensor:
-    """Return node features for a batch.
-
-    Starts with the location features ``batch.x_loc`` joined with the per-user node features ``batch.x_user_node``
-    (which contain the ``is_home`` indicator).
-
-    If ``use_rwpe`` is True, the random-walk positional encoding (``batch.random_walk_pe``) is appended.
-
-    If ``home_hop_distance`` is provided, a home-anchored positional encoding is added (RBF expansion of
-    hop-distance-to-home,``n_bins`` columns) is appended. Uses ``is_home_idx`` as the column of ``is_home`` in
-     ``batch.x_user_node``.
-
-    If ``use_demographics`` is True, the per-graph user attributes (``batch.user_attr``) are broadcast over
-    nodes and concatenated.
-
-    If ``full_info`` is True, the per-node distance-from-home (``batch.distances``) is appended as the last column.
-    """
-    x = torch.cat([batch.x_loc, batch.x_user_node], dim=-1)
-
-    if use_rwpe:
-        x = torch.cat([x, batch.random_walk_pe], dim=-1)
-
-    if home_hop_distance is not None:
-        home_pe = create_home_distance_encoding(
-            batch, home_hop_distance, is_home_idx, n_bins=home_pe_bins, max_hops=home_pe_max_hops
-        )
-        x = torch.cat([x, home_pe], dim=-1)
-
-    if use_demographics:
-        x = torch.cat([x, batch.user_attr[batch.batch]], dim=-1)
-
-    if not full_info:
-        return x
-
-    return torch.cat([x, batch.distances.to(x.dtype)], dim=-1)
-
-
-def extracted_features_dim(
-    dataset: VisitDataset,
-    use_demographics: bool = True,
-    full_info: bool = False,
-    use_home_pe: bool = False,
-    n_bins: int = HOME_PE_BINS,
-    use_rwpe: bool = False,
-) -> int:
-    """Output width of extract_features for this dataset, given the same flags."""
-    dim = dataset.num_features
-
-    if use_rwpe:
-        dim += dataset.num_rwpe_features
-    if use_home_pe:
-        dim += n_bins
-    if use_demographics:
-        dim += dataset.user_attributes.shape[1]
-    if full_info:
-        dim += dataset.distances.shape[-1]
-
-    return dim
-
-
-def _compute_node_index_within_graph(batch: UserBatch, device: torch.device) -> torch.Tensor:
-    """Index of each node within its own graph (0..N-1), aligned to the node row order of the batch."""
-    return torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
-
-
-def compute_home_hops(batch: UserBatch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
-    """Hop distance from each node to the user's home node in the graph, shape ``[num_nodes]``."""
-    device = batch.x_user_node.device
-    node_idx = _compute_node_index_within_graph(batch, device)
-    is_home = is_home_node_mask(batch.x_user_node, is_home_idx)
-
-    home = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
-    home[batch.batch[is_home]] = node_idx[is_home]
-
-    return home_hop_distance[home[batch.batch], node_idx]
-
-
-def create_home_distance_encoding(
-    batch: UserBatch,
-    home_hop_distance: torch.Tensor,
-    is_home_idx: int,
-    n_bins: int = HOME_PE_BINS,
-    max_hops: int = HOME_PE_MAX_HOPS,
-) -> torch.Tensor:
-    """Positional encoding based on distance from user home (single anchor), shape ``[num_nodes, n_bins]``.
-
-    RBF expansion of the number of hops to home for each node, capped at ``max_hops``, with ``n_bins`` centres spread
-    evenly over ``[0, max_hops]``.
-    """
-    hops = compute_home_hops(batch, home_hop_distance, is_home_idx).clamp(max=max_hops)
-    centers = torch.linspace(0, max_hops, n_bins, device=batch.x_user_node.device)
-
-    return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)  # [num_nodes, n_bins]
 
 
 @dataclass(frozen=True)
@@ -169,61 +64,56 @@ class RankingModule(L.LightningModule):
 
     Args:
         model: Any ``nn.Module`` with the GNN forward signature, or a ``Baseline``.
+        feature_encoder: Builds the input ``x`` to the ``model`` from the batch. None for a ``Baseline``.
         lr: Initial learning rate for AdamW.
         loss: ``Loss`` instance.
         is_home_idx: Column index of ``is_home`` in ``batch.x_user_node``.
-        full_info: If True, augment node features with home indicator and distances.
-        use_demographics: concatenate the per-user demographics onto the node features.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
         recall_ks: Rank cutoffs of the logged ``recall@k``.
         weight_decay: AdamW weight decay.
         lr_scheduler: Keyword arguments of a ReduceLROnPlateau scheduler on the loss's monitored metric. None trains
             without a scheduler.
         home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix, read for the per-positive hop
-            distances and the home-anchored positional encodings.
-        use_home_pe: use home-anchored positional encodings in features, default False.
-        home_pe_bins: number of bins for the RBF expansion of the home PEs, default ``HOME_PE_BINS``.
-        home_pe_max_hops: hop distance at which the home PEs are capped, default ``HOME_PE_MAX_HOPS``.
+            distances.
         calibration_bins: number of probability bins of the calibration error, default ``CALIBRATION_BINS``.
         compile_model: torch.compile the inner NN, default False.
         store_score_vectors: retain each test user's full per-node score vector.
         log_train_ranking: log ``train_avg_recall@K`` on the training batches, default True. Turn it off when per-user
             computation becomes expensive.
-        use_rwpe: append the random-walk positional encoding to the node features, default False.
+
+    Raises:
+        ValueError: ``encoder`` is None for a model that is not a ``Baseline``, or given for a ``Baseline``.
     """
 
     model: torch.nn.Module
-    home_hop_distance: torch.Tensor  # registered buffer; annotated so it types as Tensor, not Tensor | Module
+    home_hop_distance: torch.Tensor
 
     def __init__(
         self,
         model: torch.nn.Module,
+        feature_encoder: FeatureEncoder | None,
         lr: float,
         loss: Loss,
         is_home_idx: int,
         home_hop_distance: np.ndarray | torch.Tensor,
         max_recall_k: int,
         recall_ks: Sequence[int],
-        full_info: bool = False,
-        use_demographics: bool = True,
         weight_decay: float = 1e-4,
         lr_scheduler: dict | None = None,
-        use_home_pe: bool = False,
-        home_pe_bins: int = HOME_PE_BINS,
-        home_pe_max_hops: int = HOME_PE_MAX_HOPS,
         calibration_bins: int = CALIBRATION_BINS,
         compile_model: bool = False,
         store_score_vectors: bool = False,
         log_train_ranking: bool = True,
-        use_rwpe: bool = False,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "loss", "home_hop_distance"])
+        if (feature_encoder is None) != isinstance(model, Baseline):
+            raise ValueError("Every model but a `Baseline` takes a `FeatureEncoder`, and a `Baseline` takes none.")
+
+        self.save_hyperparameters(ignore=["model", "encoder", "loss", "home_hop_distance"])
         self.model = model
+        self.encoder = feature_encoder
         self.lr = lr
         self.loss = loss
-        self.full_info = full_info
-        self.use_demographics = use_demographics
         self.max_recall_k = max_recall_k
         self.weight_decay = weight_decay
         self.lr_scheduler = lr_scheduler
@@ -253,16 +143,8 @@ class RankingModule(L.LightningModule):
         self.test_per_user = PerUserRanking(store_score_vectors=store_score_vectors)
         self.per_user_columns: dict[str, list] = {}
 
-        # Full per-node score vector of each test user, kept only when `store_score_vectors` is set.
+        # Metrics: Full per-node score vector of each test user, kept only when `store_score_vectors` is set.
         self.per_user_score_vectors: list[list[float]] = []
-
-        # Training: Home-anchored positional encodings injection
-        self.use_home_pe = use_home_pe
-        self.home_pe_bins = home_pe_bins
-        self.home_pe_max_hops = home_pe_max_hops
-
-        # Training: other positional encodings injection
-        self.use_rwpe = use_rwpe
 
         # Training: torch.compile (applied in configure_model, not here)
         self.compile_model = compile_model
@@ -441,19 +323,8 @@ class RankingModule(L.LightningModule):
 
     def compute_logits(self, batch: UserBatch) -> torch.Tensor:
         """Model logits for a batch."""
-        if isinstance(self.model, Baseline):
+        if self.encoder is None:
             return self.model(batch)
 
-        home_hop_distance = self.home_hop_distance if self.use_home_pe else None
-
-        x = extract_features(
-            batch,
-            self.full_info,
-            self.is_home_idx,
-            use_demographics=self.use_demographics,
-            home_hop_distance=home_hop_distance,
-            home_pe_bins=self.home_pe_bins,
-            home_pe_max_hops=self.home_pe_max_hops,
-            use_rwpe=self.use_rwpe,
-        )
+        x = self.encoder(batch)
         return self(x, batch.edge_index, batch.edge_attr, batch.batch)

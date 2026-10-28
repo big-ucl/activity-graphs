@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 import torch
 import torch_geometric as pyg
+from encoders import make_encoder
 from torchmetrics import Metric
 
 from activitygraphs.analysis import (
@@ -890,8 +891,10 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
         graphs.append(graph)
 
     idx = torch.arange(num_nodes)
+    encoder = make_encoder(1, 1, 1)
     module = RankingModule(
-        model=NodeMLP(num_layers=2, in_channels=3, hidden_channels=8, out_channels=1),
+        model=NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1),
+        feature_encoder=encoder,
         lr=1e-3,
         loss=BCELoss,
         is_home_idx=0,

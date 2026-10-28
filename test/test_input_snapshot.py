@@ -1,4 +1,4 @@
-"""Snapshot of the model inputs, end to end from a synthetic survey to ``extract_features``.
+"""Snapshot of the model inputs, end to end from a synthetic survey to the ``FeatureEncoder``.
 
 The snapshot pins the inputs a model sees for every combination of input flags, so a refactor of the
 dataset, scaling or feature-assembly path can be checked to leave them unchanged. Regenerate it with
@@ -21,16 +21,17 @@ import torch_geometric as pyg
 from shapely.geometry import box
 
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
+from activitygraphs.config import HomePEConfig, read_config
 from activitygraphs.datasets import HouseholdSplit, datamodule
 from activitygraphs.datasets.datamodule import positional_encodings
 from activitygraphs.datasets.dataset import ProcessedFile, VisitDataset, load_dataset
 from activitygraphs.datasets.scalers import apply_scalers, fit_scalers
-from activitygraphs.ml.lightning_module import extract_features
+from activitygraphs.experiments.variants import Variant, build_feature_encoder
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA, CMAPSurvey
 from activitygraphs.tensors import SurveyTensors, build_tensors
 from activitygraphs.tensors.build import NO_DEMOGRAPHICS_SCHEMA
-from activitygraphs.utils import add_lon_lat_from_centroid
+from activitygraphs.utils import add_lon_lat_from_centroid, get_project_root
 
 SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "model_inputs.pt"
 
@@ -42,6 +43,7 @@ TRAIN_IDX = list(range(10))
 VISIT_PURPOSES = [Purpose.WORK_MAIN, Purpose.SHOP, Purpose.LEISURE_OTHER, Purpose.STUDY]
 FLAGS = ("full_info", "use_demographics", "use_home_pe", "use_rwpe")
 SURVEYS = ("cmap", "no_demographics")
+HOME_PE = HomePEConfig(bins=8, max_hops=40)
 
 
 class NoDemographicsSurvey(CMAPSurvey):
@@ -163,7 +165,7 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
         root: Directory for the processed tensors.
 
     Returns:
-        The scaled edge attributes, the labels, and the ``extract_features`` output over all users for every
+        The scaled edge attributes, the labels, and the ``FeatureEncoder`` output over all users for every
         combination of ``FLAGS``, keyed by the active flags joined with ``+`` (``"none"`` for no flags).
     """
     dataset = build_dataset(survey_name, root)
@@ -172,20 +174,15 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
     apply_scalers(dataset, scalers)
 
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
-    home_hop_distance = torch.as_tensor(dataset.home_hop_distance, dtype=torch.float)
+    mlp = read_config(get_project_root(), verbose=False).models.mlp
 
     inputs = {"edge_attr": batch.edge_attr, "y": batch.y}
     for active in itertools.product([False, True], repeat=len(FLAGS)):
         flags = dict(zip(FLAGS, active, strict=True))
         key = "+".join(name for name, on in flags.items() if on) or "none"
-        inputs[key] = extract_features(
-            batch,
-            full_info=flags["full_info"],
-            is_home_idx=is_home_idx,
-            use_demographics=flags["use_demographics"],
-            home_hop_distance=home_hop_distance if flags["use_home_pe"] else None,
-            use_rwpe=flags["use_rwpe"],
-        )
+        encoder = build_feature_encoder(Variant(mlp, **flags), dataset, HOME_PE)
+        inputs[key] = encoder(batch)
+        assert inputs[key].shape[1] == encoder.out_dim
 
     return inputs
 
@@ -240,7 +237,6 @@ def test_an_item_carries_the_location_and_user_node_features_apart(tmp_path):
     torch.testing.assert_close(item.x_user_node, dataset.user_node_features[3])
     assert item.num_nodes == dataset.num_nodes
     assert batch.num_nodes == NUM_USERS * dataset.num_nodes
-    assert dataset.num_features == dataset.schema.locations.width + dataset.schema.user_nodes.width
 
 
 def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path):

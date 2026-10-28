@@ -6,15 +6,11 @@ import lightning as L
 import pytest
 import torch
 import torch_geometric as pyg
+from encoders import make_encoder
 from torchmetrics import Metric
 
-from activitygraphs.ml.lightning_module import (
-    HOME_PE_BINS,
-    RankingModule,
-    create_home_distance_encoding,
-    extract_features,
-    extracted_features_dim,
-)
+from activitygraphs.ml.features import HomeAnchoredPE, RandomWalkPE
+from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import NodeMLP
 
@@ -36,6 +32,8 @@ NUM_DEMO_FEATURES = 3
 NUM_EDGE_FEATURES = 2
 NUM_RWPE_FEATURES = 4
 IN_CHANNELS = NUM_NODE_FEATURES + NUM_DEMO_FEATURES
+HOME_PE_BINS = 8
+HOME_PE_MAX_HOPS = 40
 # Column of the per-user ``is_home`` indicator in the synthetic ``x_user_node``, mirroring the real dataset.
 IS_HOME_IDX = 0
 HOME_NODE = 0
@@ -50,7 +48,7 @@ def chain_hop_distance(num_nodes: int = 8) -> torch.Tensor:
 def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
     """Return a synthetic PyG Batch with binary node labels, user attributes, and unique user ids.
 
-    Each graph carries ``user_attr`` so ``extract_features`` exercises the user attribute path;
+    Each graph carries ``user_attr`` so the encoder exercises the user attribute path;
     feature width is ``NUM_NODE_FEATURES + NUM_DEMO_FEATURES`` (== IN_CHANNELS). Node ``HOME_NODE``
     of every graph is that user's home and is labelled visited, as it always is in the real data.
     """
@@ -81,6 +79,11 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
     return pyg.data.Batch.from_data_list(graphs)
 
 
+def make_default_encoder():
+    """The encoder of the location and user-node features and the demographics of ``make_batch``."""
+    return make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES)
+
+
 def make_module(
     lr_scheduler: dict | None = None,
     store_score_vectors: bool = False,
@@ -88,6 +91,7 @@ def make_module(
     model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
     return RankingModule(
         model=model,
+        feature_encoder=make_default_encoder(),
         lr=1e-3,
         loss=BCELoss,
         lr_scheduler=lr_scheduler,
@@ -181,9 +185,7 @@ class TestValidationStep:
 
         module.eval()
         with torch.no_grad():
-            out = module(
-                extract_features(batch, module.full_info, IS_HOME_IDX), batch.edge_index, batch.edge_attr, batch.batch
-            )
+            out = module.compute_logits(batch)
 
         per_user = []
         for i in range(batch.num_graphs):
@@ -254,17 +256,18 @@ class TestTestStep:
 
 
 class TestUseDemographics:
-    """`use_demographics` is sized for at build time; the module must apply it at run time too."""
+    """The model is sized from the encoder, so the demographics are applied at run time exactly when sized for."""
 
     def _module(self, use_demographics: bool) -> RankingModule:
-        in_channels = NUM_NODE_FEATURES + (NUM_DEMO_FEATURES if use_demographics else 0)
-        model = NodeMLP(num_layers=2, in_channels=in_channels, hidden_channels=8, out_channels=1)
+        num_demographics = NUM_DEMO_FEATURES if use_demographics else 0
+        encoder = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, num_demographics)
+        model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
 
         return RankingModule(
             model=model,
+            feature_encoder=encoder,
             lr=1e-3,
             loss=BCELoss,
-            use_demographics=use_demographics,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
             max_recall_k=MAX_RECALL_K,
@@ -285,8 +288,8 @@ class TestUseDemographics:
     def test_the_two_arms_see_different_features(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
 
-        with_demo = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=True)
-        without_demo = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
+        with_demo = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES)(batch)
+        without_demo = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0)(batch)
 
         assert with_demo.shape[1] == without_demo.shape[1] + NUM_DEMO_FEATURES
 
@@ -295,28 +298,31 @@ class TestRwpe:
     """The random-walk PE is appended to the model input when ``use_rwpe`` is set, and only then."""
 
     def _module(self) -> RankingModule:
-        model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS + NUM_RWPE_FEATURES, hidden_channels=8, out_channels=1)
+        rwpe = RandomWalkPE(NUM_RWPE_FEATURES)
+        encoder = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES, rwpe)
+        model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
 
         return RankingModule(
             model=model,
+            feature_encoder=encoder,
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
             home_hop_distance=chain_hop_distance(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
-            use_rwpe=True,
         )
 
     def test_appends_the_encoding_after_x(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
-        x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False, use_rwpe=True)
+        rwpe = RandomWalkPE(NUM_RWPE_FEATURES)
+        x = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0, rwpe)(batch)
 
         torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node, batch.random_walk_pe], dim=-1))
 
-    def test_left_out_by_default(self):
+    def test_left_out_without_its_source(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
-        x = extract_features(batch, full_info=False, is_home_idx=IS_HOME_IDX, use_demographics=False)
+        x = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0)(batch)
 
         torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node], dim=-1))
 
@@ -332,6 +338,7 @@ class TestTrainRanking:
     def _module(self, **kwargs) -> RankingModule:
         return RankingModule(
             model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
+            feature_encoder=make_default_encoder(),
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
@@ -604,6 +611,7 @@ class TestCalibration:
     def test_both_stages_use_the_given_bins(self):
         module = RankingModule(
             model=NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
+            feature_encoder=make_default_encoder(),
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
@@ -625,7 +633,7 @@ class TestCheckpoint:
 
         assert hparams["lr"] == 1e-3
         assert hparams["lr_scheduler"] == LR_SCHEDULER
-        assert not {"model", "loss", "home_hop_distance"} & set(hparams)
+        assert not {"model", "encoder", "loss", "home_hop_distance"} & set(hparams)
 
     def test_compiling_keeps_the_state_dict_keys(self):
         module = make_module()
@@ -651,7 +659,7 @@ class TestCheckpoint:
 
         model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1)
         reloaded = RankingModule.load_from_checkpoint(
-            path, model=model, loss=BCELoss, home_hop_distance=chain_hop_distance()
+            path, model=model, encoder=make_default_encoder(), loss=BCELoss, home_hop_distance=chain_hop_distance()
         )
 
         assert reloaded.lr_scheduler == LR_SCHEDULER
@@ -682,27 +690,18 @@ def make_home_batch(
 
 def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = HOME_PE_BINS) -> RankingModule:
     """A module with the home-anchored PE enabled; model width accounts for the extra ``n_bins`` columns."""
-    model = NodeMLP(num_layers=2, in_channels=IN_CHANNELS + n_bins, hidden_channels=8, out_channels=1)
+    home_pe = HomeAnchoredPE(home_hop_distance, is_home_idx, n_bins, HOME_PE_MAX_HOPS)
+    encoder = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES, home_pe)
+    model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
     return RankingModule(
         model=model,
+        feature_encoder=encoder,
         lr=1e-3,
         loss=BCELoss,
         home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
-        use_home_pe=True,
-        home_pe_bins=n_bins,
-    )
-
-
-def fake_dataset(num_features: int = 6, num_demo: int = 3, num_dist: int = 1) -> types.SimpleNamespace:
-    """Minimal stand-in exposing the attributes extracted_features_dim reads."""
-    return types.SimpleNamespace(
-        num_features=num_features,
-        user_attributes=torch.zeros(1, num_demo),
-        distances=torch.zeros(1, num_dist),
-        num_rwpe_features=4,
     )
 
 
@@ -710,7 +709,8 @@ class TestHomePositionalEncoding:
     def test_shape_and_home_is_peak(self):
         """Encoding is [num_nodes, n_bins]; the home node (hop 0) peaks in the first RBF bin at value 1."""
         batch, hhd, is_home_idx = make_home_batch()
-        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=8)
+        home_pe = HomeAnchoredPE(hhd, is_home_idx, 8, HOME_PE_MAX_HOPS)
+        pe = home_pe(batch)
 
         assert pe.shape == (batch.num_nodes, 8)
         home_rows = batch.x_user_node[:, is_home_idx] > 0.0
@@ -721,7 +721,8 @@ class TestHomePositionalEncoding:
         """Explicit RBF over hop-to-home reproduces the encoding exactly (single graph, home = node 0)."""
         batch, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
         n_bins = 8
-        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=n_bins)
+        home_pe = HomeAnchoredPE(hhd, is_home_idx, n_bins, HOME_PE_MAX_HOPS)
+        pe = home_pe(batch)
 
         hops = hhd[0].clamp(max=40)  # row 0 == distances from the home node
         centers = torch.linspace(0, 40, n_bins)
@@ -731,7 +732,8 @@ class TestHomePositionalEncoding:
     def test_hops_are_capped_at_max_hops(self):
         """Every node at or beyond ``max_hops`` gets the encoding of ``max_hops`` itself."""
         batch, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
-        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=4, max_hops=3)
+        home_pe = HomeAnchoredPE(hhd, is_home_idx, 4, 3)
+        pe = home_pe(batch)
 
         torch.testing.assert_close(pe[3:], pe[3].expand(5, 4))
         assert not torch.allclose(pe[2], pe[3])
@@ -739,29 +741,19 @@ class TestHomePositionalEncoding:
     def test_varies_per_user(self):
         """Different home anchors give different encodings for the same node positions (the whole point)."""
         batch, hhd, is_home_idx = make_home_batch(home_nodes=[0, 7])
-        pe = create_home_distance_encoding(batch, hhd, is_home_idx, n_bins=8)
+        home_pe = HomeAnchoredPE(hhd, is_home_idx, 8, HOME_PE_MAX_HOPS)
+        pe = home_pe(batch)
         assert not torch.allclose(pe[batch.batch == 0], pe[batch.batch == 1])
 
-    def test_extract_features_appends_pe_columns(self):
-        """extract_features widens by exactly n_bins when the home PE is supplied."""
+    def test_the_encoder_appends_bins_columns(self):
+        """The encoder widens by exactly ``bins`` when the home PE is a source, and ``out_dim`` follows."""
         batch, hhd, is_home_idx = make_home_batch()
-        base = extract_features(batch, full_info=False, is_home_idx=is_home_idx)
-        with_pe = extract_features(
-            batch, full_info=False, home_hop_distance=hhd, is_home_idx=is_home_idx, home_pe_bins=8
-        )
-        assert with_pe.shape[1] - base.shape[1] == 8
+        home_pe = HomeAnchoredPE(hhd, is_home_idx, HOME_PE_BINS, HOME_PE_MAX_HOPS)
+        base = make_default_encoder()
+        with_pe = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES, home_pe)
 
-    def test_extracted_features_dim_adds_bins(self):
-        """The in_channels helper accounts for the PE so model width matches extract_features output."""
-        ds = fake_dataset()
-        base = extracted_features_dim(ds, use_home_pe=False)
-        with_pe = extracted_features_dim(ds, use_home_pe=True)
-        assert with_pe - base == HOME_PE_BINS
-
-    def test_extracted_features_dim_adds_the_rwpe(self):
-        ds = fake_dataset()
-
-        assert extracted_features_dim(ds, use_rwpe=True) - extracted_features_dim(ds) == 4
+        assert with_pe(batch).shape[1] - base(batch).shape[1] == HOME_PE_BINS
+        assert with_pe.out_dim - base.out_dim == HOME_PE_BINS
 
     def test_training_step_is_finite(self, monkeypatch):
         """A full training_step with the PE enabled returns a finite scalar loss."""

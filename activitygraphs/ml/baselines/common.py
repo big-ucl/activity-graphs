@@ -12,7 +12,7 @@ from activitygraphs.ml.popularity import POPULARITY_EPS
 
 
 class Baseline(torch.nn.Module):
-    """A model scored from the batch itself, rather than from the model input built by ``extract_features``."""
+    """A model scored from the batch itself, rather than from the model input built by the ``FeatureEncoder``."""
 
     def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the logit of each node of ``batch``, shape ``(num_nodes, 1)``."""
