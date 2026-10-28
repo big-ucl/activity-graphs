@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 import torch
 from encoders import continuous_schema
+from lightning.pytorch.callbacks import EarlyStopping
 from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
@@ -25,9 +26,10 @@ from activitygraphs.experiments.results import (
 )
 from activitygraphs.experiments.runners import run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
-from activitygraphs.experiments.training import WandBParams
+from activitygraphs.experiments.training import WandBParams, build_callbacks
 from activitygraphs.experiments.variants import Variant, build_feature_encoder, build_model, variant_hyperparams
 from activitygraphs.main import EXPERIMENTS
+from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.schema import DatasetSchema
@@ -360,6 +362,60 @@ class TestDemographicsAblation:
 
     def test_every_arm_runs_once_per_seed(self, cfg, monkeypatch):
         assert len(self._recorded(cfg, monkeypatch)) == 8  # 2 architectures x 2 arms x 2 seeds
+
+
+class TestCore:
+    """The core experiment trains the RWPE control and every architecture at the features of ``MLP-hpe-dist``."""
+
+    def _recorded(self, cfg, monkeypatch) -> list[dict]:
+        calls = record_training(monkeypatch, frame=make_model_frame)
+        setup = make_setup(cfg, [42, 43])
+        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
+        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
+
+        run_cfg = types.SimpleNamespace(
+            paths=types.SimpleNamespace(reports="reports"), data=types.SimpleNamespace(name="CMAP")
+        )
+        runners.core_experiment(run_cfg)  # type: ignore[arg-type]
+
+        return calls
+
+    def test_trains_the_core_variants(self, cfg, monkeypatch):
+        names = {call["variant"].name for call in self._recorded(cfg, monkeypatch)}
+
+        assert names == {
+            "MLP-dist-norwpe",
+            "MLP-dist",
+            "MLP-hpe-dist",
+            "GATv2-8-hpe-dist",
+            "GTransformer-2-res-hpe-dist",
+        }
+
+    def test_every_variant_runs_once_per_seed(self, cfg, monkeypatch):
+        assert len(self._recorded(cfg, monkeypatch)) == 10  # 5 variants x 2 seeds
+
+
+class TestBuildCallbacks:
+    """Early stopping follows the loss's checkpoint metric and stays off while overfitting."""
+
+    def _early_stopping(self, cfg, **overrides) -> list[EarlyStopping]:
+        run_cfg = cast(Config, OmegaConf.merge(cfg, overrides))
+        callbacks = build_callbacks(BCELoss, run_cfg, run_dir=None, run_name="MLP", debug=False)
+
+        return [callback for callback in callbacks if isinstance(callback, EarlyStopping)]
+
+    def test_early_stopping_monitors_the_checkpoint_metric(self, cfg):
+        (early_stopping,) = self._early_stopping(cfg, train={"early_stopping": {"patience": 7}})
+
+        assert early_stopping.monitor == BCELoss.monitor
+        assert early_stopping.mode == BCELoss.monitor_mode
+        assert early_stopping.patience == 7
+
+    def test_null_patience_turns_early_stopping_off(self, cfg):
+        assert self._early_stopping(cfg, train={"early_stopping": {"patience": None}}) == []
+
+    def test_overfitting_turns_early_stopping_off(self, cfg):
+        assert self._early_stopping(cfg, trainer={"overfit_batches": 1}) == []
 
 
 class TestDepthSweep:

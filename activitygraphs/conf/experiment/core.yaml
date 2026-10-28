@@ -1,0 +1,5 @@
+# @package _global_
+# MLP-dist with and without the random-walk PE, MLP-hpe-dist, and the GAT and GPS with the home PE and
+# the distance, beside the baselines.
+experiment:
+  name: core

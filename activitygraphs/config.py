@@ -254,6 +254,18 @@ class LRSchedulerConfig:
 
 
 @dataclass
+class EarlyStoppingConfig:
+    """Early stopping on the loss's monitored validation metric.
+
+    Attributes:
+        patience: Number of epochs without improvement after which a model stops training. None trains every model
+            for ``trainer.max_epochs``.
+    """
+
+    patience: int | None
+
+
+@dataclass
 class HomePEConfig:
     """Home-anchored positional encoding settings.
 
@@ -281,6 +293,7 @@ class TrainConfig:
     overfit_epochs: int
     schedule_lr: bool
     lr_scheduler: LRSchedulerConfig
+    early_stopping: EarlyStoppingConfig
     home_pe: HomePEConfig
     calibration_bins: int
     compile: bool
@@ -304,7 +317,7 @@ class ExperimentConfig:
         name: Key of the experiment's runner in ``main.EXPERIMENTS``.
     """
 
-    name: Literal["comparison", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
+    name: Literal["comparison", "core", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
 
 
 @dataclass

@@ -7,17 +7,17 @@ from activitygraphs.config import Config
 from activitygraphs.experiments import (
     baselines_experiment,
     comparison_experiment,
+    core_experiment,
     demographics_ablation_experiment,
     depth_sweep_experiment,
     overfit_health_experiment,
-    rwpe_control_experiment,
 )
 
 EXPERIMENTS = {
     "comparison": comparison_experiment,
+    "core": core_experiment,
     "depth_sweep": depth_sweep_experiment,
     "demographics_ablation": demographics_ablation_experiment,
-    "rwpe_control": rwpe_control_experiment,
     "overfit_health": overfit_health_experiment,
     "baselines": baselines_experiment,
 }

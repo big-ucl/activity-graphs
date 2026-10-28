@@ -53,6 +53,10 @@ train:
   lr_scheduler:
     factor: 0.5
     patience: 5
+  # Stop a model once the loss's monitored metric has not improved for `patience` epochs. Set it to
+  # null to train every model for `trainer.max_epochs`. Never used while overfitting.
+  early_stopping:
+    patience: 12
   # Home-anchored positional encoding: an RBF expansion of the hop distance to home, capped at `max_hops`.
   home_pe:
     bins: 8

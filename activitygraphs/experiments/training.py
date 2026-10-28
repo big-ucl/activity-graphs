@@ -7,7 +7,7 @@ from typing import cast
 import lightning as L
 import polars as pl
 import torch
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import OmegaConf
 
@@ -202,6 +202,46 @@ def evaluate_baseline(
     )
 
 
+def build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: str, debug: bool) -> list[L.Callback]:
+    """Build the ``Trainer`` callbacks of one training run.
+
+    Args:
+        loss: ``Loss`` instance, whose ``monitor`` metric and ``monitor_mode`` direction the checkpoint and early
+            stopping follow.
+        cfg: The config used by the experiment. ``cfg.train.early_stopping.patience`` sets the early stopping;
+            ``cfg.trainer.overfit_batches > 0`` turns it off.
+        run_dir: Run directory. Checkpoints are written to ``checkpoints/<run_name>/``. None disables them.
+        run_name: Name of the training run, which names its checkpoint directory.
+        debug: Flag that adds the ``OverfitDebugCallback``.
+
+    Returns:
+        The epoch learning-rate monitor, then the best and last checkpoint when ``run_dir`` is set, early stopping
+        unless its patience is None or the run is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
+    """
+    callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
+
+    if run_dir is not None:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(run_dir / CHECKPOINTS_DIR / run_name),
+                filename="best",
+                save_last=True,
+                save_top_k=1,
+                monitor=loss.monitor,
+                mode=loss.monitor_mode,
+            )
+        )
+
+    patience = cfg.train.early_stopping.patience
+    if patience is not None and cfg.trainer.overfit_batches == 0:
+        callbacks.append(EarlyStopping(monitor=loss.monitor, mode=loss.monitor_mode, patience=patience))
+
+    if debug:
+        callbacks.append(OverfitDebugCallback())
+
+    return callbacks
+
+
 def train_and_evaluate_model(
     model: torch.nn.Module,
     feature_encoder: FeatureEncoder,
@@ -267,24 +307,7 @@ def train_and_evaluate_model(
         log_train_ranking=train.log_train_ranking,
     )
 
-    # Build the callbacks
-
-    callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
-
-    if run_dir is not None:
-        callbacks.append(
-            ModelCheckpoint(
-                dirpath=str(run_dir / CHECKPOINTS_DIR / run_name),
-                filename="best",
-                save_last=True,
-                save_top_k=1,
-                monitor=loss.monitor,
-                mode=loss.monitor_mode,
-            )
-        )
-
-    if debug:
-        callbacks.append(OverfitDebugCallback())
+    callbacks = build_callbacks(loss, cfg, run_dir, run_name, debug)
 
     log_dir = str(run_dir / LOGS_DIR) if run_dir is not None else "."
 

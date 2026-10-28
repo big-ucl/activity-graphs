@@ -16,17 +16,17 @@ It is split into the following modules:
 from activitygraphs.experiments.runners import (
     baselines_experiment,
     comparison_experiment,
+    core_experiment,
     demographics_ablation_experiment,
     depth_sweep_experiment,
     overfit_health_experiment,
-    rwpe_control_experiment,
 )
 
 __all__ = [
     "baselines_experiment",
     "comparison_experiment",
+    "core_experiment",
     "demographics_ablation_experiment",
     "depth_sweep_experiment",
     "overfit_health_experiment",
-    "rwpe_control_experiment",
 ]
