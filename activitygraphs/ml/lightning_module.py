@@ -16,6 +16,7 @@ from torchmetrics.classification import BinaryCalibrationError
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.dataset import VisitDataset, is_home_node_mask
+from activitygraphs.ml.baselines.common import Baseline
 from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
@@ -163,10 +164,11 @@ class RankingModule(L.LightningModule):
     """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
 
     Handles BCE or BPR training and per-epoch ranking metrics.
-    Models must implement ``forward(x, edge_index, edge_attr, batch) -> logits``.
+    Models must implement ``forward(x, edge_index, edge_attr, batch) -> logits``, except a ``Baseline``, which is
+    given the batch itself.
 
     Args:
-        model: Any ``nn.Module`` with the GNN forward signature.
+        model: Any ``nn.Module`` with the GNN forward signature, or a ``Baseline``.
         lr: Initial learning rate for AdamW.
         loss: ``Loss`` instance.
         is_home_idx: Column index of ``is_home`` in ``batch.x_user_node``.
@@ -439,6 +441,9 @@ class RankingModule(L.LightningModule):
 
     def compute_logits(self, batch: UserBatch) -> torch.Tensor:
         """Model logits for a batch."""
+        if isinstance(self.model, Baseline):
+            return self.model(batch)
+
         home_hop_distance = self.home_hop_distance if self.use_home_pe else None
 
         x = extract_features(

@@ -1,15 +1,15 @@
 """Distance-decay baselines: nearest first, gravity with a Tanner deterrence, binned gravity and conditional gravity.
 
-Every baseline here reads each node's distance from the user's home as the last column of ``x``, so they are evaluated
-with ``full_info=True``. Distances are undone from the training ``StandardScaler`` back to metres.
+Every baseline here reads each node's distance in metres from the user's home, ``batch.distances_m``.
 """
 
 import torch
 import torch.nn.functional as F
 import torch_geometric as pyg
-from sklearn.preprocessing import StandardScaler
 
+from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.ml.baselines.common import (
+    Baseline,
     extract_per_user_tensors,
     fit_smoothing_strength,
     graph_home_indices,
@@ -26,41 +26,28 @@ N_DISTANCE_BINS = 20
 BIN_PSEUDOCOUNT = 0.5
 
 
-def unscale_distances(scaled_distances: torch.Tensor, scaler: StandardScaler) -> torch.Tensor:
-    """Undo the distance ``StandardScaler``.
-
-    Args:
-        scaled_distances: Scaled distances, any shape.
-        scaler: The distance scaler fitted on the training split.
-
-    Returns:
-        Distances in metres, clamped below at ``MIN_DISTANCE_M``.
-    """
-    assert scaler.mean_ is not None and scaler.scale_ is not None
-    mean = float(scaler.mean_[0])
-    scale = float(scaler.scale_[0])
-
-    return (scaled_distances.float() * scale + mean).clamp(min=MIN_DISTANCE_M)
+def clamp_distances(distances_m: torch.Tensor) -> torch.Tensor:
+    """Return the distances in metres clamped below at ``MIN_DISTANCE_M``, shaped like ``distances_m``."""
+    return distances_m.float().clamp(min=MIN_DISTANCE_M)
 
 
-class DistanceDecayBaseline(torch.nn.Module):
+def batch_distances(batch: UserBatch) -> torch.Tensor:
+    """Return the clamped distance in metres from home of each node of ``batch``, ``[num_nodes]``."""
+    return clamp_distances(batch.distances_m.squeeze(-1))
+
+
+class DistanceDecayBaseline(Baseline):
     """Nearest first: scores each node by ``-log(d)``, with ``d`` its distance from home in metres.
 
     The scores are not probabilities.
     """
 
-    def __init__(self, distance_scaler: StandardScaler):
-        super().__init__()
-        self.distance_scaler = distance_scaler
-
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return minus the log distance from home of each node, shape ``(num_nodes, 1)``."""
-        return -unscale_distances(x[:, -1], self.distance_scaler).log().unsqueeze(1)
+        return -batch_distances(batch).log().unsqueeze(1)
 
 
-class GravityBaseline(torch.nn.Module):
+class GravityBaseline(Baseline):
     """Gravity model with the home-excluded visit rate as mass and one Tanner deterrence for everyone.
 
     ``logit P(y = 1 | h, n) = alpha + logit(p_n) - beta_log * log(d / d0) - beta_lin * d / d0``, with ``d0`` the median
@@ -81,10 +68,9 @@ class GravityBaseline(torch.nn.Module):
     beta_log: float
     beta_lin: float
 
-    def __init__(self, is_home_idx_user_node: int, distance_scaler: StandardScaler, max_iter: int = 200):
+    def __init__(self, is_home_idx_user_node: int, max_iter: int = 200):
         super().__init__()
         self.is_home_idx_user_node = is_home_idx_user_node
-        self.distance_scaler = distance_scaler
         self.max_iter = max_iter
 
     def fit(self, train_loader: pyg.loader.DataLoader):
@@ -95,7 +81,7 @@ class GravityBaseline(torch.nn.Module):
         pairs = non_home_mask(split)
         labels = split.labels[pairs].float()
         offset = self.popularity_logit.expand_as(split.labels)[pairs]
-        distance = unscale_distances(split.distances, self.distance_scaler)[pairs]
+        distance = clamp_distances(split.distances)[pairs]
 
         self.d0 = float(distance[labels > 0.5].median())
         relative = distance / self.d0
@@ -123,15 +109,12 @@ class GravityBaseline(torch.nn.Module):
 
         return self.alpha + popularity - self.beta_log * relative.log() - self.beta_lin * relative
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the gravity logit of each node, shape ``(num_nodes, 1)``."""
-        distance = unscale_distances(x[:, -1], self.distance_scaler)
-        return self.pair_logits(graph_node_indices(x, batch), distance).unsqueeze(1)
+        return self.pair_logits(graph_node_indices(batch), batch_distances(batch)).unsqueeze(1)
 
 
-class GravityBinnedBaseline(torch.nn.Module):
+class GravityBinnedBaseline(Baseline):
     """Gravity model with a step-shaped deterrence fitted by counting: scores ``log p_n + log g_b(d)``.
 
     ``g_b = O_b / E_b``, with ``O_b`` the visited training pairs in distance bin ``b`` (plus a pseudocount) and ``E_b``
@@ -148,10 +131,9 @@ class GravityBinnedBaseline(torch.nn.Module):
     edges: torch.Tensor
     log_deterrence: torch.Tensor
 
-    def __init__(self, is_home_idx_user_node: int, distance_scaler: StandardScaler, n_bins: int = N_DISTANCE_BINS):
+    def __init__(self, is_home_idx_user_node: int, n_bins: int = N_DISTANCE_BINS):
         super().__init__()
         self.is_home_idx_user_node = is_home_idx_user_node
-        self.distance_scaler = distance_scaler
         self.n_bins = n_bins
 
     def fit(self, train_loader: pyg.loader.DataLoader):
@@ -163,7 +145,7 @@ class GravityBinnedBaseline(torch.nn.Module):
         pairs = non_home_mask(split)
         visited = split.labels[pairs] > 0.5
         expected = popularity.expand_as(split.labels)[pairs]
-        distance = unscale_distances(split.distances, self.distance_scaler)[pairs]
+        distance = clamp_distances(split.distances)[pairs]
 
         quantiles = torch.linspace(0, 1, self.n_bins + 1)[1:-1]
         self.edges = torch.quantile(distance[visited], quantiles)
@@ -175,18 +157,16 @@ class GravityBinnedBaseline(torch.nn.Module):
 
         return self
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the binned-gravity logit of each node, shape ``(num_nodes, 1)``."""
-        distance = unscale_distances(x[:, -1], self.distance_scaler)
-        bins = torch.bucketize(distance, self.edges.to(x.device))
-        popularity = self.log_popularity.to(x.device)[graph_node_indices(x, batch)]
+        device = batch.batch.device
+        bins = torch.bucketize(batch_distances(batch), self.edges.to(device))
+        popularity = self.log_popularity.to(device)[graph_node_indices(batch)]
 
-        return (popularity + self.log_deterrence.to(x.device)[bins]).unsqueeze(1)
+        return (popularity + self.log_deterrence.to(device)[bins]).unsqueeze(1)
 
 
-class ConditionalGravityBaseline(torch.nn.Module):
+class ConditionalGravityBaseline(Baseline):
     """Per-home visit frequency smoothed toward a fitted gravity model.
 
     ``p(n | h) = (c_hn + a * g_hn) / (u_h + a)``, with ``g_hn = sigmoid(Gravity logit)`` for the pair and the smoothing
@@ -202,10 +182,9 @@ class ConditionalGravityBaseline(torch.nn.Module):
     counts: torch.Tensor
     users: torch.Tensor
 
-    def __init__(self, gravity: GravityBaseline, is_home_idx_model_input: int):
+    def __init__(self, gravity: GravityBaseline):
         super().__init__()
         self.gravity = gravity
-        self.is_home_idx_model_input = is_home_idx_model_input
 
     def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
         """Count visits per home on ``train_loader`` and pick the smoothing strength on ``val_loader``."""
@@ -216,22 +195,21 @@ class ConditionalGravityBaseline(torch.nn.Module):
         self.counts, self.users = home_visit_counts(train.labels, train.home_idx)
 
         node_idx = torch.arange(val.labels.shape[1]).expand_as(val.labels)
-        val_distance = unscale_distances(val.distances, self.gravity.distance_scaler)
+        val_distance = clamp_distances(val.distances)
         val_prior = self.gravity.pair_logits(node_idx, val_distance).sigmoid()
 
         self.strength = fit_smoothing_strength(self.counts, self.users, val, val_prior)
 
         return self
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the home-conditioned gravity logit of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(x, batch, self.is_home_idx_model_input)
-        nodes = graph_node_indices(x, batch)
-        prior = self.gravity(x, edge_index, edge_attr, batch).sigmoid()
+        device = batch.batch.device
+        homes = graph_home_indices(batch, self.gravity.is_home_idx_user_node)
+        nodes = graph_node_indices(batch)
+        prior = self.gravity(batch).sigmoid()
 
-        counts = self.counts.to(x.device)[homes, nodes].unsqueeze(1)
-        rate = smoothed_rate(counts, self.users.to(x.device)[homes], prior, self.strength)
+        counts = self.counts.to(device)[homes, nodes].unsqueeze(1)
+        rate = smoothed_rate(counts, self.users.to(device)[homes], prior, self.strength)
 
         return torch.logit(rate)

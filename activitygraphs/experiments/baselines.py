@@ -3,12 +3,12 @@
 from dataclasses import dataclass
 
 import polars as pl
-import torch
 
 from activitygraphs.config import Config
 from activitygraphs.datasets import VisitDataModule
 from activitygraphs.experiments.training import WandBParams, evaluate_baseline
 from activitygraphs.ml.baselines import (
+    Baseline,
     ConditionalGravityBaseline,
     ConditionalVisitFrequencyBaseline,
     DistanceDecayBaseline,
@@ -24,11 +24,10 @@ from activitygraphs.ml.losses import Loss
 
 @dataclass(frozen=True)
 class BaselineSpec:
-    """A fitted baseline, the name it is reported under, and how it is evaluated."""
+    """A fitted baseline and associated reported name."""
 
     name: str
-    baseline: torch.nn.Module
-    full_info: bool = False
+    baseline: Baseline
 
 
 def measure_baselines(
@@ -53,54 +52,39 @@ def measure_baselines(
     train_loader = datamodule.train_dataloader()
     val_loader = datamodule.val_dataloader()
     is_home_idx_user_node = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
-    is_home_idx_model_input = datamodule.train_dataset.is_home_idx_model_input
-    distance_scaler = datamodule.scalers.distances
 
-    gravity = GravityBaseline(is_home_idx_user_node, distance_scaler).fit(train_loader)
-    gravity_binned = GravityBinnedBaseline(is_home_idx_user_node, distance_scaler).fit(train_loader)
-    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(
-        num_nodes, is_home_idx_user_node, is_home_idx_model_input
-    )
-    conditional_gravity = ConditionalGravityBaseline(gravity, is_home_idx_model_input)
+    gravity = GravityBaseline(is_home_idx_user_node).fit(train_loader)
+    gravity_binned = GravityBinnedBaseline(is_home_idx_user_node).fit(train_loader)
+    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes, is_home_idx_user_node)
+    conditional_gravity = ConditionalGravityBaseline(gravity)
 
     baselines = [
         BaselineSpec("Uniform", UniformBaseline()),
         BaselineSpec("GlobalMarginal", GlobalBaseline().fit(train_loader)),
         BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes, is_home_idx_user_node).fit(train_loader)),
         BaselineSpec("ConditionalVisitFrequency", conditional_visit_frequency.fit(train_loader, val_loader)),
-        BaselineSpec("DistanceDecay", DistanceDecayBaseline(distance_scaler), full_info=True),
-        BaselineSpec("Gravity", gravity, full_info=True),
-        BaselineSpec("GravityBinned", gravity_binned, full_info=True),
-        BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_loader, val_loader), full_info=True),
+        BaselineSpec("DistanceDecay", DistanceDecayBaseline()),
+        BaselineSpec("Gravity", gravity),
+        BaselineSpec("GravityBinned", gravity_binned),
+        BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_loader, val_loader)),
     ]
 
     results = [
-        evaluate_baseline(
-            spec.baseline,
-            datamodule,
-            loss,
-            spec.name,
-            cfg,
-            wandb_params,
-            full_info=spec.full_info,
-        ).with_columns(seed=pl.lit(None, dtype=pl.Int64))
+        evaluate_baseline(spec.baseline, datamodule, loss, spec.name, cfg, wandb_params).with_columns(
+            seed=pl.lit(None, dtype=pl.Int64)
+        )
         for spec in baselines
     ]
 
     for train_seed in train_seeds:
-        home_zone_mf = HomeZoneMFBaseline(
-            num_nodes, is_home_idx_user_node, is_home_idx_model_input, max_recall_k, seed=train_seed
-        )
-        results.append(
-            evaluate_baseline(
-                home_zone_mf.fit(train_loader, val_loader),
-                datamodule,
-                loss,
-                "HomeZoneMF",
-                cfg,
-                wandb_params,
-                run_tag=f"seed{train_seed}" if len(train_seeds) > 1 else None,
-            ).with_columns(seed=pl.lit(train_seed, dtype=pl.Int64))
-        )
+        home_zone_mf = HomeZoneMFBaseline(num_nodes, is_home_idx_user_node, max_recall_k, seed=train_seed)
+        home_zone_mf_fitted = home_zone_mf.fit(train_loader, val_loader)
+        run_tag = f"seed{train_seed}" if len(train_seeds) > 1 else None
+
+        home_zone_mf_results = evaluate_baseline(
+            home_zone_mf_fitted, datamodule, loss, "HomeZoneMF", cfg, wandb_params, run_tag=run_tag
+        ).with_columns(seed=pl.lit(train_seed, dtype=pl.Int64))
+
+        results.append(home_zone_mf_results)
 
     return results

@@ -3,7 +3,9 @@
 import torch
 import torch_geometric as pyg
 
+from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.ml.baselines.common import (
+    Baseline,
     extract_per_user_tensors,
     fit_smoothing_strength,
     graph_home_indices,
@@ -18,17 +20,15 @@ def inverse_sigmoid(prob):
     return torch.log(prob / (1 - prob))
 
 
-class UniformBaseline(torch.nn.Module):
+class UniformBaseline(Baseline):
     """P(y_i = 1) = 0.5 for all nodes."""
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return a zero logit for every node, shape ``(num_nodes, 1)``."""
-        return torch.zeros(x.shape[0], 1, device=x.device)
+        return torch.zeros(batch.num_nodes, 1, device=batch.batch.device)
 
 
-class GlobalBaseline(torch.nn.Module):
+class GlobalBaseline(Baseline):
     """P(y_i = 1) = global visit rate across all training graphs."""
 
     logit: torch.Tensor
@@ -50,14 +50,12 @@ class GlobalBaseline(torch.nn.Module):
 
         return self
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the global visit-rate logit for every node, shape ``(num_nodes, 1)``."""
-        return self.logit.expand(x.shape[0], 1).to(x.device)
+        return self.logit.expand(batch.num_nodes, 1).to(batch.batch.device)
 
 
-class VisitFrequencyBaseline(torch.nn.Module):
+class VisitFrequencyBaseline(Baseline):
     """P(y_i = 1) = per-node visit frequency across the training users who do not live at the node."""
 
     logits: torch.Tensor
@@ -74,14 +72,12 @@ class VisitFrequencyBaseline(torch.nn.Module):
 
         return self
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
-        return self.logits.to(x.device)[graph_node_indices(x, batch)].unsqueeze(1)
+        return self.logits.to(batch.batch.device)[graph_node_indices(batch)].unsqueeze(1)
 
 
-class ConditionalVisitFrequencyBaseline(torch.nn.Module):
+class ConditionalVisitFrequencyBaseline(Baseline):
     """P(y_i = 1 | home = h) = per-home visit frequency, smoothed towards VisitFrequency.
 
     The smoothing covers nodes never visited by users with home = h.
@@ -97,11 +93,10 @@ class ConditionalVisitFrequencyBaseline(torch.nn.Module):
     strength: float
     logits: torch.Tensor
 
-    def __init__(self, num_nodes: int, is_home_idx_user_node: int, is_home_idx_model_input: int):
+    def __init__(self, num_nodes: int, is_home_idx_user_node: int):
         super().__init__()
         self.num_nodes = num_nodes
         self.is_home_idx_user_node = is_home_idx_user_node
-        self.is_home_idx_model_input = is_home_idx_model_input
 
     def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
         """Count visits per home on ``train_loader`` and pick the smoothing strength on ``val_loader``."""
@@ -116,9 +111,7 @@ class ConditionalVisitFrequencyBaseline(torch.nn.Module):
 
         return self
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the user's home-conditioned visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(x, batch, self.is_home_idx_model_input)
-        return self.logits.to(x.device)[homes, graph_node_indices(x, batch)].unsqueeze(1)
+        homes = graph_home_indices(batch, self.is_home_idx_user_node)
+        return self.logits.to(batch.batch.device)[homes, graph_node_indices(batch)].unsqueeze(1)

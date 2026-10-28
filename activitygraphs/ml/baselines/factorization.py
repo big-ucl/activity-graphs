@@ -3,7 +3,9 @@
 import torch
 import torch_geometric as pyg
 
+from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.ml.baselines.common import (
+    Baseline,
     PerUserTensors,
     extract_per_user_tensors,
     graph_home_indices,
@@ -23,7 +25,7 @@ EVAL_EVERY = 10
 INIT_SCALE = 0.1
 
 
-class HomeZoneMFBaseline(torch.nn.Module):
+class HomeZoneMFBaseline(Baseline):
     """Factorisation of the home-zone-by-node visit matrix, fitted by Bayesian personalised ranking.
 
     ``s(h, n) = U_h . Z_n + b_n``, with ``h`` the user's home node. Phan's neighbourhood enrichment replaces each
@@ -36,7 +38,6 @@ class HomeZoneMFBaseline(torch.nn.Module):
     Args:
         num_nodes: Number of nodes in the graph.
         is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
-        is_home_idx_model_input: Column index of ``is_home`` in the model input ``x`` of ``forward``.
         max_recall_k: Largest rank cutoff ``K`` of the validation ``avg_recall@K`` that selects the kept factors.
         n_factors: Latent dimension ``k``.
         lr: Adam learning rate.
@@ -60,7 +61,6 @@ class HomeZoneMFBaseline(torch.nn.Module):
         self,
         num_nodes: int,
         is_home_idx_user_node: int,
-        is_home_idx_model_input: int,
         max_recall_k: int,
         n_factors: int = N_FACTORS,
         lr: float = LEARNING_RATE,
@@ -73,7 +73,6 @@ class HomeZoneMFBaseline(torch.nn.Module):
         super().__init__()
         self.num_nodes = num_nodes
         self.is_home_idx_user_node = is_home_idx_user_node
-        self.is_home_idx_model_input = is_home_idx_model_input
         self.max_recall_k = max_recall_k
         self.n_factors = n_factors
         self.lr = lr
@@ -141,9 +140,7 @@ class HomeZoneMFBaseline(torch.nn.Module):
 
         return float(avg_recall.mean())
 
-    def forward(
-        self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, batch: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, batch: UserBatch) -> torch.Tensor:
         """Return the fitted home-by-node score of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(x, batch, self.is_home_idx_model_input)
-        return self.scores.to(x.device)[homes, graph_node_indices(x, batch)].unsqueeze(1)
+        homes = graph_home_indices(batch, self.is_home_idx_user_node)
+        return self.scores.to(batch.batch.device)[homes, graph_node_indices(batch)].unsqueeze(1)

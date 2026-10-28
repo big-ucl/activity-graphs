@@ -6,8 +6,17 @@ import torch
 import torch_geometric as pyg
 from torch_geometric.utils import to_dense_batch
 
+from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.dataset import is_home_node_mask
 from activitygraphs.ml.popularity import POPULARITY_EPS
+
+
+class Baseline(torch.nn.Module):
+    """A model scored from the batch itself, rather than from the model input built by ``extract_features``."""
+
+    def forward(self, batch: UserBatch) -> torch.Tensor:
+        """Return the logit of each node of ``batch``, shape ``(num_nodes, 1)``."""
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -17,8 +26,7 @@ class PerUserTensors:
     Attributes:
         labels: Binary visit labels, ``[n_users, n_nodes]``.
         home_idx: Home node of each user, ``[n_users]``.
-        distances: Distance from each user's home to every node, as stored in the batches (scaled),
-            ``[n_users, n_nodes]``.
+        distances: Distance in metres from each user's home to every node, ``[n_users, n_nodes]``.
     """
 
     labels: torch.Tensor
@@ -51,7 +59,7 @@ def extract_per_user_tensors(loader: pyg.loader.DataLoader, is_home_idx_user_nod
 
         labels.append(to_dense_batch(batch.y.reshape(-1), batch.batch)[0])
         homes.append(is_home.int().argmax(dim=1))
-        distances.append(to_dense_batch(batch.distances.reshape(-1), batch.batch)[0])
+        distances.append(to_dense_batch(batch.distances_m.reshape(-1), batch.batch)[0])
 
     return PerUserTensors(labels=torch.cat(labels), home_idx=torch.cat(homes), distances=torch.cat(distances))
 
@@ -63,24 +71,27 @@ def non_home_mask(per_user_tensors: PerUserTensors) -> torch.Tensor:
     return mask
 
 
-def graph_node_indices(x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+def graph_node_indices(batch: UserBatch) -> torch.Tensor:
     """Return, for each node, its within-graph index, ``[num_nodes]``."""
-    ptr = torch.zeros(int(batch.max()) + 2, dtype=torch.long, device=batch.device)
-    ptr[1:] = batch.bincount().cumsum(0)
-    return torch.arange(x.shape[0], device=x.device) - ptr[batch]
+    return torch.arange(batch.num_nodes, device=batch.batch.device) - batch.ptr[batch.batch]
 
 
-def graph_home_indices(x: torch.Tensor, batch: torch.Tensor, is_home_idx_model_input: int) -> torch.Tensor:
+def graph_home_indices(batch: UserBatch, is_home_idx_user_node: int) -> torch.Tensor:
     """Return, for each node, the within-graph index of the corresponding home node, ``[num_nodes]``.
+
+    Args:
+        batch: The batch.
+        is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
 
     Raises:
         ValueError: If a graph has no home node.
     """
-    is_home, _ = to_dense_batch(is_home_node_mask(x, is_home_idx_model_input), batch, fill_value=False)
+    home_mask = is_home_node_mask(batch.x_user_node, is_home_idx_user_node)
+    is_home, _ = to_dense_batch(home_mask, batch.batch, fill_value=False)
     if not is_home.any(dim=1).all():
         raise ValueError("No home node found.")
 
-    return is_home.int().argmax(dim=1)[batch]
+    return is_home.int().argmax(dim=1)[batch.batch]
 
 
 SMOOTHING_GRID = torch.logspace(-2, 3, 30)

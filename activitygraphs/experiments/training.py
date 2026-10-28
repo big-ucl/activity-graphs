@@ -15,7 +15,7 @@ from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTO
 from activitygraphs.config import Config
 from activitygraphs.datasets import VisitDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
-from activitygraphs.ml.baselines.gravity import unscale_distances
+from activitygraphs.ml.baselines import Baseline
 from activitygraphs.ml.callbacks import OverfitDebugCallback
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.loggers import MetricsLogger
@@ -32,7 +32,7 @@ def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
     datamodule.setup()
     test_dataset = datamodule.test_dataset
     user_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
-    distances = unscale_distances(test_dataset.distances[user_idx].squeeze(-1), datamodule.scalers.distances)
+    distances = test_dataset.distances_m[user_idx].squeeze(-1)
 
     return pl.DataFrame(
         {"user_id": user_idx.tolist(), "distances": distances.tolist()},
@@ -118,13 +118,12 @@ class WandBParams:
 
 
 def evaluate_baseline(
-    baseline: torch.nn.Module,
+    baseline: Baseline,
     datamodule: VisitDataModule,
     loss: Loss,
     name: str,
     cfg: Config,
     wandb_params: WandBParams,
-    full_info: bool = False,
     run_tag: str | None = None,
 ) -> pl.DataFrame:
     """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
@@ -141,7 +140,6 @@ def evaluate_baseline(
         cfg: The config used by the experiment, read for the evaluation settings under ``train`` and the
             ``recall@k`` cutoffs under ``analysis``.
         wandb_params: parameters to configure WandB logging.
-        full_info: Append each node's distance from home as the last feature column, for the distance baselines.
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
@@ -158,7 +156,6 @@ def evaluate_baseline(
         is_home_idx=is_home_idx,
         calibration_bins=cfg.train.calibration_bins,
         store_score_vectors=cfg.train.save_score_vectors,
-        full_info=full_info,
     )
 
     if wandb_params.use_wandb:

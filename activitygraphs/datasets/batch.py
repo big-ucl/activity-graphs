@@ -20,7 +20,8 @@ class UserBatch:
         ptr: Offset of each graph's first node, ``[num_graphs + 1]``.
         user_attr: Per-user attributes, ``[num_graphs, num_user_attributes]``.
         user_id: Dataset index of each user, ``[num_graphs]``.
-        distances: Distance from the user's home to each node, ``[num_nodes, 1]``.
+        distances: Distance from the user's home to each node, as fed to the model, ``[num_nodes, 1]``.
+        distances_m: Distance in metres from the user's home to each node, ``[num_nodes, 1]``.
         random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, walk_length]``.
     """
 
@@ -34,6 +35,7 @@ class UserBatch:
     user_attr: Tensor
     user_id: Tensor
     distances: Tensor
+    distances_m: Tensor
     random_walk_pe: Tensor
 
     @classmethod

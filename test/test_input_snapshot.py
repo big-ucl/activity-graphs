@@ -243,6 +243,19 @@ def test_an_item_carries_the_location_and_user_node_features_apart(tmp_path):
     assert dataset.num_features == dataset.schema.locations.width + dataset.schema.user_nodes.width
 
 
+def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path):
+    dataset = build_dataset("cmap", tmp_path)
+    metres = dataset.distances.clone()
+    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
+    scalers = fit_scalers(dataset, TRAIN_IDX, fingerprint={}, exclude_user_node_cols=[is_home_idx])
+    apply_scalers(dataset, scalers)
+    item = dataset[3]
+
+    scaled = torch.from_numpy(scalers.distances.transform(metres[3].numpy())).float()
+    torch.testing.assert_close(item.distances_m, metres[3])
+    torch.testing.assert_close(item.distances, scaled)
+
+
 @pytest.mark.parametrize(
     ("survey_name", "user_attributes"),
     [("cmap", CMAP_DEMOGRAPHICS_SCHEMA), ("no_demographics", NO_DEMOGRAPHICS_SCHEMA)],
@@ -260,7 +273,6 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     assert schema.user_attributes.width == dataset.user_attributes.shape[-1]
     assert schema.distances.width == dataset.distances.shape[-1]
     assert schema.targets.width == dataset.visit_labels.shape[-1]
-    assert dataset.is_home_idx_model_input == schema.locations.width + schema.user_nodes.index_of("is_home")
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises(tmp_path):

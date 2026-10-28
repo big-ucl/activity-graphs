@@ -53,8 +53,10 @@ class VisitDataset(pyg.data.Dataset):
     Each item returned by ``get(i)`` is a ``pyg.data.Data`` with additional tensors:
       - ``x_loc = location_features``,
       - ``x_user_node = user_node_features[i]``,
-      - ``y = visit_labels[i]``, and
-      - ``user_attr = user_attributes[i]``.
+      - ``y = visit_labels[i]``,
+      - ``user_attr = user_attributes[i]``,
+      - ``distances = distances[i]``, the model feature, scaled once the scalers are applied, and
+      - ``distances_m = distances_m[i]``, the same distances in metres, never scaled.
     """
 
     PROCESSED_FILE_NAMES = [str(file) for file in ProcessedFile]
@@ -93,7 +95,8 @@ class VisitDataset(pyg.data.Dataset):
         self.user_attributes: torch.Tensor = torch.load(
             processed_dir / ProcessedFile.USER_ATTRIBUTES, weights_only=True
         )
-        self.distances: torch.Tensor = torch.load(processed_dir / ProcessedFile.DISTANCES, weights_only=True)
+        self.distances_m: torch.Tensor = torch.load(processed_dir / ProcessedFile.DISTANCES, weights_only=True)
+        self.distances: torch.Tensor = self.distances_m
         self.group_ids: torch.Tensor = torch.load(processed_dir / ProcessedFile.GROUP_IDS, weights_only=True)
         self.user_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.USER_IDS)
         self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.NODE_IDS)
@@ -147,11 +150,6 @@ class VisitDataset(pyg.data.Dataset):
     def num_rwpe_features(self) -> int:
         """Number of columns of the random-walk positional encoding, ``random_walk_pe``."""
         return self.pyg_graph.random_walk_pe.shape[1]
-
-    @property
-    def is_home_idx_model_input(self) -> int:
-        """Column index of ``is_home`` within the model input built by ``extract_features``."""
-        return self.num_location_features + self.schema.user_nodes.index_of("is_home")
 
     @cached_property
     def home_hop_distance(self) -> np.ndarray:
@@ -282,6 +280,7 @@ class VisitDataset(pyg.data.Dataset):
 
         # Per-user distance-from-home
         data.distances = self.distances[idx].to(location_x.dtype)
+        data.distances_m = self.distances_m[idx]
 
         # Carry over any extra attributes from the graph (pos, etc.)
         for key, value in self.pyg_graph:  # pyrefly: ignore[not-iterable]

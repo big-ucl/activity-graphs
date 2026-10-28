@@ -39,6 +39,7 @@ def make_graphs(num_graphs: int = 8) -> list[pyg.data.Data]:
         graph.user_attr = torch.zeros(1, 1)
         graph.user_id = torch.tensor([user])
         graph.distances = torch.rand(NUM_NODES, 1, generator=generator)
+        graph.distances_m = graph.distances
         graph.random_walk_pe = torch.rand(NUM_NODES, 2, generator=generator)
         graphs.append(graph)
 
