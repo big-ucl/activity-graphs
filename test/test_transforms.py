@@ -115,10 +115,12 @@ class TestTransformPolicy:
     def test_is_home_passes_through(self):
         assert TRANSFORM_POLICY.column_transforms(USER_NODE_SCHEMA) == (PASSTHROUGH,)
 
-    def test_binary_demographics_are_zscored(self):
+    def test_binary_demographics_pass_through(self):
         transforms = TRANSFORM_POLICY.column_transforms(CMAP_DEMOGRAPHICS_SCHEMA)
 
-        assert set(transforms) == {ZSCORE}
+        for column, transform in zip(CMAP_DEMOGRAPHICS_SCHEMA.columns, transforms, strict=True):
+            expected = PASSTHROUGH if column.kind == BINARY else ZSCORE
+            assert transform == expected, column.name
 
     @pytest.mark.parametrize("schema", [DISTANCE_SCHEMA, EDGE_SCHEMA])
     def test_distances_and_edge_weights_are_zscored_without_log1p(self, schema):
