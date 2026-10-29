@@ -2,7 +2,6 @@
 
 import logging
 
-import pytest
 import torch
 
 from activitygraphs.datasets import transforms as transforms_module
@@ -122,9 +121,11 @@ class TestTransformPolicy:
             expected = PASSTHROUGH if column.kind == BINARY else ZSCORE
             assert transform == expected, column.name
 
-    @pytest.mark.parametrize("schema", [DISTANCE_SCHEMA, EDGE_SCHEMA])
-    def test_distances_and_edge_weights_are_zscored_without_log1p(self, schema):
-        assert TRANSFORM_POLICY.column_transforms(schema) == (ZSCORE,)
+    def test_distances_are_log1p_then_zscored(self):
+        assert TRANSFORM_POLICY.column_transforms(DISTANCE_SCHEMA) == (LOG1P_ZSCORE,)
+
+    def test_edge_weights_are_zscored_without_log1p(self):
+        assert TRANSFORM_POLICY.column_transforms(EDGE_SCHEMA) == (ZSCORE,)
 
     def test_a_group_without_overrides_follows_the_kind(self):
         assert TRANSFORM_POLICY.column_transforms(one_column_per_kind()) == (

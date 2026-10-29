@@ -55,7 +55,6 @@ TRANSFORM_POLICY = TransformPolicy(
     },
     group_overrides={
         "edges": {ColumnKind.COUNT: Transform.ZSCORE},
-        "distances": {ColumnKind.COUNT: Transform.ZSCORE},
     },
 )
 
