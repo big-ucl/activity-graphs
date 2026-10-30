@@ -115,9 +115,10 @@ class TestTransformPolicy:
         assert TRANSFORM_POLICY.column_transforms(USER_NODE_SCHEMA) == (PASSTHROUGH,)
 
     def test_binary_demographics_pass_through(self):
-        transforms = TRANSFORM_POLICY.column_transforms(CMAP_DEMOGRAPHICS_SCHEMA)
+        numeric = CMAP_DEMOGRAPHICS_SCHEMA.numeric
+        transforms = TRANSFORM_POLICY.column_transforms(numeric)
 
-        for column, transform in zip(CMAP_DEMOGRAPHICS_SCHEMA.columns, transforms, strict=True):
+        for column, transform in zip(numeric.columns, transforms, strict=True):
             expected = PASSTHROUGH if column.kind == BINARY else ZSCORE
             assert transform == expected, column.name
 

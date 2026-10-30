@@ -30,26 +30,9 @@ from activitygraphs.surveys.base import NA, DataFrameStore, SurveyData, SurveyLo
 from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import (
     add_lon_lat_from_centroid,
-    bands_to_midpoint_map,
     check_schema,
     get_project_root,
     invert_mapping,
-)
-
-CMAP_DEMOGRAPHICS_SCHEMA = TensorSchema(
-    "user_attributes",
-    (
-        ColumnSpec("has_missing_demographics", ColumnKind.BINARY),
-        ColumnSpec("age", ColumnKind.CONTINUOUS),
-        ColumnSpec("is_employed", ColumnKind.BINARY),
-        ColumnSpec("is_student", ColumnKind.BINARY),
-        ColumnSpec("can_drive", ColumnKind.BINARY),
-        ColumnSpec("hh_num_adults", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_children", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_vehicles", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_bicycle", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_income_kusd", ColumnKind.CONTINUOUS),
-    ),
 )
 
 CMAP_COUNTY_FP_CODES = [
@@ -98,7 +81,7 @@ PURPOSE_MAP = invert_mapping({
 
 SINGLE_DAY_DIARY_PLATFORMS = ["browser", "call"]
 
-INCOME_MIDPOINTS_KUSD = bands_to_midpoint_map({
+INCOME_BANDS_KUSD = {
     1: (0, 15),
     2: (15, 25),
     3: (25, 30),
@@ -111,9 +94,9 @@ INCOME_MIDPOINTS_KUSD = bands_to_midpoint_map({
     10: (150, 200),
     11: (200, 250),
     12: (250, 350),
-})
+}
 
-AGE_MIDPOINTS = bands_to_midpoint_map({
+AGE_BANDS = {
     1: (0, 5),
     2: (5, 11),
     3: (12, 15),
@@ -126,8 +109,47 @@ AGE_MIDPOINTS = bands_to_midpoint_map({
     10: (65, 74),
     11: (75, 84),
     12: (85, 100),
-})
+}
 
+EMPLOYMENT_STATUSES = {
+    1: "employed full-time",
+    2: "employed part-time",
+    3: "self-employed",
+    5: "retired",
+    6: "unemployed and looking for work",
+    7: "volunteer or intern",
+    8: "employed, not currently working",
+    9: "homemaker",
+    10: "disabled non-worker",
+    11: "not employed and not looking for work",
+}
+
+STUDENT_STATUSES = {
+    0: "full-time, in person",
+    1: "part-time, in person",
+    2: "not a student",
+    3: "part-time, online only",
+    4: "full-time, online only",
+}
+
+TRANSIT_PASS_COLUMNS = [f"transit_pass_{option}" for option in range(1, 6)]
+
+CMAP_DEMOGRAPHICS_SCHEMA = TensorSchema(
+    "user_attributes",
+    (
+        ColumnSpec("has_missing_demographics", ColumnKind.BINARY),
+        ColumnSpec("age_band", ColumnKind.CATEGORICAL, tuple(str(code) for code in AGE_BANDS)),
+        ColumnSpec("employment_status", ColumnKind.CATEGORICAL, tuple(str(code) for code in EMPLOYMENT_STATUSES)),
+        ColumnSpec("student_status", ColumnKind.CATEGORICAL, tuple(str(code) for code in STUDENT_STATUSES)),
+        ColumnSpec("can_drive", ColumnKind.BINARY),
+        ColumnSpec("has_transit_pass", ColumnKind.CATEGORICAL, ("false", "true")),
+        ColumnSpec("hh_num_adults", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_children", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_vehicles", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_bicycle", ColumnKind.CONTINUOUS),
+        ColumnSpec("income_band", ColumnKind.CATEGORICAL, tuple(str(code) for code in INCOME_BANDS_KUSD)),
+    ),
+)
 
 # =========================================
 # Survey
@@ -330,6 +352,12 @@ def _census_tract_to_loc_id(census_tract_col: str, locations_gdf: gpd.GeoDataFra
     return pl.when(tract.is_in(loc_ids)).then(tract).otherwise(pl.lit(NA))
 
 
+def _codebook_code(column: str, codebook: dict[int, object]) -> pl.Expr:
+    """Return the codes of ``column`` that are in ``codebook``, and null for any other code."""
+    codes = pl.col(column)
+    return pl.when(codes.is_in(list(codebook))).then(codes).cast(pl.UInt32)
+
+
 # =========================================
 # Survey: Journeys
 # =========================================
@@ -377,7 +405,7 @@ def build_cmap_users(
         hh_num_children=pl.col("num_kids").cast(pl.UInt32),
         hh_num_vehicles=pl.col("num_vehicles").cast(pl.UInt32),
         hh_num_bicycle=pl.col("num_bicycle").replace(995, None),
-        hh_income_kusd=pl.col("income_detailed").replace_strict(INCOME_MIDPOINTS_KUSD, default=None),
+        income_band=_codebook_code("income_detailed", INCOME_BANDS_KUSD),
     )
 
     persons_df = inputs.raw_persons_df.select(
@@ -386,10 +414,16 @@ def build_cmap_users(
         has_missing_demographics=(
             (pl.col("employment") == 995) | (pl.col("student") == 995) | (pl.col("can_drive") == 995)
         ).cast(pl.Boolean),
-        age=pl.col("age").replace_strict(AGE_MIDPOINTS, default=None),
-        is_employed=pl.col("employment").is_in([1, 2, 3, 8]).cast(pl.Boolean),
-        is_student=pl.col("student").is_in([0, 1, 3, 4]).cast(pl.Boolean),
+        age_band=_codebook_code("age", AGE_BANDS),
+        employment_status=_codebook_code("employment", EMPLOYMENT_STATUSES),
+        student_status=_codebook_code("student", STUDENT_STATUSES),
         can_drive=(pl.col("can_drive") == 1).cast(pl.Boolean),
+        has_transit_pass=pl
+        .when(pl.any_horizontal(pl.col(TRANSIT_PASS_COLUMNS) == 1))
+        .then(pl.lit(True))
+        .when(pl.col("transit_pass_0") == 1)
+        .then(pl.lit(False))
+        .otherwise(pl.lit(None, dtype=pl.Boolean)),
     )
 
     # Filter out users which have only journeys to NA
@@ -400,8 +434,6 @@ def build_cmap_users(
     users_df = users_df.join(journey_user_ids, on="user_id", how="inner")  # Drop users with no journeys in study area
 
     users_df = users_df.with_columns(
-        pl.col("age").fill_null(pl.col("age").median()).cast(pl.UInt32),
-        pl.col("hh_income_kusd").fill_null(pl.col("hh_income_kusd").median()),
         pl.col("hh_num_bicycle").fill_null(pl.col("hh_num_bicycle").median()).cast(pl.UInt32),
     ).sort("user_id")
 

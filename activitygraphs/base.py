@@ -82,11 +82,12 @@ USER_SCHEMA = pl.Schema({
     "hh_num_children": pl.UInt32,
     "hh_num_vehicles": pl.UInt32,
     "hh_num_bicycle": pl.UInt32,
-    "hh_income_kusd": pl.Float64,
-    "age": pl.UInt32,
-    "is_employed": pl.Boolean,
-    "is_student": pl.Boolean,
+    "income_band": pl.UInt32,
+    "age_band": pl.UInt32,
+    "employment_status": pl.UInt32,
+    "student_status": pl.UInt32,
     "can_drive": pl.Boolean,
+    "has_transit_pass": pl.Boolean,
 })
 
 EDGE_LIST_SCHEMA = pl.Schema({

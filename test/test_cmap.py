@@ -12,10 +12,8 @@ from shapely.geometry import Polygon
 from activitygraphs.base import CRS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
 from activitygraphs.surveys.base import NA
 from activitygraphs.surveys.cmap import (
-    AGE_MIDPOINTS,
     CMAP_DEMOGRAPHICS_SCHEMA,
     EXCLUDED_CENSUS_TRACTS,
-    INCOME_MIDPOINTS_KUSD,
     MODE_MAP,
     PURPOSE_MAP,
     CMAPSurvey,
@@ -87,7 +85,16 @@ def make_journeys(rows: list[dict]) -> pl.DataFrame:
 
 
 def make_persons(rows: list[dict]) -> pl.DataFrame:
-    defaults = {"person_id": 1, "hh_id": 1, "age": 6, "employment": 1, "student": 2, "can_drive": 1}
+    defaults = {
+        "person_id": 1,
+        "hh_id": 1,
+        "age": 6,
+        "employment": 1,
+        "student": 2,
+        "can_drive": 1,
+        "transit_pass_0": 1,
+        **{f"transit_pass_{option}": 0 for option in range(1, 6)},
+    }
 
     return pl.DataFrame([defaults | row for row in rows])
 
@@ -120,14 +127,6 @@ class TestCodeMappings:
         # invert_mapping silently keeps the last writer if a code appears under two enum members.
         assert len(set(MODE_MAP)) == len(MODE_MAP)
         assert len(set(PURPOSE_MAP)) == len(PURPOSE_MAP)
-
-    def test_band_midpoints_are_strictly_increasing(self):
-        # Age and income are ordinal bands standing in for a continuous feature, so the midpoints
-        # must preserve the band order for the scaled feature to mean anything.
-        for midpoints in (AGE_MIDPOINTS, INCOME_MIDPOINTS_KUSD):
-            by_band = [midpoints[band] for band in sorted(midpoints)]
-            assert by_band == sorted(by_band)
-            assert len(set(by_band)) == len(by_band)
 
 
 class TestBuildLocations:
@@ -233,7 +232,7 @@ class TestBuildUsers:
             assert not set(numeric[column].to_list()) & set(SENTINELS), column
 
     def test_missing_demographics_are_flagged_not_silently_folded_to_false(self, boundaries_ct, locations_gdf):
-        # The is_in recodes turn 995 into False; the indicator is what lets the model tell an absent
+        # The recodes turn 995 into False; the indicator is what lets the model tell an absent
         # answer apart from a real "no".
         persons = make_persons([
             {"person_id": 1, "hh_id": 1, "employment": 995, "student": 995, "can_drive": 995},
@@ -244,7 +243,33 @@ class TestBuildUsers:
         users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
 
         assert users["has_missing_demographics"].to_list() == [True, False]
-        assert users["is_employed"].to_list() == [False, False]
+        assert users["can_drive"].to_list() == [False, False]
+
+    def test_codes_outside_the_codebook_become_missing(self, boundaries_ct, locations_gdf):
+        persons = make_persons([
+            {"person_id": 1, "hh_id": 1, "age": 995, "employment": 995, "student": 995},
+            {"person_id": 2, "hh_id": 2, "age": 8, "employment": 5, "student": 0},
+        ])
+        households = make_households([{"hh_id": 1, "income_detailed": 999}, {"hh_id": 2, "income_detailed": 12}])
+
+        users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
+
+        assert users["age_band"].to_list() == [None, 8]
+        assert users["employment_status"].to_list() == [None, 5]
+        assert users["student_status"].to_list() == [None, 0]
+        assert users["income_band"].to_list() == [None, 12]
+
+    def test_any_selected_pass_is_a_transit_pass(self, boundaries_ct, locations_gdf):
+        persons = make_persons([
+            {"person_id": 1, "hh_id": 1},
+            {"person_id": 2, "hh_id": 2, "transit_pass_0": 0, "transit_pass_3": 1},
+            {"person_id": 3, "hh_id": 3, **{f"transit_pass_{option}": 995 for option in range(6)}},
+        ])
+        households = make_households([{"hh_id": 1}, {"hh_id": 2}, {"hh_id": 3}])
+
+        users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
+
+        assert users["has_transit_pass"].to_list() == [False, True, None]
 
     def test_drops_multi_day_rmove_households(self, boundaries_ct, locations_gdf):
         persons = make_persons([{"person_id": 1, "hh_id": 1}, {"person_id": 2, "hh_id": 2}])

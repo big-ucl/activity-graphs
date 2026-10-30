@@ -55,24 +55,9 @@ class NoDemographicsSurvey(CMAPSurvey):
         return TensorSchema("user_attributes", ())
 
 
-class CategoricalDemographicsSurvey(CMAPSurvey):
-    """A ``CMAPSurvey`` whose ``hh_num_vehicles`` is categorical, with categories "0" and "1" only."""
-
-    @property
-    def demographics_schema(self) -> TensorSchema:
-        """The CMAP schema with ``hh_num_vehicles`` replaced by a categorical column."""
-        vehicles = ColumnSpec("hh_num_vehicles", ColumnKind.CATEGORICAL, ("0", "1"))
-        columns = []
-        for column in CMAP_DEMOGRAPHICS_SCHEMA.columns:
-            columns.append(vehicles if column.name == vehicles.name else column)
-
-        return TensorSchema("user_attributes", tuple(columns))
-
-
 SURVEY_CLASSES = {
     "cmap": CMAPSurvey,
     "no_demographics": NoDemographicsSurvey,
-    "categorical": CategoricalDemographicsSurvey,
 }
 
 
@@ -108,22 +93,27 @@ def build_users(loc_ids: list[str]) -> pl.DataFrame:
     hh_children = rng.integers(0, 3, NUM_HOUSEHOLDS)
     hh_vehicles = rng.integers(0, 3, NUM_HOUSEHOLDS)
     hh_bicycle = rng.integers(0, 4, NUM_HOUSEHOLDS)
-    hh_income = rng.choice([12.5, 37.5, 62.5, 87.5, 125.0, 175.0], NUM_HOUSEHOLDS)
+    hh_income = rng.choice([1, 5, 7, 8, 9, 10], NUM_HOUSEHOLDS)
+    has_missing = rng.random(NUM_USERS) < 0.2
+    employment = rng.choice([1, 2, 5, 6, 11], NUM_USERS)
 
     users = pl.DataFrame({
         "user_id": [f"u{k:02d}" for k in range(NUM_USERS)],
         "hh_id": [f"h{h:02d}" for h in hh],
         "home_loc_id": hh_home[hh],
-        "has_missing_demographics": rng.random(NUM_USERS) < 0.2,
+        "has_missing_demographics": has_missing,
         "hh_num_adults": hh_adults[hh],
         "hh_num_children": hh_children[hh],
         "hh_num_vehicles": hh_vehicles[hh],
         "hh_num_bicycle": hh_bicycle[hh],
-        "hh_income_kusd": hh_income[hh],
-        "age": rng.integers(18, 80, NUM_USERS),
-        "is_employed": rng.random(NUM_USERS) < 0.6,
-        "is_student": rng.random(NUM_USERS) < 0.2,
+        "income_band": hh_income[hh],
+        "age_band": rng.integers(5, 13, NUM_USERS),
+        "employment_status": [
+            None if missing else int(code) for missing, code in zip(has_missing, employment, strict=True)
+        ],
+        "student_status": rng.choice([0, 2], NUM_USERS),
         "can_drive": rng.random(NUM_USERS) < 0.7,
+        "has_transit_pass": rng.random(NUM_USERS) < 0.3,
     })
 
     return users.cast(USER_SCHEMA)
@@ -199,8 +189,10 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
     for active in itertools.product([False, True], repeat=len(FLAGS)):
         flags = dict(zip(FLAGS, active, strict=True))
         key = "+".join(name for name, on in flags.items() if on) or "none"
+        torch.manual_seed(0)
         encoder = build_feature_encoder(Variant(mlp, **flags), dataset, HOME_PE)
-        inputs[key] = encoder(batch)
+        with torch.no_grad():
+            inputs[key] = encoder(batch)
         assert inputs[key].shape[1] == encoder.out_dim
 
     return inputs
@@ -284,7 +276,8 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     assert schema.locations.width == dataset.location_x.shape[1]
     assert schema.edges.width == dataset.edge_attr.shape[1]
     assert schema.user_nodes.width == dataset.user_node_features.shape[-1]
-    assert schema.user_attributes.width == dataset.user_attributes.shape[-1]
+    assert schema.user_attributes.numeric.width == dataset.user_attributes.shape[-1]
+    assert schema.user_attributes.categorical.width == dataset.user_attributes_cat.shape[-1]
     assert schema.distances.width == dataset.distances.shape[-1]
     assert schema.targets.width == dataset.visit_labels.shape[-1]
 
@@ -299,23 +292,29 @@ def test_without_demographics_use_demographics_leaves_the_inputs_unchanged(tmp_p
 
 
 def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
-    dataset = build_dataset("categorical", tmp_path)
+    dataset = build_dataset("cmap", tmp_path)
     users = build_users(build_zones()["loc_id"].tolist()).sort("user_id")
-    vehicles = users["hh_num_vehicles"].to_list()
-    expected_codes = torch.tensor([[1 + count if count < 2 else 0] for count in vehicles])
+    employment = users["employment_status"].to_list()
+    categorical = dataset.schema.user_attributes.categorical
+    employment_idx = categorical.index_of("employment_status")
+    categories = categorical.columns[employment_idx].categories
+    expected_codes = torch.tensor([0 if code is None else categories.index(str(code)) + 1 for code in employment])
 
     fit_transforms(dataset, TRAIN_IDX, fingerprint={}).apply(dataset)
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
     mlp = read_config(get_project_root(), verbose=False).models.mlp
     plain = build_feature_encoder(Variant(mlp, use_demographics=False), dataset, HOME_PE)
     encoder = build_feature_encoder(Variant(mlp), dataset, HOME_PE)
+    embedded_width = 0
+    for spec in categorical.columns:
+        embedded_width += default_emb_dim(spec.cardinality)
 
-    assert set(vehicles) == {0, 1, 2}
-    assert dataset.schema.user_attributes.categorical.names == ["hh_num_vehicles"]
-    assert dataset.user_attributes.shape[-1] == CMAP_DEMOGRAPHICS_SCHEMA.width - 1
-    torch.testing.assert_close(dataset.user_attributes_cat, expected_codes, rtol=0, atol=0)
-    torch.testing.assert_close(batch.user_attr_cat, expected_codes, rtol=0, atol=0)
-    assert encoder.out_dim == plain.out_dim + CMAP_DEMOGRAPHICS_SCHEMA.width - 1 + default_emb_dim(3)
+    assert None in employment
+    assert categorical.names == ["age_band", "employment_status", "student_status", "has_transit_pass", "income_band"]
+    assert dataset.user_attributes.shape[-1] == CMAP_DEMOGRAPHICS_SCHEMA.numeric.width
+    torch.testing.assert_close(dataset.user_attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(batch.user_attr_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
+    assert encoder.out_dim == plain.out_dim + CMAP_DEMOGRAPHICS_SCHEMA.numeric.width + embedded_width
     assert encoder(batch).shape == (batch.num_nodes, encoder.out_dim)
 
 
