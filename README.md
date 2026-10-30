@@ -6,8 +6,9 @@ into a tractable candidate set of locations the person plausibly considers visit
 input to downstream activity-based travel models. The task is set up as node-level classification/ranking over a spatial
 adjacency graph of census/traffic analysis zones, trained on realised visits.
 
-Datasets: Toronto (THATS), Geneva (TPG), with Chicago (CMAP MyDailyTravel) coming soon. Survey data is not distributed
-in this repository, `data/` must be added to the local repo clone.
+Datasets: Geneva (TPG) and Chicago (CMAP MyDailyTravel), with Toronto (TTS) coming soon. The Toronto THATS loader is
+kept but no longer used. Survey data is not distributed in this repository, `data/` must be added to the local repo
+clone.
 
 ## Setup
 
@@ -34,7 +35,8 @@ uv run activity-graphs train.loss.neg_sampler=hard  # hard near-home BPR negativ
 uv run activity-graphs train.wandb=false            # disable Weights & Biases logging
 
 uv run activity-graphs train.train_seeds=[1,2,3]    # repeat every model for each training seed
-uv run activity-graphs experiment=depth_sweep       # sweep GATSkip depth instead of comparing architectures
+uv run activity-graphs experiment=core              # the short run for paired comparisons between code changes
+uv run activity-graphs experiment=depth_sweep       # sweep GAT depth instead of comparing architectures
 uv run activity-graphs experiment=depth_sweep experiment.depths=[2,4,8]
 ```
 
@@ -50,18 +52,34 @@ uv run report-results analysis.reference_model=MLP-dist   # change reference mod
 
 - the aggregate metric as mean +- sd over the training seeds;
 - the per-user paired comparison of every model against `analysis.reference_model` (bootstrap CI and Wilcoxon p);
-- the per-hop-band metrics table.
+- the recall@k curve, and the paired comparison split by whether the user's home zone was seen in training;
+- the per-hop-band and per-distance-band metrics (AUC within each distance band); and
+- the model health checks.
 
 Configuration is Hydra-based (`activitygraphs/conf/`). Any config key can be overridden on the command line.
 
+Feature transformations are done as follows:
+
+1. a schema is declared for each tensor where every feature column is assigned a ``kind`` (continuous, count, binary or
+   categorical)
+2. The transforms (scaling, log1p, etc...) depend on the ``kind`` and are fitted on the training split. Continuous
+   columns are z-scored, counts (the distances) are log1p then z-scored, and binary columns pass through. Categorical
+   columns, such as the demographics, are embedded by the model.
+
 `experiment=<name>` (a file of `activitygraphs/conf/experiment/`) selects what to run:
 
-- `comparison` (default) trains the GNN variants (GATSkip, GraphTransformer, MLP)
-  against frequency baselines,
-- `depth_sweep` sweeps the message-passing depth of the best GATSkip variant.
+- `comparison` (default) trains the MLP, GATv2 and GraphTransformer variants against the baselines (popularity and
+  distance decay),
+- `core` trains five MLP, GATv2 and GraphTransformer variants. A shorter run for comparisons between code changes,
+- `depth_sweep` sweeps the message-passing depth of the GAT variant,
+- `demographics_ablation` trains the two best variants with and without the demographics,
+- `baselines` fits the baselines alone,
+- `overfit_health` checks that each architecture can memorise a single batch.
 
-Both write per-epoch metrics to WandB and to a run directory `reports/runs/{name}-{N}-{timestamp}/`: the config
-used by the run, `results.parquet`, per-test-user scores in `per-user.parquet`, and the best and last checkpoints of
+Each experiment writes per-epoch metrics to WandB and to a run directory `reports/runs/{name}-{N}-{timestamp}/`
+(`reports/overfit/{name}-{timestamp}/` for overfit runs): the config
+used by the run, `results.parquet`, per-test-user scores in `per-user.parquet`, the per-node score vectors in
+`scores.parquet`, the per-node distances from home in `distances.parquet`, and the best and last checkpoints of
 each model under `checkpoints/`. The train/val/test split is drawn with
 `train.split_seed`; every model in every run is scored on the same test users;
 `train.train_seeds` reseeds each model run to measure spread.
@@ -77,17 +95,21 @@ uv run pytest test/ -m integration     # integration tests (skip when data is ab
 
 ```
 activitygraphs/
-  main.py, experiments.py  # Hydra entry points and experiment running
+  main.py                  # Hydra entry points
+  experiments/             # experiment runners, variants, architecture builders, training and baselines
   analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
+  schema.py                # column kinds and the tensor schemas
   surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap) and registry
   graph/                   # Graph construction
   tensors/                 # pytorch tensor building
-  conf/                    # Hydra configs (root + per-dataset)
-  ml/                      # PyG dataset, Lightning module, training, models, losses, metrics, baselines
+  datasets/                # PyG dataset, splits, feature transforms, Lightning data module
+  conf/                    # Hydra configs (root, per-dataset, per-model, per-experiment)
+  ml/                      # Feature encoder, Lightning module, models, losses, metrics, baselines
 test/                      # pytest suite
 reports/runs/              # one directory per run: config, result dataframes, checkpoints, logs
 ```
 
 Models are evaluated using metrics for consideration sets: realised visits are a subset of the latent target, so we use
-recall metrics that are set size-aware (R-precision, recall at a set size). Precision-style metrics are diagnostics
-only.
+recall metrics at a set-size budget. The headline is `avg_recall@50`, the mean recall@k over k = 1..50, read alongside
+the recall@k curve. R-precision and precision-style metrics are diagnostics only. Each user's own home zone is left out
+of the ranking.
