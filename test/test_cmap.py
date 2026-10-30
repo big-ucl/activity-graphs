@@ -12,7 +12,6 @@ from shapely.geometry import Polygon
 from activitygraphs.base import CRS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
 from activitygraphs.surveys.base import NA
 from activitygraphs.surveys.cmap import (
-    CMAP_DEMOGRAPHICS_SCHEMA,
     EXCLUDED_CENSUS_TRACTS,
     MODE_MAP,
     PURPOSE_MAP,
@@ -23,6 +22,7 @@ from activitygraphs.surveys.cmap import (
     build_cmap_survey,
     build_cmap_users,
 )
+from activitygraphs.surveys.demographics import DEMOGRAPHICS_SCHEMA
 from activitygraphs.tensors.build import (
     build_group_ids,
     build_home_indicator,
@@ -231,33 +231,47 @@ class TestBuildUsers:
         for column in numeric.columns:
             assert not set(numeric[column].to_list()) & set(SENTINELS), column
 
-    def test_missing_demographics_are_flagged_not_silently_folded_to_false(self, boundaries_ct, locations_gdf):
-        # The recodes turn 995 into False; the indicator is what lets the model tell an absent
-        # answer apart from a real "no".
-        persons = make_persons([
-            {"person_id": 1, "hh_id": 1, "employment": 995, "student": 995, "can_drive": 995},
-            {"person_id": 2, "hh_id": 2, "employment": 5, "student": 2, "can_drive": 2},
-        ])
-        households = make_households([{"hh_id": 1}, {"hh_id": 2}])
-
-        users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
-
-        assert users["has_missing_demographics"].to_list() == [True, False]
-        assert users["can_drive"].to_list() == [False, False]
-
     def test_codes_outside_the_codebook_become_missing(self, boundaries_ct, locations_gdf):
         persons = make_persons([
-            {"person_id": 1, "hh_id": 1, "age": 995, "employment": 995, "student": 995},
-            {"person_id": 2, "hh_id": 2, "age": 8, "employment": 5, "student": 0},
+            {"person_id": 1, "hh_id": 1, "age": 995, "employment": 995, "student": 995, "can_drive": 995},
+            {"person_id": 2, "hh_id": 2, "age": 8, "employment": 5, "student": 0, "can_drive": 0},
         ])
         households = make_households([{"hh_id": 1, "income_detailed": 999}, {"hh_id": 2, "income_detailed": 12}])
 
         users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
 
-        assert users["age_band"].to_list() == [None, 8]
-        assert users["employment_status"].to_list() == [None, 5]
-        assert users["student_status"].to_list() == [None, 0]
-        assert users["income_band"].to_list() == [None, 12]
+        assert users["age_band"].to_list() == [None, "45-54"]
+        assert users["employment_status"].to_list() == [None, "not_employed"]
+        assert users["student_status"].to_list() == [None, "full_time"]
+        assert users["can_drive"].to_list() == [None, False]
+        assert users["income_quartile"].to_list() == [None, "q3"]
+
+    def test_children_get_the_tts_statuses(self, boundaries_ct, locations_gdf):
+        unasked = {"employment": 995, "student": 995, "can_drive": 995}
+        no_pass_answer = {f"transit_pass_{option}": 995 for option in range(6)}
+        persons = make_persons([
+            {"person_id": 1, "hh_id": 1, "age": 1, **unasked, **no_pass_answer},
+            {"person_id": 2, "hh_id": 2, "age": 2, **unasked, **no_pass_answer},
+            {"person_id": 3, "hh_id": 3, "age": 3, **unasked, **no_pass_answer},
+        ])
+        households = make_households([{"hh_id": 1}, {"hh_id": 2}, {"hh_id": 3}])
+
+        users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
+
+        assert users["age_band"].to_list() == ["0-17"] * 3
+        assert users["employment_status"].to_list() == ["not_employed"] * 3
+        assert users["student_status"].to_list() == ["not_student", "full_time", "full_time"]
+        assert users["can_drive"].to_list() == [False] * 3
+        assert users["has_transit_pass"].to_list() == [False, False, None]
+
+    def test_income_quartiles_follow_the_household_shares(self, boundaries_ct, locations_gdf):
+        bands = [1, 9, 9, 12, 12]
+        persons = make_persons([{"person_id": hh, "hh_id": hh} for hh in range(1, 6)])
+        households = make_households([{"hh_id": hh, "income_detailed": band} for hh, band in enumerate(bands, 1)])
+
+        users = self._build(boundaries_ct, locations_gdf, persons, households).sort("user_id")
+
+        assert users["income_quartile"].to_list() == ["q1", "q2", "q2", "q4", "q4"]
 
     def test_any_selected_pass_is_a_transit_pass(self, boundaries_ct, locations_gdf):
         persons = make_persons([
@@ -380,7 +394,7 @@ class TestCMAPSurveyViews:
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder
         # would let a stale transform cache be applied to the wrong columns.
-        assert cmap_survey.demographics_schema == CMAP_DEMOGRAPHICS_SCHEMA
+        assert cmap_survey.demographics_schema == DEMOGRAPHICS_SCHEMA
 
     def test_group_ids_are_shared_by_co_residents_only(self, cmap_survey):
         group_ids = build_group_ids(cmap_survey)

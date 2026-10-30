@@ -13,7 +13,6 @@ from activitygraphs.datasets.transforms import (
     TransformPolicy,
 )
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
-from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA
 from activitygraphs.tensors.build import DISTANCE_SCHEMA, EDGE_SCHEMA, USER_NODE_SCHEMA
 
 CONTINUOUS = ColumnKind.CONTINUOUS
@@ -115,12 +114,11 @@ class TestTransformPolicy:
         assert TRANSFORM_POLICY.column_transforms(USER_NODE_SCHEMA) == (PASSTHROUGH,)
 
     def test_binary_demographics_pass_through(self):
-        numeric = CMAP_DEMOGRAPHICS_SCHEMA.numeric
-        transforms = TRANSFORM_POLICY.column_transforms(numeric)
+        schema = TensorSchema(
+            "user_attributes", (ColumnSpec("is_flag", BINARY), ColumnSpec("hh_num_adults", CONTINUOUS))
+        )
 
-        for column, transform in zip(numeric.columns, transforms, strict=True):
-            expected = PASSTHROUGH if column.kind == BINARY else ZSCORE
-            assert transform == expected, column.name
+        assert TRANSFORM_POLICY.column_transforms(schema) == (PASSTHROUGH, ZSCORE)
 
     def test_distances_are_log1p_then_zscored(self):
         assert TRANSFORM_POLICY.column_transforms(DISTANCE_SCHEMA) == (LOG1P_ZSCORE,)

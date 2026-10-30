@@ -25,8 +25,9 @@ from activitygraphs.base import (
     Purpose,
 )
 from activitygraphs.config import CMAPDataConfig
-from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
+from activitygraphs.schema import TensorSchema
 from activitygraphs.surveys.base import NA, DataFrameStore, SurveyData, SurveyLoader, build_special_locations
+from activitygraphs.surveys.demographics import DEMOGRAPHICS_SCHEMA, INCOME_QUARTILES, quantile_bands
 from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import (
     add_lon_lat_from_centroid,
@@ -96,60 +97,36 @@ INCOME_BANDS_KUSD = {
     12: (250, 350),
 }
 
-AGE_BANDS = {
-    1: (0, 5),
-    2: (5, 11),
-    3: (12, 15),
-    4: (16, 17),
-    5: (18, 24),
-    6: (25, 34),
-    7: (35, 44),
-    8: (45, 54),
-    9: (55, 64),
-    10: (65, 74),
-    11: (75, 84),
-    12: (85, 100),
-}
+AGE_BAND_MAP = invert_mapping({
+    "0-17": [1, 2, 3, 4],
+    "18-24": [5],
+    "25-34": [6],
+    "35-44": [7],
+    "45-54": [8],
+    "55-64": [9],
+    "65-74": [10],
+    "75+": [11, 12],
+})
 
-EMPLOYMENT_STATUSES = {
-    1: "employed full-time",
-    2: "employed part-time",
-    3: "self-employed",
-    5: "retired",
-    6: "unemployed and looking for work",
-    7: "volunteer or intern",
-    8: "employed, not currently working",
-    9: "homemaker",
-    10: "disabled non-worker",
-    11: "not employed and not looking for work",
-}
+AGE_CODES_UNDER_5 = [1]
+AGE_CODES_UNDER_12 = [1, 2]
+AGE_CODES_UNDER_16 = [1, 2, 3]
 
-STUDENT_STATUSES = {
-    0: "full-time, in person",
-    1: "part-time, in person",
-    2: "not a student",
-    3: "part-time, online only",
-    4: "full-time, online only",
-}
+EMPLOYMENT_MAP = invert_mapping({
+    "full_time": [1],
+    "part_time": [2],
+    "self_employed": [3],
+    "not_employed": [5, 6, 7, 8, 9, 10, 11],
+})
+
+STUDENT_MAP = invert_mapping({
+    "full_time": [0, 4],
+    "part_time": [1, 3],
+    "not_student": [2],
+})
 
 TRANSIT_PASS_COLUMNS = [f"transit_pass_{option}" for option in range(1, 6)]
 
-CMAP_DEMOGRAPHICS_SCHEMA = TensorSchema(
-    "user_attributes",
-    (
-        ColumnSpec("has_missing_demographics", ColumnKind.BINARY),
-        ColumnSpec("age_band", ColumnKind.CATEGORICAL, tuple(str(code) for code in AGE_BANDS)),
-        ColumnSpec("employment_status", ColumnKind.CATEGORICAL, tuple(str(code) for code in EMPLOYMENT_STATUSES)),
-        ColumnSpec("student_status", ColumnKind.CATEGORICAL, tuple(str(code) for code in STUDENT_STATUSES)),
-        ColumnSpec("can_drive", ColumnKind.BINARY),
-        ColumnSpec("has_transit_pass", ColumnKind.CATEGORICAL, ("false", "true")),
-        ColumnSpec("hh_num_adults", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_children", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_vehicles", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_bicycle", ColumnKind.CONTINUOUS),
-        ColumnSpec("income_band", ColumnKind.CATEGORICAL, tuple(str(code) for code in INCOME_BANDS_KUSD)),
-    ),
-)
 
 # =========================================
 # Survey
@@ -198,7 +175,7 @@ class CMAPSurvey(SurveyData, DataFrameStore):
     @property
     def demographics_schema(self) -> TensorSchema:
         """Schema of the demographic columns in ``users_df``, in tensor column order."""
-        return CMAP_DEMOGRAPHICS_SCHEMA
+        return DEMOGRAPHICS_SCHEMA
 
     def _copy(self, filters: list[str] | None = None) -> Self:
         return type(self)(self._locations_gdf, self._user_journeys_df, self.users_df, filters)
@@ -352,12 +329,6 @@ def _census_tract_to_loc_id(census_tract_col: str, locations_gdf: gpd.GeoDataFra
     return pl.when(tract.is_in(loc_ids)).then(tract).otherwise(pl.lit(NA))
 
 
-def _codebook_code(column: str, codebook: dict[int, object]) -> pl.Expr:
-    """Return the codes of ``column`` that are in ``codebook``, and null for any other code."""
-    codes = pl.col(column)
-    return pl.when(codes.is_in(list(codebook))).then(codes).cast(pl.UInt32)
-
-
 # =========================================
 # Survey: Journeys
 # =========================================
@@ -397,31 +368,56 @@ def build_cmap_journeys(inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame) -> 
 def build_cmap_users(
     inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
 ) -> pl.DataFrame:
-    """Build one row per user with home tract, household id and demographics, single-day diaries only."""
-    hh_df = inputs.raw_household_df.filter(pl.col("diary_platform").is_in(SINGLE_DAY_DIARY_PLATFORMS)).select(
+    """Build one row per user with home tract, household id and demographics, single-day diaries only.
+
+    The demographics follow the categories of ``DEMOGRAPHICS_SCHEMA``. Children with missing statuses follow the TTS
+    assumptions:
+     - Under-16s are not employed and cannot drive.
+     - Under-5s are not students,
+     - and persons aged 5 to 15 are full-time students.
+     - Under-12s with no transit pass answer have no pass.
+    The income quartiles are taken over the single-day households.
+    """
+    raw_hh_df = inputs.raw_household_df.filter(pl.col("diary_platform").is_in(SINGLE_DAY_DIARY_PLATFORMS))
+    income_quartiles = quantile_bands(raw_hh_df["income_detailed"], list(INCOME_BANDS_KUSD), INCOME_QUARTILES)
+    hh_df = raw_hh_df.select(
         hh_id=pl.col("hh_id").cast(pl.String),
         home_loc_id=_census_tract_to_loc_id("home_tract_2020", locations_gdf),
         hh_num_adults=pl.col("num_adults").cast(pl.UInt32),
         hh_num_children=pl.col("num_kids").cast(pl.UInt32),
         hh_num_vehicles=pl.col("num_vehicles").cast(pl.UInt32),
-        hh_num_bicycle=pl.col("num_bicycle").replace(995, None),
-        income_band=_codebook_code("income_detailed", INCOME_BANDS_KUSD),
+        income_quartile=pl.col("income_detailed").replace_strict(
+            income_quartiles, default=None, return_dtype=pl.String
+        ),
     )
 
+    age = pl.col("age")
     persons_df = inputs.raw_persons_df.select(
         user_id=pl.col("person_id").cast(pl.String),
         hh_id=pl.col("hh_id").cast(pl.String),
-        has_missing_demographics=(
-            (pl.col("employment") == 995) | (pl.col("student") == 995) | (pl.col("can_drive") == 995)
-        ).cast(pl.Boolean),
-        age_band=_codebook_code("age", AGE_BANDS),
-        employment_status=_codebook_code("employment", EMPLOYMENT_STATUSES),
-        student_status=_codebook_code("student", STUDENT_STATUSES),
-        can_drive=(pl.col("can_drive") == 1).cast(pl.Boolean),
+        age_band=age.replace_strict(AGE_BAND_MAP, default=None, return_dtype=pl.String),
+        employment_status=pl
+        .when(age.is_in(AGE_CODES_UNDER_16))
+        .then(pl.lit("not_employed"))
+        .otherwise(pl.col("employment").replace_strict(EMPLOYMENT_MAP, default=None, return_dtype=pl.String)),
+        student_status=pl
+        .when(age.is_in(AGE_CODES_UNDER_5))
+        .then(pl.lit("not_student"))
+        .when(age.is_in(AGE_CODES_UNDER_16))
+        .then(pl.lit("full_time"))
+        .otherwise(pl.col("student").replace_strict(STUDENT_MAP, default=None, return_dtype=pl.String)),
+        can_drive=pl
+        .when(age.is_in(AGE_CODES_UNDER_16))
+        .then(pl.lit(False))
+        .when(pl.col("can_drive").is_in([0, 1]))
+        .then(pl.col("can_drive") == 1)
+        .otherwise(pl.lit(None, dtype=pl.Boolean)),
         has_transit_pass=pl
         .when(pl.any_horizontal(pl.col(TRANSIT_PASS_COLUMNS) == 1))
         .then(pl.lit(True))
         .when(pl.col("transit_pass_0") == 1)
+        .then(pl.lit(False))
+        .when(age.is_in(AGE_CODES_UNDER_12))
         .then(pl.lit(False))
         .otherwise(pl.lit(None, dtype=pl.Boolean)),
     )
@@ -432,9 +428,6 @@ def build_cmap_users(
 
     users_df = persons_df.join(hh_df, on="hh_id", how="inner")
     users_df = users_df.join(journey_user_ids, on="user_id", how="inner")  # Drop users with no journeys in study area
-
-    users_df = users_df.with_columns(
-        pl.col("hh_num_bicycle").fill_null(pl.col("hh_num_bicycle").median()).cast(pl.UInt32),
-    ).sort("user_id")
+    users_df = users_df.sort("user_id")
 
     return check_schema(users_df, USER_SCHEMA)

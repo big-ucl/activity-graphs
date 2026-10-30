@@ -6,5 +6,6 @@ It is split into the following modules:
   - ``base``: the ``SurveyData`` interface, the ``SurveyLoader`` bundle and the ``DataFrameStore`` cache.
   - ``tpg``, ``thats``, ``cmap``: one module per survey, each with: ``read_tables`` (raw files -> ``*Tables``);
   ``build_*_survey`` (``*Tables`` -> ``*Survey``); the census statistics for the graph nodes; and a ``LOADER``.
+  - ``demographics``: the demographic categories shared by the surveys.
   - ``gtfs``, ``overture``, ``statistics``, ``routing``: other readers and helpers.
 """

@@ -29,7 +29,14 @@ from activitygraphs.datasets.transforms import fit_transforms
 from activitygraphs.experiments.variants import Variant, build_feature_encoder
 from activitygraphs.ml.schema_encoder import default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
-from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA, CMAPSurvey
+from activitygraphs.surveys.cmap import CMAPSurvey
+from activitygraphs.surveys.demographics import (
+    AGE_BANDS,
+    DEMOGRAPHICS_SCHEMA,
+    EMPLOYMENT_STATUSES,
+    INCOME_QUARTILES,
+    STUDENT_STATUSES,
+)
 from activitygraphs.tensors import SurveyTensors, build_tensors
 from activitygraphs.utils import add_lon_lat_from_centroid, get_project_root
 
@@ -92,26 +99,23 @@ def build_users(loc_ids: list[str]) -> pl.DataFrame:
     hh_adults = rng.integers(1, 4, NUM_HOUSEHOLDS)
     hh_children = rng.integers(0, 3, NUM_HOUSEHOLDS)
     hh_vehicles = rng.integers(0, 3, NUM_HOUSEHOLDS)
-    hh_bicycle = rng.integers(0, 4, NUM_HOUSEHOLDS)
-    hh_income = rng.choice([1, 5, 7, 8, 9, 10], NUM_HOUSEHOLDS)
-    has_missing = rng.random(NUM_USERS) < 0.2
-    employment = rng.choice([1, 2, 5, 6, 11], NUM_USERS)
+    hh_income = rng.choice(INCOME_QUARTILES, NUM_HOUSEHOLDS)
+    is_missing = rng.random(NUM_USERS) < 0.2
+    employment = rng.choice(EMPLOYMENT_STATUSES, NUM_USERS)
 
     users = pl.DataFrame({
         "user_id": [f"u{k:02d}" for k in range(NUM_USERS)],
         "hh_id": [f"h{h:02d}" for h in hh],
         "home_loc_id": hh_home[hh],
-        "has_missing_demographics": has_missing,
         "hh_num_adults": hh_adults[hh],
         "hh_num_children": hh_children[hh],
         "hh_num_vehicles": hh_vehicles[hh],
-        "hh_num_bicycle": hh_bicycle[hh],
-        "income_band": hh_income[hh],
-        "age_band": rng.integers(5, 13, NUM_USERS),
+        "income_quartile": hh_income[hh],
+        "age_band": rng.choice(AGE_BANDS, NUM_USERS),
         "employment_status": [
-            None if missing else int(code) for missing, code in zip(has_missing, employment, strict=True)
+            None if missing else str(status) for missing, status in zip(is_missing, employment, strict=True)
         ],
-        "student_status": rng.choice([0, 2], NUM_USERS),
+        "student_status": rng.choice(STUDENT_STATUSES, NUM_USERS),
         "can_drive": rng.random(NUM_USERS) < 0.7,
         "has_transit_pass": rng.random(NUM_USERS) < 0.3,
     })
@@ -264,7 +268,7 @@ def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path
 
 @pytest.mark.parametrize(
     ("survey_name", "user_attributes"),
-    [("cmap", CMAP_DEMOGRAPHICS_SCHEMA), ("no_demographics", TensorSchema("user_attributes", ()))],
+    [("cmap", DEMOGRAPHICS_SCHEMA), ("no_demographics", TensorSchema("user_attributes", ()))],
 )
 def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attributes, tmp_path):
     dataset = build_dataset(survey_name, tmp_path)
@@ -298,7 +302,7 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     categorical = dataset.schema.user_attributes.categorical
     employment_idx = categorical.index_of("employment_status")
     categories = categorical.columns[employment_idx].categories
-    expected_codes = torch.tensor([0 if code is None else categories.index(str(code)) + 1 for code in employment])
+    expected_codes = torch.tensor([0 if status is None else categories.index(status) + 1 for status in employment])
 
     fit_transforms(dataset, TRAIN_IDX, fingerprint={}).apply(dataset)
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
@@ -310,11 +314,18 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
         embedded_width += default_emb_dim(spec.cardinality)
 
     assert None in employment
-    assert categorical.names == ["age_band", "employment_status", "student_status", "has_transit_pass", "income_band"]
-    assert dataset.user_attributes.shape[-1] == CMAP_DEMOGRAPHICS_SCHEMA.numeric.width
+    assert categorical.names == [
+        "age_band",
+        "employment_status",
+        "student_status",
+        "can_drive",
+        "has_transit_pass",
+        "income_quartile",
+    ]
+    assert dataset.user_attributes.shape[-1] == DEMOGRAPHICS_SCHEMA.numeric.width
     torch.testing.assert_close(dataset.user_attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
     torch.testing.assert_close(batch.user_attr_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
-    assert encoder.out_dim == plain.out_dim + CMAP_DEMOGRAPHICS_SCHEMA.numeric.width + embedded_width
+    assert encoder.out_dim == plain.out_dim + DEMOGRAPHICS_SCHEMA.numeric.width + embedded_width
     assert encoder(batch).shape == (batch.num_nodes, encoder.out_dim)
 
 
