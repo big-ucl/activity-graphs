@@ -32,7 +32,6 @@ USER_NODE_SCHEMA = TensorSchema("user_nodes", (ColumnSpec("is_home", ColumnKind.
 EDGE_SCHEMA = TensorSchema("edges", (ColumnSpec("weight", ColumnKind.COUNT),))
 DISTANCE_SCHEMA = TensorSchema("distances", (ColumnSpec("home_distance", ColumnKind.COUNT),))
 TARGET_SCHEMA = TensorSchema("targets", (ColumnSpec("is_visited", ColumnKind.BINARY),))
-NO_DEMOGRAPHICS_SCHEMA = TensorSchema("user_attributes", (ColumnSpec("constant", ColumnKind.BINARY),))
 
 
 @dataclass(frozen=True)
@@ -153,15 +152,13 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 def build_user_attributes(survey: SurveyData) -> torch.Tensor:
     """Create the user attribute float32 tensor of shape ``[n_users, n_attr]`` from SurveyData.
 
-    Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), returns a (n_users, 1) dummy
-    tensor of ones, described by ``NO_DEMOGRAPHICS_SCHEMA``.
+    Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), the tensor has zero columns.
     """
     col_names = survey.demographics_schema.names
     if not col_names:
-        return torch.ones((len(survey.user_ids), 1), dtype=torch.float32)
+        return torch.empty((len(survey.user_ids), 0), dtype=torch.float32)
 
     user_attributes = survey.users_df.select(col_names)
-
     return torch.tensor(user_attributes.to_numpy(), dtype=torch.float32)
 
 
@@ -213,14 +210,12 @@ def build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_c
         The dataset schema.
     """
     locations_schema = infer_schema("locations", nodes_gdf, node_feature_cols, {})
-    demographics_schema = survey.demographics_schema
-    user_attributes_schema = demographics_schema if demographics_schema.columns else NO_DEMOGRAPHICS_SCHEMA
 
     return DatasetSchema(
         locations=locations_schema,
         edges=EDGE_SCHEMA,
         user_nodes=USER_NODE_SCHEMA,
-        user_attributes=user_attributes_schema,
+        user_attributes=survey.demographics_schema,
         distances=DISTANCE_SCHEMA,
         targets=TARGET_SCHEMA,
     )

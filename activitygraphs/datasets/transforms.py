@@ -116,7 +116,7 @@ def _scaled_column_indices(transforms: tuple[Transform, ...]) -> list[int]:
 
 def _log1p(values: torch.Tensor, transforms: tuple[Transform, ...]) -> torch.Tensor:
     """Return a float32 copy of ``values`` flattened to ``[-1, num_columns]``, with log1p applied to its log columns."""
-    flat = values.float().reshape(-1, len(transforms)).clone()
+    flat = values.float().flatten(end_dim=-2).clone()
     log_columns = [idx for idx, transform in enumerate(transforms) if transform == Transform.LOG1P_ZSCORE]
     flat[:, log_columns] = torch.log1p(flat[:, log_columns])
 

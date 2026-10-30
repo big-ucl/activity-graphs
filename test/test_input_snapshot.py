@@ -30,7 +30,6 @@ from activitygraphs.experiments.variants import Variant, build_feature_encoder
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA, CMAPSurvey
 from activitygraphs.tensors import SurveyTensors, build_tensors
-from activitygraphs.tensors.build import NO_DEMOGRAPHICS_SCHEMA
 from activitygraphs.utils import add_lon_lat_from_centroid, get_project_root
 
 SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "model_inputs.pt"
@@ -251,7 +250,7 @@ def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path
 
 @pytest.mark.parametrize(
     ("survey_name", "user_attributes"),
-    [("cmap", CMAP_DEMOGRAPHICS_SCHEMA), ("no_demographics", NO_DEMOGRAPHICS_SCHEMA)],
+    [("cmap", CMAP_DEMOGRAPHICS_SCHEMA), ("no_demographics", TensorSchema("user_attributes", ()))],
 )
 def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attributes, tmp_path):
     dataset = build_dataset(survey_name, tmp_path)
@@ -266,6 +265,15 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     assert schema.user_attributes.width == dataset.user_attributes.shape[-1]
     assert schema.distances.width == dataset.distances.shape[-1]
     assert schema.targets.width == dataset.visit_labels.shape[-1]
+
+
+def test_without_demographics_use_demographics_leaves_the_inputs_unchanged(tmp_path):
+    inputs = build_model_inputs("no_demographics", tmp_path)
+
+    for key, tensor in inputs.items():
+        if "use_demographics" in key:
+            without = key.replace("use_demographics", "").replace("++", "+").strip("+") or "none"
+            torch.testing.assert_close(tensor, inputs[without], rtol=0, atol=0, msg=lambda m, key=key: f"{key}: {m}")
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises(tmp_path):
