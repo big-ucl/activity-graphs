@@ -33,6 +33,7 @@ class ProcessedFile(StrEnum):
     USER_NODE_FEATURES = "user_node_features.pt"
     VISIT_LABELS = "visit_labels.pt"
     USER_ATTRIBUTES = "user_attributes.pt"
+    USER_ATTRIBUTES_CAT = "user_attributes_cat.pt"
     DISTANCES = "distances.pt"
     GROUP_IDS = "group_ids.pt"
     USER_IDS = "user_ids.parquet"
@@ -54,7 +55,8 @@ class VisitDataset(pyg.data.Dataset):
       - ``x_loc = location_features``,
       - ``x_user_node = user_node_features[i]``,
       - ``y = visit_labels[i]``,
-      - ``user_attr = user_attributes[i]``,
+      - ``user_attr = user_attributes[i]``, the numeric user attributes,
+      - ``user_attr_cat = user_attributes_cat[i]``, the codes of the categorical user attributes,
       - ``distances = distances[i]``, the model feature, scaled once the transforms are applied, and
       - ``distances_m = distances_m[i]``, the same distances in metres, never scaled.
     """
@@ -95,6 +97,9 @@ class VisitDataset(pyg.data.Dataset):
         self.user_attributes: torch.Tensor = torch.load(
             processed_dir / ProcessedFile.USER_ATTRIBUTES, weights_only=True
         )
+        self.user_attributes_cat: torch.Tensor = torch.load(
+            processed_dir / ProcessedFile.USER_ATTRIBUTES_CAT, weights_only=True
+        )
         self.distances_m: torch.Tensor = torch.load(processed_dir / ProcessedFile.DISTANCES, weights_only=True)
         self.distances: torch.Tensor = self.distances_m
         self.group_ids: torch.Tensor = torch.load(processed_dir / ProcessedFile.GROUP_IDS, weights_only=True)
@@ -102,23 +107,8 @@ class VisitDataset(pyg.data.Dataset):
         self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.NODE_IDS)
         self.schema: DatasetSchema = DatasetSchema.read(processed_dir / ProcessedFile.SCHEMA)
 
-        # Check that each user has one and only one home node
-        is_home_idx = self.schema.user_nodes.index_of("is_home")
-        home_counts = self.user_node_features[:, :, is_home_idx].sum(dim=1)
-        if not torch.all(home_counts == 1):
-            num_bad = int((home_counts != 1).sum())
-            raise ValueError(f"{num_bad} users do not have exactly one home node. Expected one per user.")
-
-        if self.pyg_graph.x is None or self.pyg_graph.edge_index is None or self.pyg_graph.edge_attr is None:
-            raise ValueError("Graph must have node features, an edge index and edge features.")
-
-        # Check that the graph actually has nodes
-        num_nodes = self.pyg_graph.num_nodes
-        if num_nodes is None:
-            raise ValueError("Graph has `None` number of nodes")
-
         self.num_users: int = self.user_attributes.size(0)
-        self.num_nodes: int = num_nodes
+        self.num_nodes: int = self.node_ids.height
         self._is_scaled: bool = False
 
     @property
@@ -173,61 +163,22 @@ class VisitDataset(pyg.data.Dataset):
 
         tensors = self._build()
         graph = tensors.pyg_graph
-        unf = tensors.user_node_features
-        vl = tensors.visit_labels
-        attr = tensors.user_attributes
-        dist = tensors.distances
-        group_ids = tensors.group_ids
-
-        num_unf_users, num_unf_nodes, _ = unf.shape
-        num_vl_users, num_vl_nodes, _ = vl.shape
-        num_attr_users, _ = attr.shape
-        num_di_users, num_di_nodes, _ = dist.shape
-        num_grp_users = group_ids.shape[0]
-
-        if not (graph.num_nodes == num_unf_nodes == num_vl_nodes == num_di_nodes):
-            raise ValueError(
-                f"Node count mismatch: graph has {graph.num_nodes}, user_node_features has {num_unf_nodes}, "
-                f"visit_labels has {num_vl_nodes}, distances has {num_di_nodes}."
-            )
-        if not (num_unf_users == num_vl_users == num_attr_users == num_di_users == num_grp_users):
-            raise ValueError(
-                f"User count mismatch: user_node_features has {num_unf_users}, visit_labels has {num_vl_users}, "
-                f"user_attributes has {num_attr_users}, distances has {num_di_users}."
-            )
-
-        tensor_widths = {
-            "locations": graph.num_node_features,
-            "edges": graph.num_edge_features,
-            "user_nodes": unf.shape[-1],
-            "user_attributes": attr.shape[-1],
-            "distances": dist.shape[-1],
-            "targets": vl.shape[-1],
-        }
-
-        for group_schema in tensors.schema.groups:
-            width = tensor_widths[group_schema.group]
-            if width != group_schema.width:
-                raise ValueError(
-                    f"The `{group_schema.group}` tensor has {width} columns but its schema has {group_schema.width}."
-                )
-
-        if tensors.user_ids.height != num_unf_users or tensors.node_ids.height != num_unf_nodes:
-            raise ValueError(
-                f"Id count mismatch: {tensors.user_ids.height} user ids for {num_unf_users} users, "
-                f"{tensors.node_ids.height} node ids for {num_unf_nodes} nodes."
-            )
-
         if self.pre_transform is not None:
             graph = self.pre_transform(graph)
 
         processed_dir = Path(self.processed_dir)
-        torch.save(graph, processed_dir / ProcessedFile.PYG_GRAPH)
-        torch.save(unf, processed_dir / ProcessedFile.USER_NODE_FEATURES)
-        torch.save(vl, processed_dir / ProcessedFile.VISIT_LABELS)
-        torch.save(attr, processed_dir / ProcessedFile.USER_ATTRIBUTES)
-        torch.save(dist, processed_dir / ProcessedFile.DISTANCES)
-        torch.save(group_ids, processed_dir / ProcessedFile.GROUP_IDS)
+        tensor_files = {
+            ProcessedFile.PYG_GRAPH: graph,
+            ProcessedFile.USER_NODE_FEATURES: tensors.user_node_features,
+            ProcessedFile.VISIT_LABELS: tensors.visit_labels,
+            ProcessedFile.USER_ATTRIBUTES: tensors.user_attributes,
+            ProcessedFile.USER_ATTRIBUTES_CAT: tensors.user_attributes_cat,
+            ProcessedFile.DISTANCES: tensors.distances,
+            ProcessedFile.GROUP_IDS: tensors.group_ids,
+        }
+        for file, tensor in tensor_files.items():
+            torch.save(tensor, processed_dir / file)
+
         tensors.user_ids.write_parquet(processed_dir / ProcessedFile.USER_IDS)
         tensors.node_ids.write_parquet(processed_dir / ProcessedFile.NODE_IDS)
         tensors.schema.save(processed_dir / ProcessedFile.SCHEMA)
@@ -266,6 +217,7 @@ class VisitDataset(pyg.data.Dataset):
 
         # Unsqueeze so batching works
         data.user_attr = user_attr.unsqueeze(0)
+        data.user_attr_cat = self.user_attributes_cat[idx].unsqueeze(0)
         data.user_id = torch.tensor([idx], dtype=torch.long)
 
         # Per-user distance-from-home
@@ -349,8 +301,13 @@ def read_fingerprint(cfg: Config, project_root: Path) -> Fingerprint:
     """Return the ``dataset_fingerprint`` of the cached tensors of ``cfg``, without loading them.
 
     Raises:
-        FileNotFoundError: The tensors are not cached.
+        FileNotFoundError: Any of the tensor files is not cached.
     """
-    path = project_root / cfg.data.paths.tensors / "processed" / ProcessedFile.FINGERPRINT
+    processed_dir = project_root / cfg.data.paths.tensors / "processed"
+    missing = [name for name in VisitDataset.PROCESSED_FILE_NAMES if not (processed_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(f"The tensor cache at `{processed_dir}` is missing {missing}.")
+
+    path = processed_dir / ProcessedFile.FINGERPRINT
 
     return dataset_fingerprint(cfg, json.loads(path.read_text()))

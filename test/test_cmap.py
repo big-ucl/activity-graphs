@@ -349,8 +349,8 @@ class TestCMAPSurveyViews:
         # hh_id lives on users_df for the grouped split; it is an identifier, not a feature.
         assert "hh_id" not in cmap_survey.demographics_schema.names
 
-        user_attributes = build_user_attributes(cmap_survey)
-        assert user_attributes.shape == (len(cmap_survey.user_ids), cmap_survey.demographics_schema.width)
+        user_attributes, _ = build_user_attributes(cmap_survey)
+        assert user_attributes.shape == (len(cmap_survey.user_ids), cmap_survey.demographics_schema.numeric.width)
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
         # The tensor is built positionally and only its width is fingerprinted, so a silent reorder

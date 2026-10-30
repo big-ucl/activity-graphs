@@ -384,6 +384,7 @@ class TestPerUserColumnsInModule:
             x_loc=torch.rand(5, 1), x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y
         )
         graph.user_attr = torch.zeros(1, 2)
+        graph.user_attr_cat = torch.zeros(1, 0, dtype=torch.long)
         graph.user_id = torch.tensor([0])
         return graph
 

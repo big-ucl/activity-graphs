@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -19,6 +20,7 @@ from activitygraphs.datasets.dataset import (
 from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
 from activitygraphs.tensors import SurveyTensors
+from activitygraphs.tensors.build import USER_NODE_SCHEMA
 
 
 @dataclass
@@ -39,11 +41,11 @@ def make_group(group: str, width: int, kind: ColumnKind = ColumnKind.CONTINUOUS)
     return TensorSchema(group, tuple(ColumnSpec(f"{group}_{i}", kind) for i in range(width)))
 
 
-def make_schema(n_user_node: int, n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
+def make_schema(n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
     return DatasetSchema(
         locations=make_group("locations", 0),
         edges=make_group("edges", 0),
-        user_nodes=make_group("user_nodes", n_user_node),
+        user_nodes=USER_NODE_SCHEMA,
         user_attributes=make_group("user_attributes", n_demo, demo_kind),
         distances=make_group("distances", 1),
         targets=make_group("targets", 1),
@@ -63,6 +65,8 @@ def make_dataset(
     ``users_per_group=1`` reproduces the ungrouped case (TPG, where ``hh_id`` is ``user_id``).
     """
     group_ids = torch.arange(n_users) // users_per_group
+    user_node_features = torch.zeros((n_users, n_nodes, USER_NODE_SCHEMA.width))
+    user_node_features[:, 0, USER_NODE_SCHEMA.index_of("is_home")] = 1.0
     user_ids = pl.DataFrame({
         "user_id": [f"{user_id_prefix}{i}" for i in range(n_users)],
         "hh_id": [f"h{g}" for g in group_ids.tolist()],
@@ -70,15 +74,16 @@ def make_dataset(
 
     return FakeDataset(
         SurveyTensors(
-            pyg_graph=pyg.data.Data(num_nodes=n_nodes),
-            user_node_features=torch.zeros((n_users, n_nodes, 4)),
+            pyg_graph=pyg.data.Data(edge_index=torch.zeros((2, 0), dtype=torch.long), num_nodes=n_nodes),
+            user_node_features=user_node_features,
             visit_labels=torch.zeros((n_users, n_nodes, 1)),
             user_attributes=torch.zeros((n_users, n_demo)),
+            user_attributes_cat=torch.zeros((n_users, 0), dtype=torch.long),
             distances=torch.zeros((n_users, n_nodes, 1)),
             group_ids=group_ids,
             user_ids=user_ids,
             node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),
-            schema=make_schema(4, n_demo, demo_kind),
+            schema=make_schema(n_demo, demo_kind),
         )
     )
 
@@ -140,16 +145,28 @@ class TestDatasetFingerprint:
             cfg, make_dataset(demo_kind=ColumnKind.BINARY)
         )
 
+    def write_cache(self, processed: Path, dataset: FakeDataset) -> None:
+        processed.mkdir(parents=True)
+        for file in ProcessedFile:
+            (processed / file).touch()
+        (processed / ProcessedFile.FINGERPRINT).write_text(json.dumps(tensors_fingerprint(dataset.tensors)))
+
     def test_is_read_back_from_the_file_beside_the_tensors(self, tmp_path, cfg):
         dataset = make_dataset()
-        processed = tmp_path / cfg.data.paths.tensors / "processed"
-        processed.mkdir(parents=True)
-        (processed / ProcessedFile.FINGERPRINT).write_text(json.dumps(tensors_fingerprint(dataset.tensors)))
+        self.write_cache(tmp_path / cfg.data.paths.tensors / "processed", dataset)
 
         assert read_fingerprint(cfg, tmp_path) == fingerprint_of(cfg, dataset)
 
     def test_reading_an_uncached_fingerprint_raises(self, tmp_path, cfg):
         with pytest.raises(FileNotFoundError):
+            read_fingerprint(cfg, tmp_path)
+
+    def test_a_cache_missing_a_tensor_file_reads_as_uncached(self, tmp_path, cfg):
+        processed = tmp_path / cfg.data.paths.tensors / "processed"
+        self.write_cache(processed, make_dataset())
+        (processed / ProcessedFile.USER_ATTRIBUTES_CAT).unlink()
+
+        with pytest.raises(FileNotFoundError, match="user_attributes_cat.pt"):
             read_fingerprint(cfg, tmp_path)
 
     def test_resolves_interpolations(self, cfg):

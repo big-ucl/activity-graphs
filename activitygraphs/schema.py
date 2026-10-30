@@ -105,6 +105,18 @@ class TensorSchema:
         """Schema width, i.e. number of columns."""
         return len(self.columns)
 
+    @property
+    def numeric(self) -> "TensorSchema":
+        """Schema of the numeric columns, i.e. every column that is not categorical, in column order."""
+        columns = tuple(column for column in self.columns if column.kind != ColumnKind.CATEGORICAL)
+        return TensorSchema(self.group, columns)
+
+    @property
+    def categorical(self) -> "TensorSchema":
+        """Schema of the categorical columns, in column order."""
+        columns = tuple(column for column in self.columns if column.kind == ColumnKind.CATEGORICAL)
+        return TensorSchema(self.group, columns)
+
     def index_of(self, name: str) -> int:
         """Return the column index of ``name``.
 

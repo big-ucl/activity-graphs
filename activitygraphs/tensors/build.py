@@ -42,23 +42,98 @@ class SurveyTensors:
         pyg_graph: The shared PyG graph, with node features ``x``, ``edge_index`` and ``edge_attr``.
         user_node_features: Per-user node features, ``[n_users, n_nodes, n_feat]``.
         visit_labels: Per-user visit labels, ``[n_users, n_nodes, 1]``.
-        user_attributes: Per-user attributes, ``[n_users, n_attr]``.
+        user_attributes: Per-user numeric attributes, ``[n_users, n_numeric_attr]``.
+        user_attributes_cat: Per-user categorical attribute codes, int64, ``[n_users, n_categorical_attr]``.
         distances: Per-user distance from home, ``[n_users, n_nodes, 1]``.
         group_ids: Per-user group/hh-ids, ``[n_users]``.
         user_ids: Survey ``user_id`` and ``hh_id`` of each user, one row per tensor row.
         node_ids: Survey ``loc_id`` of each node, one row per graph node.
         schema: Column schema of each tensor group.
+
+    Raises:
+        ValueError: The graph has no edge index, the tensors and ids disagree on the number of users or nodes, a
+            group's tensors have a different number of numeric or categorical columns than its schema, or a user
+            does not have exactly one home node.
     """
 
     pyg_graph: pyg.data.Data
     user_node_features: torch.Tensor
     visit_labels: torch.Tensor
     user_attributes: torch.Tensor
+    user_attributes_cat: torch.Tensor
     distances: torch.Tensor
     group_ids: torch.Tensor
     user_ids: pl.DataFrame
     node_ids: pl.DataFrame
     schema: DatasetSchema
+
+    def __post_init__(self) -> None:
+        """Check that the tensors agree on the number of users and nodes, that their widths match the schema, and that
+        every user has exactly one home node."""
+        if self.pyg_graph.edge_index is None:
+            raise ValueError("The graph has no edge index.")
+
+        _require_equal_counts(
+            "User",
+            {
+                "user_node_features": self.user_node_features.shape[0],
+                "visit_labels": self.visit_labels.shape[0],
+                "user_attributes": self.user_attributes.shape[0],
+                "user_attributes_cat": self.user_attributes_cat.shape[0],
+                "distances": self.distances.shape[0],
+                "group_ids": self.group_ids.shape[0],
+                "user_ids": self.user_ids.height,
+            },
+        )
+        _require_equal_counts(
+            "Node",
+            {
+                "pyg_graph": self.pyg_graph.num_nodes,
+                "user_node_features": self.user_node_features.shape[1],
+                "visit_labels": self.visit_labels.shape[1],
+                "distances": self.distances.shape[1],
+                "node_ids": self.node_ids.height,
+            },
+        )
+
+        numeric_and_categorical_widths = {
+            "locations": (self.pyg_graph.num_node_features, 0),
+            "edges": (self.pyg_graph.num_edge_features, 0),
+            "user_nodes": (self.user_node_features.shape[-1], 0),
+            "user_attributes": (self.user_attributes.shape[-1], self.user_attributes_cat.shape[-1]),
+            "distances": (self.distances.shape[-1], 0),
+            "targets": (self.visit_labels.shape[-1], 0),
+        }
+
+        for schema in self.schema.groups:
+            widths = numeric_and_categorical_widths[schema.group]
+            schema_widths = (schema.numeric.width, schema.categorical.width)
+            if widths != schema_widths:
+                raise ValueError(
+                    f"The `{schema.group}` tensors have (numeric, categorical) widths {widths} but its schema has "
+                    f"{schema_widths}."
+                )
+
+        is_home_idx = self.schema.user_nodes.index_of("is_home")
+        home_counts = self.user_node_features[:, :, is_home_idx].sum(dim=1)
+        num_bad = int((home_counts != 1).sum())
+        if num_bad:
+            raise ValueError(f"{num_bad} users do not have exactly one home node.")
+
+
+def _require_equal_counts(count_name: str, counts: dict[str, int | None]) -> None:
+    """Raise unless every count in ``counts`` is the same.
+
+    Args:
+        count_name: The display name of the count that is being checked (e.g. "User").
+        counts: The count read from each tensor or id frame, keyed by the tensor/frame name.
+
+    Raises:
+        ValueError: The counts differ.
+    """
+    if len(set(counts.values())) > 1:
+        listed = ", ".join(f"{name} {count}" for name, count in counts.items())
+        raise ValueError(f"{count_name} count mismatch: {listed}.")
 
 
 # =========================================
@@ -149,17 +224,47 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 # =========================================
 
 
-def build_user_attributes(survey: SurveyData) -> torch.Tensor:
-    """Create the user attribute float32 tensor of shape ``[n_users, n_attr]`` from SurveyData.
+def build_user_attributes(survey: SurveyData) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create the user attribute tensors from SurveyData, split into numeric columns and categorical codes.
 
-    Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), the tensor has zero columns.
+    Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), both tensors have zero columns.
+
+    Returns:
+        Tuple ``(numeric, codes)``: the float32 numeric columns ``[n_users, n_numeric_attr]`` and the int64 codes of
+        the categorical columns ``[n_users, n_categorical_attr]``, each in schema column order.
     """
-    col_names = survey.demographics_schema.names
-    if not col_names:
-        return torch.empty((len(survey.user_ids), 0), dtype=torch.float32)
+    demo_schema = survey.demographics_schema
+    n_users = len(survey.user_ids)
 
-    user_attributes = survey.users_df.select(col_names)
-    return torch.tensor(user_attributes.to_numpy(), dtype=torch.float32)
+    numeric_names = demo_schema.numeric.names
+    if numeric_names:
+        numeric_values = survey.users_df.select(numeric_names).to_numpy()
+        numeric_tensor = torch.tensor(numeric_values, dtype=torch.float32)
+    else:
+        numeric_tensor = torch.empty((n_users, 0), dtype=torch.float32)
+
+    categorical_tensor = torch.empty((n_users, 0), dtype=torch.long)
+    for spec in demo_schema.categorical.columns:
+        column_codes = encode_categories(survey.users_df[spec.name], spec)
+        categorical_tensor = torch.cat([categorical_tensor, column_codes.unsqueeze(1)], dim=1)
+
+    return numeric_tensor, categorical_tensor
+
+
+def encode_categories(values: pl.Series, spec: ColumnSpec) -> torch.Tensor:
+    """Encode the values of a categorical column as codes, following the categories of ``spec``.
+
+    The values are compared to the categories as strings. ``spec.categories[i]`` gets code ``i + 1``. A missing value
+    or a value outside the categories gets code 0.
+
+    Returns:
+        Int64 tensor of shape ``[len(values)]``.
+    """
+    codes = {category: code for code, category in enumerate(spec.categories, start=1)}
+    as_strings = values.cast(pl.String)
+    encoded = as_strings.replace_strict(codes, default=0, return_dtype=pl.Int64).fill_null(0)
+
+    return torch.tensor(encoded.to_numpy(), dtype=torch.long)
 
 
 def build_group_ids(survey: SurveyData) -> torch.Tensor:
@@ -230,7 +335,7 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
     """
     user_node_features = build_home_indicator(survey)
     visit_labels = build_visit_labels(survey, list(Purpose))
-    user_attributes = build_user_attributes(survey)
+    user_attributes, user_attributes_cat = build_user_attributes(survey)
     distances = build_home_distances(survey, nodes_gdf)
     hh_ids = build_group_ids(survey)
 
@@ -250,6 +355,7 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         user_node_features=user_node_features,
         visit_labels=visit_labels,
         user_attributes=user_attributes,
+        user_attributes_cat=user_attributes_cat,
         distances=distances,
         group_ids=hh_ids,
         user_ids=build_user_ids(survey),

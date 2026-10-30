@@ -8,6 +8,7 @@ from torch import Tensor
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.dataset import is_home_node_mask
+from activitygraphs.ml.schema_encoder import SchemaEncoder
 from activitygraphs.schema import TensorSchema
 
 
@@ -111,16 +112,18 @@ class HomeAnchoredPE(FeatureSource):
 
 
 class Demographics(FeatureSource):
-    """Extracts the user attributes, ``batch.user_attr``, broadcast to every node of each user."""
+    """Encodes the user attributes, ``batch.user_attr`` and ``batch.user_attr_cat``, for every node of each user."""
 
     def __init__(self, schema: TensorSchema):
         super().__init__()
         self.schema = schema
-        self.out_dim = schema.width
+        self.encoder = SchemaEncoder(schema)
+        self.out_dim = self.encoder.out_dim
 
     def forward(self, batch: UserBatch) -> Tensor:
-        """Return the attributes of each node's user, ``[num_nodes, out_dim]``."""
-        return batch.user_attr[batch.batch]
+        """Return the encoded attributes of each node's user, ``[num_nodes, out_dim]``."""
+        user_inputs = self.encoder(batch.user_attr, batch.user_attr_cat)
+        return user_inputs[batch.batch]
 
 
 class HomeDistance(FeatureSource):

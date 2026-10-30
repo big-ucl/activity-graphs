@@ -194,7 +194,8 @@ def fit_transforms(dataset: VisitDataset, train_idx: list[int], fingerprint: Fin
 
     groups = {}
     for schema in dataset.schema.feature_groups:
-        transforms = policy.column_transforms(schema)
-        groups[schema.group] = GroupTransform.fit(schema, transforms, values[schema.group])
+        numeric = schema.numeric
+        transforms = policy.column_transforms(numeric)
+        groups[schema.group] = GroupTransform.fit(numeric, transforms, values[schema.group])
 
     return FeatureTransforms(groups=groups, policy=policy, fingerprint=fingerprint)

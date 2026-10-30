@@ -74,6 +74,7 @@ def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_use
             user_id=torch.tensor([start_user_id + g], dtype=torch.long),
         )
         data.user_attr = torch.rand(1, NUM_DEMO_FEATURES, generator=rng)
+        data.user_attr_cat = torch.zeros(1, 0, dtype=torch.long)
         data.random_walk_pe = torch.rand(num_nodes, NUM_RWPE_FEATURES, generator=rng)
         graphs.append(data)
     return pyg.data.Batch.from_data_list(graphs)

@@ -87,6 +87,14 @@ class TestTensorSchema:
 
         assert schema.names == ["age", "is_employed", "income_band", "hh_num_vehicles", "can_drive"]
 
+    def test_numeric_and_categorical_split_the_columns_in_order(self):
+        schema = user_attributes()
+
+        assert schema.numeric.group == schema.categorical.group == "user_attributes"
+        assert schema.numeric.names == ["age", "is_employed", "hh_num_vehicles", "can_drive"]
+        assert schema.categorical.names == ["income_band"]
+        assert schema.categorical.columns[0].categories == ("low", "mid", "high")
+
     def test_column_names_are_unique(self):
         with pytest.raises(ValueError, match=r"repeats columns \['age'\]"):
             TensorSchema("user_attributes", (ColumnSpec("age", CONTINUOUS), ColumnSpec("age", COUNT)))

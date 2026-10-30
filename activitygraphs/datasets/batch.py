@@ -18,7 +18,8 @@ class UserBatch:
         y: Visit labels, ``[num_nodes, 1]``.
         batch: Graph index of each node, ``[num_nodes]``.
         ptr: Offset of each graph's first node, ``[num_graphs + 1]``.
-        user_attr: Per-user attributes, ``[num_graphs, num_user_attributes]``.
+        user_attr: Per-user numeric attributes, ``[num_graphs, num_numeric_attributes]``.
+        user_attr_cat: Per-user codes of the categorical attributes, int64, ``[num_graphs, num_categorical_attributes]``.
         user_id: Dataset index of each user, ``[num_graphs]``.
         distances: Distance from the user's home to each node, as fed to the model, ``[num_nodes, 1]``.
         distances_m: Distance in metres from the user's home to each node, ``[num_nodes, 1]``.
@@ -33,6 +34,7 @@ class UserBatch:
     batch: Tensor
     ptr: Tensor
     user_attr: Tensor
+    user_attr_cat: Tensor
     user_id: Tensor
     distances: Tensor
     distances_m: Tensor

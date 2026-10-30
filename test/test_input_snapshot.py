@@ -27,6 +27,7 @@ from activitygraphs.datasets.datamodule import positional_encodings
 from activitygraphs.datasets.dataset import ProcessedFile, VisitDataset, load_dataset
 from activitygraphs.datasets.transforms import fit_transforms
 from activitygraphs.experiments.variants import Variant, build_feature_encoder
+from activitygraphs.ml.schema_encoder import default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.surveys.cmap import CMAP_DEMOGRAPHICS_SCHEMA, CMAPSurvey
 from activitygraphs.tensors import SurveyTensors, build_tensors
@@ -52,6 +53,27 @@ class NoDemographicsSurvey(CMAPSurvey):
     def demographics_schema(self) -> TensorSchema:
         """An empty schema."""
         return TensorSchema("user_attributes", ())
+
+
+class CategoricalDemographicsSurvey(CMAPSurvey):
+    """A ``CMAPSurvey`` whose ``hh_num_vehicles`` is categorical, with categories "0" and "1" only."""
+
+    @property
+    def demographics_schema(self) -> TensorSchema:
+        """The CMAP schema with ``hh_num_vehicles`` replaced by a categorical column."""
+        vehicles = ColumnSpec("hh_num_vehicles", ColumnKind.CATEGORICAL, ("0", "1"))
+        columns = []
+        for column in CMAP_DEMOGRAPHICS_SCHEMA.columns:
+            columns.append(vehicles if column.name == vehicles.name else column)
+
+        return TensorSchema("user_attributes", tuple(columns))
+
+
+SURVEY_CLASSES = {
+    "cmap": CMAPSurvey,
+    "no_demographics": NoDemographicsSurvey,
+    "categorical": CategoricalDemographicsSurvey,
+}
 
 
 def build_zones() -> gpd.GeoDataFrame:
@@ -143,7 +165,7 @@ def build_survey_tensors(survey_name: str) -> SurveyTensors:
     nodes_gdf, edges_gdf = build_graph(zones)
     loc_ids = zones["loc_id"].tolist()
     users = build_users(loc_ids)
-    survey_cls = CMAPSurvey if survey_name == "cmap" else NoDemographicsSurvey
+    survey_cls = SURVEY_CLASSES[survey_name]
     survey = survey_cls(zones, build_journeys(users, loc_ids), users).with_filter("zone")
 
     return build_tensors(survey, nodes_gdf, edges_gdf)
@@ -276,14 +298,62 @@ def test_without_demographics_use_demographics_leaves_the_inputs_unchanged(tmp_p
             torch.testing.assert_close(tensor, inputs[without], rtol=0, atol=0, msg=lambda m, key=key: f"{key}: {m}")
 
 
-def test_a_tensor_whose_width_differs_from_its_schema_raises(tmp_path):
+def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
+    dataset = build_dataset("categorical", tmp_path)
+    users = build_users(build_zones()["loc_id"].tolist()).sort("user_id")
+    vehicles = users["hh_num_vehicles"].to_list()
+    expected_codes = torch.tensor([[1 + count if count < 2 else 0] for count in vehicles])
+
+    fit_transforms(dataset, TRAIN_IDX, fingerprint={}).apply(dataset)
+    batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
+    mlp = read_config(get_project_root(), verbose=False).models.mlp
+    plain = build_feature_encoder(Variant(mlp, use_demographics=False), dataset, HOME_PE)
+    encoder = build_feature_encoder(Variant(mlp), dataset, HOME_PE)
+
+    assert set(vehicles) == {0, 1, 2}
+    assert dataset.schema.user_attributes.categorical.names == ["hh_num_vehicles"]
+    assert dataset.user_attributes.shape[-1] == CMAP_DEMOGRAPHICS_SCHEMA.width - 1
+    torch.testing.assert_close(dataset.user_attributes_cat, expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(batch.user_attr_cat, expected_codes, rtol=0, atol=0)
+    assert encoder.out_dim == plain.out_dim + CMAP_DEMOGRAPHICS_SCHEMA.width - 1 + default_emb_dim(3)
+    assert encoder(batch).shape == (batch.num_nodes, encoder.out_dim)
+
+
+def test_a_tensor_whose_width_differs_from_its_schema_raises():
     tensors = build_survey_tensors("cmap")
     extra_column = ColumnSpec("extra", ColumnKind.BINARY)
     user_nodes = TensorSchema("user_nodes", (*tensors.schema.user_nodes.columns, extra_column))
-    tensors = dataclasses.replace(tensors, schema=dataclasses.replace(tensors.schema, user_nodes=user_nodes))
+    schema = dataclasses.replace(tensors.schema, user_nodes=user_nodes)
 
-    with pytest.raises(ValueError, match="`user_nodes` tensor has 1 columns but its schema has 2"):
-        VisitDataset(str(tmp_path), lambda: tensors)
+    with pytest.raises(ValueError, match=r"`user_nodes` tensors have \(numeric, categorical\) widths \(1, 0\)"):
+        dataclasses.replace(tensors, schema=schema)
+
+
+def test_a_user_without_exactly_one_home_node_raises():
+    tensors = build_survey_tensors("cmap")
+    is_home_idx = tensors.schema.user_nodes.index_of("is_home")
+    two_homes = tensors.user_node_features.clone()
+    two_homes[0, :2, is_home_idx] = 1.0
+
+    with pytest.raises(ValueError, match="1 users do not have exactly one home node"):
+        dataclasses.replace(tensors, user_node_features=two_homes)
+
+
+def test_a_graph_without_an_edge_index_raises():
+    tensors = build_survey_tensors("cmap")
+    graph = tensors.pyg_graph.clone()
+    del graph.edge_index
+
+    with pytest.raises(ValueError, match="no edge index"):
+        dataclasses.replace(tensors, pyg_graph=graph)
+
+
+def test_tensors_that_disagree_on_the_number_of_users_raise():
+    tensors = build_survey_tensors("cmap")
+    one_user_short = tensors.user_attributes_cat[1:]
+
+    with pytest.raises(ValueError, match=f"User count mismatch: .*user_attributes_cat {NUM_USERS - 1}"):
+        dataclasses.replace(tensors, user_attributes_cat=one_user_short)
 
 
 def test_reading_an_uncached_dataset_without_a_builder_raises(tmp_path):
@@ -307,6 +377,21 @@ def test_prepare_splits_loads_the_dataset_only_while_a_cache_is_stale(tmp_path, 
     datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
 
     assert len(loads) == 1
+
+
+def test_prepare_splits_rebuilds_a_cache_missing_a_tensor_file(tmp_path, compose_config, monkeypatch):
+    cfg = compose_config("data=cmap")
+    root = tmp_path / cfg.data.paths.tensors
+    dataset = build_dataset("cmap", root)
+    monkeypatch.setattr(datamodule, "load_dataset", lambda *args, **kwargs: build_dataset("cmap", root))
+    split = HouseholdSplit(val_size=0.2, test_size=0.2)
+    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+
+    missing = Path(dataset.processed_dir) / ProcessedFile.USER_ATTRIBUTES_CAT
+    missing.unlink()
+    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+
+    assert missing.exists()
 
 
 def test_snapshot_covers_every_flag_combination(snapshot):
