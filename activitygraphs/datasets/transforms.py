@@ -53,9 +53,7 @@ TRANSFORM_POLICY = TransformPolicy(
         ColumnKind.BINARY: Transform.PASSTHROUGH,
         ColumnKind.CATEGORICAL: Transform.PASSTHROUGH,
     },
-    group_overrides={
-        "edges": {ColumnKind.COUNT: Transform.ZSCORE},
-    },
+    group_overrides={},
 )
 
 

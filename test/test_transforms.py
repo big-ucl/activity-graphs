@@ -2,6 +2,7 @@
 
 import logging
 
+import pytest
 import torch
 
 from activitygraphs.datasets import transforms as transforms_module
@@ -120,11 +121,9 @@ class TestTransformPolicy:
 
         assert TRANSFORM_POLICY.column_transforms(schema) == (PASSTHROUGH, ZSCORE)
 
-    def test_distances_are_log1p_then_zscored(self):
-        assert TRANSFORM_POLICY.column_transforms(DISTANCE_SCHEMA) == (LOG1P_ZSCORE,)
-
-    def test_edge_weights_are_zscored_without_log1p(self):
-        assert TRANSFORM_POLICY.column_transforms(EDGE_SCHEMA) == (ZSCORE,)
+    @pytest.mark.parametrize("schema", [DISTANCE_SCHEMA, EDGE_SCHEMA])
+    def test_distances_and_edge_weights_are_log1p_then_zscored(self, schema):
+        assert TRANSFORM_POLICY.column_transforms(schema) == (LOG1P_ZSCORE,)
 
     def test_a_group_without_overrides_follows_the_kind(self):
         assert TRANSFORM_POLICY.column_transforms(one_column_per_kind()) == (
@@ -161,7 +160,7 @@ class TestFeatureTransforms:
 
     def test_is_stale_once_the_policy_changes(self, monkeypatch):
         fitted, _ = self.make({"n_users": 3})
-        policy = TransformPolicy(TRANSFORM_POLICY.kinds, group_overrides={})
+        policy = TransformPolicy(TRANSFORM_POLICY.kinds, group_overrides={"edges": {COUNT: ZSCORE}})
         monkeypatch.setattr(transforms_module, "TRANSFORM_POLICY", policy)
 
         assert not fitted.is_current({"n_users": 3})
