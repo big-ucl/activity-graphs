@@ -70,15 +70,16 @@ class UserNodeFeatures(FeatureSource):
 
 
 class RandomWalkPE(FeatureSource):
-    """Extracts the random-walk positional encoding, ``batch.random_walk_pe``."""
+    """Encodes the random-walk positional encoding, ``batch.random_walk_pe``, through a batch norm of each column."""
 
     def __init__(self, width: int):
         super().__init__()
+        self.norm = torch.nn.BatchNorm1d(width)
         self.out_dim = width
 
     def forward(self, batch: UserBatch) -> Tensor:
-        """Return ``batch.random_walk_pe``."""
-        return batch.random_walk_pe
+        """Return the batch-normed encoding of each node, ``[num_nodes, out_dim]``."""
+        return self.norm(batch.random_walk_pe)
 
 
 class HomeAnchoredPE(FeatureSource):

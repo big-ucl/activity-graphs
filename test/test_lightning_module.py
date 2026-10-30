@@ -314,12 +314,15 @@ class TestRwpe:
             recall_ks=RECALL_KS,
         )
 
-    def test_appends_the_encoding_after_x(self):
+    def test_appends_the_batch_normed_encoding_after_x(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
         rwpe = RandomWalkPE(NUM_RWPE_FEATURES)
         x = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0, rwpe)(batch)
 
-        torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node, batch.random_walk_pe], dim=-1))
+        pe = batch.random_walk_pe
+        std = torch.sqrt(pe.var(dim=0, unbiased=False) + rwpe.norm.eps)
+        normed = (pe - pe.mean(dim=0)) / std
+        torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node, normed], dim=-1))
 
     def test_left_out_without_its_source(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
