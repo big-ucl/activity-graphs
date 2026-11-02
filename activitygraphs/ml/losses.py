@@ -8,25 +8,23 @@ import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 
 from activitygraphs.config import LossConfig
-from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.batch import UserBatch, UserGridBatch
 from activitygraphs.datasets.dataset import is_home_node_mask
 
 
-class LossFn(Protocol):
+class LossFn[BatchT](Protocol):
     """Signature of a loss function over a batch's logits."""
 
-    def __call__(
-        self, logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, batch: BatchT, generator: torch.Generator | None = None) -> torch.Tensor:
         """Return the scalar loss for ``logits`` against the labels in ``batch``."""
 
 
 @dataclass(frozen=True)
-class Loss:
+class Loss[BatchT]:
     """A loss function with the validation metric and direction that checkpointing monitors."""
 
     name: str
-    loss_fn: LossFn
+    loss_fn: LossFn[BatchT]
     monitor: str
     monitor_mode: Literal["min", "max"]
 
@@ -89,14 +87,20 @@ def bpr_loss(
     pos_mask = (labels > 0.5) & mask
     neg_mask = (labels <= 0.5) & mask
     if neg_restrict is not None:
-        restricted = neg_mask & neg_restrict
-
-        empty = ~restricted.any(
-            dim=1, keepdim=True
-        )  # fall back to all unvisited for users whose restricted pool is empty
-        neg_mask = torch.where(empty, neg_mask, restricted)
+        neg_mask = _restrict_negatives(neg_mask, neg_restrict)
 
     return dense_bpr_loss(scores, pos_mask.float(), neg_mask.float(), n_pairs, generator)
+
+
+def _restrict_negatives(neg_mask: torch.Tensor, neg_restrict: torch.Tensor) -> torch.Tensor:
+    """Return the ``[B, N]`` mask ``neg_mask`` restricted to ``neg_restrict``.
+
+    A user whose restricted pool is empty keeps every node of ``neg_mask``.
+    """
+    restricted = neg_mask & neg_restrict
+    empty = ~restricted.any(dim=1, keepdim=True)
+
+    return torch.where(empty, neg_mask, restricted)
 
 
 def dense_bpr_loss(
@@ -154,3 +158,75 @@ def _near_home_negative_mask(
 
     is_node_near_home_dense, _ = to_dense_batch(is_node_near_home.float(), batch.batch)  # [B, N]
     return is_node_near_home_dense > 0.5
+
+
+# =========================================
+# Losses over a grid of per-user scores
+# =========================================
+
+
+def grid_bce_loss(
+    logits: torch.Tensor,
+    batch: UserGridBatch,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Standard BCE loss with logits, over the ``[num_users, num_nodes]`` grid of scores."""
+    return F.binary_cross_entropy_with_logits(logits, batch.y.float())
+
+
+GridBCELoss = Loss(name="bce", loss_fn=grid_bce_loss, monitor="val_bce", monitor_mode="min")
+
+
+def build_grid_loss(cfg: LossConfig, distance_matrix: torch.Tensor, max_recall_k: int) -> Loss[UserGridBatch]:
+    """Build the loss selected by ``cfg.type``, over the ``[num_users, num_nodes]`` grid of a ``UserGridBatch``."""
+    if cfg.type == "bce":
+        return GridBCELoss
+    if cfg.type == "bpr":
+        return _build_grid_bpr_loss(cfg, distance_matrix, max_recall_k)
+
+    raise ValueError(f"Unknown loss type {cfg.type}")
+
+
+def _build_grid_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, max_recall_k: int) -> Loss[UserGridBatch]:
+    def _uniform_bpr_loss(
+        logits: torch.Tensor, batch: UserGridBatch, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        return grid_bpr_loss(logits, batch.y, cfg.n_pairs, generator=generator)
+
+    def _hard_neg_bpr_loss(
+        logits: torch.Tensor, batch: UserGridBatch, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        home_distances = distance_matrix.to(logits.device)[batch.home_node]
+        near_home = home_distances <= cfg.is_near_threshold
+        return grid_bpr_loss(logits, batch.y, cfg.n_pairs, near_home, generator)
+
+    _bpr_loss = _hard_neg_bpr_loss if cfg.neg_sampler == "hard" else _uniform_bpr_loss
+    return Loss(name="bpr", loss_fn=_bpr_loss, monitor=f"val_avg_recall@{max_recall_k}", monitor_mode="max")
+
+
+def grid_bpr_loss(
+    scores: torch.Tensor,
+    y: torch.Tensor,
+    n_pairs: int,
+    neg_restrict: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Mean BPR loss over ``n_pairs`` sampled (v+, v-) pairs per user, over a grid of per-user scores.
+
+    Args:
+        scores: Score of every node for every user, ``[num_users, num_nodes]``.
+        y: Visit labels aligned with ``scores``.
+        n_pairs: Pairs drawn per user.
+        neg_restrict: Boolean mask aligned with ``scores`` of the nodes a negative may be drawn from, e.g. near home
+            for hard negatives. A user whose restricted pool is empty draws from every unvisited node.
+        generator: Generator of the pair sampling.
+
+    Returns:
+        Scalar loss. Users with no positives are dropped.
+    """
+    pos_mask = y > 0.5
+    neg_mask = ~pos_mask
+    if neg_restrict is not None:
+        neg_mask = _restrict_negatives(neg_mask, neg_restrict)
+
+    return dense_bpr_loss(scores, pos_mask.float(), neg_mask.float(), n_pairs, generator)

@@ -54,3 +54,41 @@ class UserBatch:
     def num_graphs(self) -> int:
         """Number of graphs (users) in the batch."""
         return self.user_id.shape[0]
+
+
+@dataclass(frozen=True)
+class UserGridBatch:
+    """The tensors of a collated ``UserGridDataset`` batch, typed, one row per user.
+
+    Attributes:
+        user_id: Dataset index of each user, ``[num_users]``.
+        home_node: Home node of each user, ``[num_users]``.
+        y: Visit labels of every node, ``[num_users, num_nodes]``.
+        distances: Distance from the user's home to each node, as fed to the model, ``[num_users, num_nodes]``.
+        distances_m: Distance in metres from the user's home to each node, ``[num_users, num_nodes]``.
+        user_attr: Per-user numeric attributes, ``[num_users, num_numeric_attributes]``.
+        user_attr_cat: Per-user codes of the categorical attributes, int64, ``[num_users, num_categorical_attributes]``.
+    """
+
+    user_id: Tensor
+    home_node: Tensor
+    y: Tensor
+    distances: Tensor
+    distances_m: Tensor
+    user_attr: Tensor
+    user_attr_cat: Tensor
+
+    @classmethod
+    def from_dict(cls, batch: dict[str, Tensor]) -> "UserGridBatch":
+        """Return the typed view of a batch collated from ``UserGridDataset`` items."""
+        return cls(**{field.name: batch[field.name] for field in fields(cls)})
+
+    @property
+    def num_users(self) -> int:
+        """Number of users in the batch."""
+        return self.user_id.shape[0]
+
+    @property
+    def num_nodes(self) -> int:
+        """Number of nodes of the graph."""
+        return self.y.shape[1]
