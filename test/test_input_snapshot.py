@@ -332,21 +332,20 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
 def test_a_tensor_whose_width_differs_from_its_schema_raises():
     tensors = build_survey_tensors("cmap")
     extra_column = ColumnSpec("extra", ColumnKind.BINARY)
-    user_nodes = TensorSchema("user_nodes", (*tensors.schema.user_nodes.columns, extra_column))
-    schema = dataclasses.replace(tensors.schema, user_nodes=user_nodes)
+    distances = TensorSchema("distances", (*tensors.schema.distances.columns, extra_column))
+    schema = dataclasses.replace(tensors.schema, distances=distances)
 
-    with pytest.raises(ValueError, match=r"`user_nodes` tensors have \(numeric, categorical\) widths \(1, 0\)"):
+    with pytest.raises(ValueError, match=r"`distances` tensors have \(numeric, categorical\) widths \(1, 0\)"):
         dataclasses.replace(tensors, schema=schema)
 
 
-def test_a_user_without_exactly_one_home_node_raises():
+def test_a_home_node_outside_the_graph_raises():
     tensors = build_survey_tensors("cmap")
-    is_home_idx = tensors.schema.user_nodes.index_of("is_home")
-    two_homes = tensors.user_node_features.clone()
-    two_homes[0, :2, is_home_idx] = 1.0
+    home_nodes = tensors.home_nodes.clone()
+    home_nodes[0] = tensors.node_ids.height
 
-    with pytest.raises(ValueError, match="1 users do not have exactly one home node"):
-        dataclasses.replace(tensors, user_node_features=two_homes)
+    with pytest.raises(ValueError, match="1 users have a home node outside the graph"):
+        dataclasses.replace(tensors, home_nodes=home_nodes)
 
 
 def test_a_graph_without_an_edge_index_raises():

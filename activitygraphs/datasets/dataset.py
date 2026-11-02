@@ -11,6 +11,7 @@ from typing import cast
 import numpy as np
 import polars as pl
 import torch
+import torch.nn.functional as F
 import torch_geometric as pyg
 from omegaconf import OmegaConf
 from scipy.sparse import coo_matrix
@@ -30,11 +31,11 @@ class ProcessedFile(StrEnum):
     """Names of the files cached by ``VisitDataset`` in its ``processed`` directory."""
 
     PYG_GRAPH = "pyg_graph.pt"
-    USER_NODE_FEATURES = "user_node_features.pt"
+    HOME_NODES = "home_nodes.pt"
     VISIT_LABELS = "visit_labels.pt"
     USER_ATTRIBUTES = "user_attributes.pt"
     USER_ATTRIBUTES_CAT = "user_attributes_cat.pt"
-    DISTANCES = "distances.pt"
+    NODE_DISTANCES = "node_distances.pt"
     GROUP_IDS = "group_ids.pt"
     USER_IDS = "user_ids.parquet"
     NODE_IDS = "node_ids.parquet"
@@ -50,7 +51,12 @@ def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
 class VisitDataset(pyg.data.Dataset):
     """Main PyG dataset for a travel survey: shared graph + per-user node features/visit labels + user attributes.
 
-    Stores the graph once and slices per-user tensors on ``get()`` call.
+    Stores the graph once and slices per-user tensors on ``get()`` call. Two tensors are derived from the loaded
+    tensors:
+      - ``user_node_features``: per-user node features, one-hot indicators for each user's home node,
+      - ``distances_m`` and ``distances`: the per-user distances are the distances from each user's home node to every
+        other node, in meters and log-scaled (respectively). Derived from ``node_distances`` at each user's home node.
+
     Each item returned by ``get(i)`` is a ``pyg.data.Data`` with additional tensors:
       - ``x_loc = location_features``,
       - ``x_user_node = user_node_features[i]``,
@@ -90,9 +96,7 @@ class VisitDataset(pyg.data.Dataset):
 
         processed_dir = Path(self.processed_dir)
         self.pyg_graph: pyg.data.Data = torch.load(processed_dir / ProcessedFile.PYG_GRAPH, weights_only=False)
-        self.user_node_features: torch.Tensor = torch.load(
-            processed_dir / ProcessedFile.USER_NODE_FEATURES, weights_only=True
-        )
+        self.home_nodes: torch.Tensor = torch.load(processed_dir / ProcessedFile.HOME_NODES, weights_only=True)
         self.visit_labels: torch.Tensor = torch.load(processed_dir / ProcessedFile.VISIT_LABELS, weights_only=True)
         self.user_attributes: torch.Tensor = torch.load(
             processed_dir / ProcessedFile.USER_ATTRIBUTES, weights_only=True
@@ -100,8 +104,10 @@ class VisitDataset(pyg.data.Dataset):
         self.user_attributes_cat: torch.Tensor = torch.load(
             processed_dir / ProcessedFile.USER_ATTRIBUTES_CAT, weights_only=True
         )
-        self.distances_m: torch.Tensor = torch.load(processed_dir / ProcessedFile.DISTANCES, weights_only=True)
-        self.distances: torch.Tensor = self.distances_m
+        self.node_distances_m: torch.Tensor = torch.load(
+            processed_dir / ProcessedFile.NODE_DISTANCES, weights_only=True
+        )
+        self.node_distances: torch.Tensor = self.node_distances_m
         self.group_ids: torch.Tensor = torch.load(processed_dir / ProcessedFile.GROUP_IDS, weights_only=True)
         self.user_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.USER_IDS)
         self.node_ids: pl.DataFrame = pl.read_parquet(processed_dir / ProcessedFile.NODE_IDS)
@@ -109,6 +115,10 @@ class VisitDataset(pyg.data.Dataset):
 
         self.num_users: int = self.user_attributes.size(0)
         self.num_nodes: int = self.node_ids.height
+
+        self.user_node_features: torch.Tensor = F.one_hot(self.home_nodes, self.num_nodes).float().unsqueeze(-1)
+        self.distances_m: torch.Tensor = self.node_distances_m[self.home_nodes]
+        self.distances: torch.Tensor = self.distances_m
         self._is_scaled: bool = False
 
     @property
@@ -169,11 +179,11 @@ class VisitDataset(pyg.data.Dataset):
         processed_dir = Path(self.processed_dir)
         tensor_files = {
             ProcessedFile.PYG_GRAPH: graph,
-            ProcessedFile.USER_NODE_FEATURES: tensors.user_node_features,
+            ProcessedFile.HOME_NODES: tensors.home_nodes,
             ProcessedFile.VISIT_LABELS: tensors.visit_labels,
             ProcessedFile.USER_ATTRIBUTES: tensors.user_attributes,
             ProcessedFile.USER_ATTRIBUTES_CAT: tensors.user_attributes_cat,
-            ProcessedFile.DISTANCES: tensors.distances,
+            ProcessedFile.NODE_DISTANCES: tensors.node_distances,
             ProcessedFile.GROUP_IDS: tensors.group_ids,
         }
         for file, tensor in tensor_files.items():
@@ -278,8 +288,7 @@ def tensors_fingerprint(tensors: SurveyTensors) -> Fingerprint:
 
     return {
         "n_users": tensors.user_attributes.shape[0],
-        "n_nodes": tensors.user_node_features.shape[1],
-        "n_user_node_cols": tensors.user_node_features.shape[-1],
+        "n_nodes": tensors.node_ids.height,
         "n_user_attribute_cols": tensors.user_attributes.shape[-1],
         "n_groups": len(tensors.group_ids.unique()),
         "ids": hashlib.blake2b(ids.encode(), digest_size=16).hexdigest(),

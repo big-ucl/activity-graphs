@@ -40,11 +40,11 @@ class SurveyTensors:
 
     Attributes:
         pyg_graph: The shared PyG graph, with node features ``x``, ``edge_index`` and ``edge_attr``.
-        user_node_features: Per-user node features, ``[n_users, n_nodes, n_feat]``.
+        home_nodes: Home node of each user (as node indices), int64, ``[n_users]``.
         visit_labels: Per-user visit labels, ``[n_users, n_nodes, 1]``.
         user_attributes: Per-user numeric attributes, ``[n_users, n_numeric_attr]``.
         user_attributes_cat: Per-user categorical attribute codes, int64, ``[n_users, n_categorical_attr]``.
-        distances: Per-user distance from home, ``[n_users, n_nodes, 1]``.
+        node_distances: Distance between the centroids of every pair of nodes, ``[n_nodes, n_nodes, 1]``.
         group_ids: Per-user group/hh-ids, ``[n_users]``.
         user_ids: Survey ``user_id`` and ``hh_id`` of each user, one row per tensor row.
         node_ids: Survey ``loc_id`` of each node, one row per graph node.
@@ -52,16 +52,16 @@ class SurveyTensors:
 
     Raises:
         ValueError: The graph has no edge index, the tensors and ids disagree on the number of users or nodes, a
-            group's tensors have a different number of numeric or categorical columns than its schema, or a user
-            does not have exactly one home node.
+            group's tensors have a different number of numeric or categorical columns than its schema, or a home
+            node is not a node of the graph.
     """
 
     pyg_graph: pyg.data.Data
-    user_node_features: torch.Tensor
+    home_nodes: torch.Tensor
     visit_labels: torch.Tensor
     user_attributes: torch.Tensor
     user_attributes_cat: torch.Tensor
-    distances: torch.Tensor
+    node_distances: torch.Tensor
     group_ids: torch.Tensor
     user_ids: pl.DataFrame
     node_ids: pl.DataFrame
@@ -69,18 +69,17 @@ class SurveyTensors:
 
     def __post_init__(self) -> None:
         """Check that the tensors agree on the number of users and nodes, that their widths match the schema, and that
-        every user has exactly one home node."""
+        every home node is a node of the graph."""
         if self.pyg_graph.edge_index is None:
             raise ValueError("The graph has no edge index.")
 
         _require_equal_counts(
             "User",
             {
-                "user_node_features": self.user_node_features.shape[0],
+                "home_nodes": self.home_nodes.shape[0],
                 "visit_labels": self.visit_labels.shape[0],
                 "user_attributes": self.user_attributes.shape[0],
                 "user_attributes_cat": self.user_attributes_cat.shape[0],
-                "distances": self.distances.shape[0],
                 "group_ids": self.group_ids.shape[0],
                 "user_ids": self.user_ids.height,
             },
@@ -89,9 +88,9 @@ class SurveyTensors:
             "Node",
             {
                 "pyg_graph": self.pyg_graph.num_nodes,
-                "user_node_features": self.user_node_features.shape[1],
                 "visit_labels": self.visit_labels.shape[1],
-                "distances": self.distances.shape[1],
+                "node_distances (rows)": self.node_distances.shape[0],
+                "node_distances (columns)": self.node_distances.shape[1],
                 "node_ids": self.node_ids.height,
             },
         )
@@ -99,13 +98,15 @@ class SurveyTensors:
         numeric_and_categorical_widths = {
             "locations": (self.pyg_graph.num_node_features, 0),
             "edges": (self.pyg_graph.num_edge_features, 0),
-            "user_nodes": (self.user_node_features.shape[-1], 0),
             "user_attributes": (self.user_attributes.shape[-1], self.user_attributes_cat.shape[-1]),
-            "distances": (self.distances.shape[-1], 0),
+            "distances": (self.node_distances.shape[-1], 0),
             "targets": (self.visit_labels.shape[-1], 0),
         }
 
         for schema in self.schema.groups:
+            if schema is self.schema.user_nodes:
+                continue
+
             widths = numeric_and_categorical_widths[schema.group]
             schema_widths = (schema.numeric.width, schema.categorical.width)
             if widths != schema_widths:
@@ -114,11 +115,9 @@ class SurveyTensors:
                     f"{schema_widths}."
                 )
 
-        is_home_idx = self.schema.user_nodes.index_of("is_home")
-        home_counts = self.user_node_features[:, :, is_home_idx].sum(dim=1)
-        num_bad = int((home_counts != 1).sum())
-        if num_bad:
-            raise ValueError(f"{num_bad} users do not have exactly one home node.")
+        num_invalid_homes = int(((self.home_nodes < 0) | (self.home_nodes >= self.node_ids.height)).sum())
+        if num_invalid_homes:
+            raise ValueError(f"{num_invalid_homes} users have a home node outside the graph.")
 
 
 def _require_equal_counts(count_name: str, counts: dict[str, int | None]) -> None:
@@ -137,17 +136,21 @@ def _require_equal_counts(count_name: str, counts: dict[str, int | None]) -> Non
 
 
 # =========================================
-# User node features and visit labels
+# Home nodes and visit labels
 # =========================================
 
 
-def build_home_indicator(survey: SurveyData) -> torch.Tensor:
-    """Build each user's home indicator over all graph nodes.
+def build_home_nodes(survey: SurveyData) -> torch.Tensor:
+    """Build the home node of each user, the position of the user's home location in the node order.
 
     Returns:
-        Float tensor of shape ``[n_users, n_nodes, 1]``, one at the user's home node.
+        Int64 tensor of shape ``[n_users]``.
     """
-    return build_user_node_indicator(survey, survey.home_locations, "is_home")
+    user_to_home_loc = dict(survey.home_locations.iter_rows())
+    location_to_node = {loc_id: node_idx for node_idx, loc_id in enumerate(survey.locations_df["loc_id"])}
+    home_nodes = survey.user_ids.replace_strict(user_to_home_loc).replace_strict(location_to_node, return_dtype=pl.Int64)
+
+    return torch.tensor(home_nodes.to_numpy(), dtype=torch.long)
 
 
 def build_visit_labels(survey: SurveyData, purposes: Collection[Purpose]) -> torch.Tensor:
@@ -187,25 +190,22 @@ def build_user_node_indicator(survey: SurveyData, indicator_df: pl.DataFrame, co
     )
 
 
-def build_home_distances(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
-    """Build a distance-from-home tensor over all graph nodes for every user.
+def build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
+    """Build the distance between every pair of graph nodes.
 
-    Uses Euclidean distance between centroids.
+    Uses Euclidean distance between centroids. Row ``i`` holds the distances from node ``i`` to every node.
 
     Returns:
-        Float tensor of shape ``[n_users, n_nodes, 1]``.
+        Float tensor of shape ``[n_nodes, n_nodes, 1]``.
     """
     nodes = nodes_gdf.sort_index().to_crs(nodes_gdf.estimate_utm_crs())
     coords = nodes.geometry.get_coordinates()
 
-    home_by_user = dict(survey.home_locations.iter_rows())
+    n_nodes = len(coords)
+    distances = np.zeros((n_nodes, n_nodes, 1), dtype=np.float32)
 
-    n_users, n_nodes = len(survey.user_ids), len(coords)
-    distances = np.zeros((n_users, n_nodes, 1), dtype=np.float32)
-
-    for user_idx, user_id in enumerate(survey.user_ids):
-        home_loc_id = home_by_user[user_id]
-        distances[user_idx, :, 0] = np.linalg.norm(coords - coords.loc[home_loc_id], axis=1)
+    for node_idx, loc_id in enumerate(nodes_gdf.index):
+        distances[node_idx, :, 0] = np.linalg.norm(coords - coords.loc[loc_id], axis=1)
 
     return torch.from_numpy(distances)
 
@@ -333,10 +333,10 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         Bundle containing the shared PyG graph, the per-user tensors, the survey ids of the users and nodes,
         and the dataset schema.
     """
-    user_node_features = build_home_indicator(survey)
+    home_nodes = build_home_nodes(survey)
     visit_labels = build_visit_labels(survey, list(Purpose))
     user_attributes, user_attributes_cat = build_user_attributes(survey)
-    distances = build_home_distances(survey, nodes_gdf)
+    node_distances = build_node_distances(nodes_gdf)
     hh_ids = build_group_ids(survey)
 
     node_feature_cols = [col for col in nodes_gdf.columns if col not in COLS_EXCLUDED_FROM_FEATURES]
@@ -352,11 +352,11 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
 
     return SurveyTensors(
         pyg_graph=cast(pyg.data.Data, pyg_graph),
-        user_node_features=user_node_features,
+        home_nodes=home_nodes,
         visit_labels=visit_labels,
         user_attributes=user_attributes,
         user_attributes_cat=user_attributes_cat,
-        distances=distances,
+        node_distances=node_distances,
         group_ids=hh_ids,
         user_ids=build_user_ids(survey),
         node_ids=build_node_ids(survey, nodes_gdf),

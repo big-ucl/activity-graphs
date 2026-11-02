@@ -152,8 +152,9 @@ class FeatureTransforms:
         dataset.pyg_graph.edge_attr = self.groups["edges"].apply(dataset.edge_attr)
         dataset.user_node_features = self.groups["user_nodes"].apply(dataset.user_node_features)
         dataset.user_attributes = self.groups["user_attributes"].apply(dataset.user_attributes)
-        dataset.distances = self.groups["distances"].apply(dataset.distances)
+        dataset.node_distances = self.groups["distances"].apply(dataset.node_distances_m)
 
+        dataset.distances = dataset.node_distances[dataset.home_nodes]
         dataset._is_scaled = True
 
     def save(self, path: Path) -> None:
@@ -187,7 +188,7 @@ def fit_transforms(dataset: VisitDataset, train_idx: list[int], fingerprint: Fin
         "edges": dataset.edge_attr,
         "user_nodes": dataset.user_node_features[train_idx],
         "user_attributes": dataset.user_attributes[train_idx],
-        "distances": dataset.distances[train_idx],
+        "distances": dataset.node_distances_m[dataset.home_nodes[train_idx]],
     }
 
     groups = {}

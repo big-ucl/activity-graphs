@@ -65,8 +65,6 @@ def make_dataset(
     ``users_per_group=1`` reproduces the ungrouped case (TPG, where ``hh_id`` is ``user_id``).
     """
     group_ids = torch.arange(n_users) // users_per_group
-    user_node_features = torch.zeros((n_users, n_nodes, USER_NODE_SCHEMA.width))
-    user_node_features[:, 0, USER_NODE_SCHEMA.index_of("is_home")] = 1.0
     user_ids = pl.DataFrame({
         "user_id": [f"{user_id_prefix}{i}" for i in range(n_users)],
         "hh_id": [f"h{g}" for g in group_ids.tolist()],
@@ -75,11 +73,11 @@ def make_dataset(
     return FakeDataset(
         SurveyTensors(
             pyg_graph=pyg.data.Data(edge_index=torch.zeros((2, 0), dtype=torch.long), num_nodes=n_nodes),
-            user_node_features=user_node_features,
+            home_nodes=torch.zeros(n_users, dtype=torch.long),
             visit_labels=torch.zeros((n_users, n_nodes, 1)),
             user_attributes=torch.zeros((n_users, n_demo)),
             user_attributes_cat=torch.zeros((n_users, 0), dtype=torch.long),
-            distances=torch.zeros((n_users, n_nodes, 1)),
+            node_distances=torch.zeros((n_nodes, n_nodes, 1)),
             group_ids=group_ids,
             user_ids=user_ids,
             node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),
