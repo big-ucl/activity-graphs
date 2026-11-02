@@ -39,8 +39,8 @@ class NodeBias(torch.nn.Module):
     def fit(cls, dataset: VisitDataset) -> "NodeBias":
         """Return the bias at the home-excluded popularity logit of the users of ``dataset``."""
         user_idx = torch.as_tensor(list(dataset.indices()), dtype=torch.long)
-        labels = dataset.visit_labels[user_idx].squeeze(-1)
-        home_idx = dataset.home_nodes[user_idx]
+        labels = dataset.users.visited[user_idx]
+        home_idx = dataset.users.home_node[user_idx]
 
         return cls(popularity_logit(labels, home_idx))
 

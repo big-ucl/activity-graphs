@@ -1001,9 +1001,10 @@ def _(mo):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.datasets.dataset import load_dataset
+    from activitygraphs.datasets.dataset import VisitDataset
+    from activitygraphs.tensors import load_tensors
 
-    dataset = load_dataset(cfg, project_root)
+    dataset = VisitDataset.from_tensors(*load_tensors(cfg, project_root), transforms=None)
     return (dataset,)
 
 

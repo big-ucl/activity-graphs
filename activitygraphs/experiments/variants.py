@@ -82,10 +82,10 @@ def build_feature_encoder(variant: Variant, dataset: VisitDataset, home_pe_cfg: 
     ]
 
     if variant.use_rwpe:
-        sources.append(RandomWalkPE(dataset.num_rwpe_features))
+        sources.append(RandomWalkPE(dataset.locations.num_rwpe_features))
     if variant.use_home_pe:
         is_home_idx = schema.user_nodes.index_of("is_home")
-        home_pe = HomeAnchoredPE(dataset.home_hop_distance, is_home_idx, home_pe_cfg.bins, home_pe_cfg.max_hops)
+        home_pe = HomeAnchoredPE(dataset.locations.hop_distance, is_home_idx, home_pe_cfg.bins, home_pe_cfg.max_hops)
         sources.append(home_pe)
     if variant.use_demographics:
         sources.append(Demographics(schema.user_attributes))
@@ -106,7 +106,7 @@ def build_model(variant: Variant, dataset: VisitDataset, in_channels: int) -> to
     sizes = ModelSizes(
         in_channels=in_channels,
         out_channels=dataset.num_classes - 1,
-        edge_dim=dataset.edge_attr.size(-1),
+        edge_dim=dataset.locations.edge_attr.size(-1),
     )
 
     return architecture_builder(variant.model)(variant.model, sizes)

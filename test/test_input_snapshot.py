@@ -23,9 +23,8 @@ from shapely.geometry import box
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
 from activitygraphs.config import HomePEConfig, read_config
 from activitygraphs.datasets import HouseholdSplit, datamodule
-from activitygraphs.datasets.datamodule import positional_encodings
-from activitygraphs.datasets.dataset import ProcessedFile, VisitDataset, load_dataset
-from activitygraphs.datasets.transforms import fit_transforms
+from activitygraphs.datasets.dataset import VisitDataset
+from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.experiments.variants import Variant, build_feature_encoder
 from activitygraphs.ml.schema_encoder import default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
@@ -37,7 +36,17 @@ from activitygraphs.surveys.demographics import (
     INCOME_QUARTILES,
     STUDENT_STATUSES,
 )
-from activitygraphs.tensors import SurveyTensors, build_tensors
+from activitygraphs.tensors import (
+    SurveyTensors,
+    build_tensors,
+    check_tensors,
+    load_tensors,
+    read_tensors,
+    save_tensors,
+)
+from activitygraphs.tensors.build import build_location_tensors
+from activitygraphs.tensors.bundles import UserFile
+from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR
 from activitygraphs.utils import add_lon_lat_from_centroid, get_project_root
 
 SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "model_inputs.pt"
@@ -165,11 +174,29 @@ def build_survey_tensors(survey_name: str) -> SurveyTensors:
     return build_tensors(survey, nodes_gdf, edges_gdf)
 
 
-def build_dataset(survey_name: str, root: Path) -> VisitDataset:
-    """Return the unscaled ``VisitDataset`` of the synthetic survey ``survey_name``, processed under ``root``."""
+def cache_survey_tensors(survey_name: str, root: Path) -> SurveyTensors:
+    """Return the tensors of the synthetic survey ``survey_name``, cached under ``root``."""
     tensors = build_survey_tensors(survey_name)
+    save_tensors(root, *tensors)
 
-    return VisitDataset(str(root), lambda: tensors, pre_transform=positional_encodings())
+    return tensors
+
+
+def build_dataset(survey_name: str, root: Path) -> VisitDataset:
+    """Return the unscaled ``VisitDataset`` of the synthetic survey ``survey_name``, cached under ``root``."""
+    return VisitDataset.from_tensors(*cache_survey_tensors(survey_name, root), transforms=None)
+
+
+def build_scaled_dataset(survey_name: str, root: Path) -> tuple[VisitDataset, FeatureTransforms]:
+    """Return the ``VisitDataset`` of the synthetic survey ``survey_name`` scaled by transforms fitted on ``TRAIN_IDX``.
+
+    Returns:
+        Tuple ``(dataset, transforms)``.
+    """
+    locations, users, schema = cache_survey_tensors(survey_name, root)
+    transforms = fit_transforms(locations, users, schema, TRAIN_IDX, fingerprint={})
+
+    return VisitDataset.from_tensors(locations, users, schema, transforms), transforms
 
 
 def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
@@ -183,8 +210,7 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
         The scaled edge attributes, the labels, and the ``FeatureEncoder`` output over all users for every
         combination of ``FLAGS``, keyed by the active flags joined with ``+`` (``"none"`` for no flags).
     """
-    dataset = build_dataset(survey_name, root)
-    fit_transforms(dataset, TRAIN_IDX, fingerprint={}).apply(dataset)
+    dataset, _ = build_scaled_dataset(survey_name, root)
 
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
     mlp = read_config(get_project_root(), verbose=False).models.mlp
@@ -224,9 +250,9 @@ def test_the_shared_graph_is_undirected(tmp_path):
     dataset = build_dataset("cmap", tmp_path)
     _, edges_gdf = build_graph(build_zones())
 
-    assert pyg.utils.is_undirected(dataset.edge_index, num_nodes=dataset.num_nodes)
-    assert dataset.edge_index.size(1) == 2 * len(edges_gdf)
-    assert dataset.pyg_graph.random_walk_pe.abs().sum() > 0
+    assert pyg.utils.is_undirected(dataset.locations.edge_index, num_nodes=dataset.num_nodes)
+    assert dataset.locations.edge_index.size(1) == 2 * len(edges_gdf)
+    assert dataset.locations.random_walk_pe.abs().sum() > 0
 
 
 def test_the_cache_carries_the_survey_ids_and_the_fingerprint(tmp_path):
@@ -234,10 +260,10 @@ def test_the_cache_carries_the_survey_ids_and_the_fingerprint(tmp_path):
     zones = build_zones()
     users = build_users(zones["loc_id"].tolist())
 
-    assert dataset.user_ids.equals(users.sort("user_id").select("user_id", "hh_id"))
-    assert dataset.node_ids["loc_id"].to_list() == zones["loc_id"].tolist()
+    assert dataset.users.user_ids.equals(users.sort("user_id").select("user_id", "hh_id"))
+    assert dataset.locations.node_ids["loc_id"].to_list() == zones["loc_id"].tolist()
 
-    fingerprint = json.loads((Path(dataset.processed_dir) / ProcessedFile.FINGERPRINT).read_text())
+    fingerprint = json.loads((tmp_path / FINGERPRINT_FILE).read_text())
     assert fingerprint["n_users"] == NUM_USERS
     assert fingerprint["n_groups"] == NUM_HOUSEHOLDS
 
@@ -247,22 +273,25 @@ def test_an_item_carries_the_location_and_user_node_features_apart(tmp_path):
     item = dataset[3]
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
 
+    home = dataset.users.home_node[3]
+    is_home = torch.zeros(dataset.num_nodes, 1)
+    is_home[home] = 1.0
+
     assert "x" not in item
-    torch.testing.assert_close(item.x_loc, dataset.location_x)
-    torch.testing.assert_close(item.x_user_node, dataset.user_node_features[3])
+    torch.testing.assert_close(item.x_loc, dataset.locations.x)
+    torch.testing.assert_close(item.x_user_node, is_home)
     assert item.num_nodes == dataset.num_nodes
     assert batch.num_nodes == NUM_USERS * dataset.num_nodes
 
 
 def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path):
-    dataset = build_dataset("cmap", tmp_path)
-    metres = dataset.distances.clone()
-    transforms = fit_transforms(dataset, TRAIN_IDX, fingerprint={})
-    transforms.apply(dataset)
+    dataset, transforms = build_scaled_dataset("cmap", tmp_path)
+    home = dataset.users.home_node[3]
+    metres = dataset.locations.distance_m[home].unsqueeze(-1)
     item = dataset[3]
 
-    scaled = transforms.groups["distances"].apply(metres[3])
-    torch.testing.assert_close(item.distances_m, metres[3])
+    scaled = transforms.groups["distances"].apply(metres)
+    torch.testing.assert_close(item.distances_m, metres)
     torch.testing.assert_close(item.distances, scaled)
 
 
@@ -273,17 +302,18 @@ def test_an_item_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path
 def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attributes, tmp_path):
     dataset = build_dataset(survey_name, tmp_path)
     schema = dataset.schema
+    item = dataset[0]
 
     assert schema.user_attributes == user_attributes
     assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential"]
     assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2]
-    assert schema.locations.width == dataset.location_x.shape[1]
-    assert schema.edges.width == dataset.edge_attr.shape[1]
-    assert schema.user_nodes.width == dataset.user_node_features.shape[-1]
-    assert schema.user_attributes.numeric.width == dataset.user_attributes.shape[-1]
-    assert schema.user_attributes.categorical.width == dataset.user_attributes_cat.shape[-1]
-    assert schema.distances.width == dataset.distances.shape[-1]
-    assert schema.targets.width == dataset.visit_labels.shape[-1]
+    assert schema.locations.width == dataset.locations.x.shape[1]
+    assert schema.edges.width == dataset.locations.edge_attr.shape[1]
+    assert schema.user_nodes.width == item.x_user_node.shape[-1]
+    assert schema.user_attributes.numeric.width == dataset.users.attributes.shape[-1]
+    assert schema.user_attributes.categorical.width == dataset.users.attributes_cat.shape[-1]
+    assert schema.distances.width == item.distances.shape[-1]
+    assert schema.targets.width == item.y.shape[-1]
 
 
 def test_without_demographics_use_demographics_leaves_the_inputs_unchanged(tmp_path):
@@ -296,7 +326,7 @@ def test_without_demographics_use_demographics_leaves_the_inputs_unchanged(tmp_p
 
 
 def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
-    dataset = build_dataset("cmap", tmp_path)
+    dataset, _ = build_scaled_dataset("cmap", tmp_path)
     users = build_users(build_zones()["loc_id"].tolist()).sort("user_id")
     employment = users["employment_status"].to_list()
     categorical = dataset.schema.user_attributes.categorical
@@ -304,7 +334,6 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     categories = categorical.columns[employment_idx].categories
     expected_codes = torch.tensor([0 if status is None else categories.index(status) + 1 for status in employment])
 
-    fit_transforms(dataset, TRAIN_IDX, fingerprint={}).apply(dataset)
     batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=len(dataset))))
     mlp = read_config(get_project_root(), verbose=False).models.mlp
     plain = build_feature_encoder(Variant(mlp, use_demographics=False), dataset, HOME_PE)
@@ -322,64 +351,75 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
         "has_transit_pass",
         "income_quartile",
     ]
-    assert dataset.user_attributes.shape[-1] == DEMOGRAPHICS_SCHEMA.numeric.width
-    torch.testing.assert_close(dataset.user_attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
+    assert dataset.users.attributes.shape[-1] == DEMOGRAPHICS_SCHEMA.numeric.width
+    torch.testing.assert_close(dataset.users.attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
     torch.testing.assert_close(batch.user_attr_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
     assert encoder.out_dim == plain.out_dim + DEMOGRAPHICS_SCHEMA.numeric.width + embedded_width
     assert encoder(batch).shape == (batch.num_nodes, encoder.out_dim)
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises():
-    tensors = build_survey_tensors("cmap")
+    locations, users, schema = build_survey_tensors("cmap")
     extra_column = ColumnSpec("extra", ColumnKind.BINARY)
-    distances = TensorSchema("distances", (*tensors.schema.distances.columns, extra_column))
-    schema = dataclasses.replace(tensors.schema, distances=distances)
+    distances = TensorSchema("distances", (*schema.distances.columns, extra_column))
+    wider_schema = dataclasses.replace(schema, distances=distances)
 
     with pytest.raises(ValueError, match=r"`distances` tensors have \(numeric, categorical\) widths \(1, 0\)"):
-        dataclasses.replace(tensors, schema=schema)
+        check_tensors(locations, users, wider_schema)
 
 
 def test_a_home_node_outside_the_graph_raises():
-    tensors = build_survey_tensors("cmap")
-    home_nodes = tensors.home_nodes.clone()
-    home_nodes[0] = tensors.node_ids.height
+    locations, users, schema = build_survey_tensors("cmap")
+    home_node = users.home_node.clone()
+    home_node[0] = locations.num_nodes
 
     with pytest.raises(ValueError, match="1 users have a home node outside the graph"):
-        dataclasses.replace(tensors, home_nodes=home_nodes)
+        check_tensors(locations, dataclasses.replace(users, home_node=home_node), schema)
 
 
 def test_a_graph_without_an_edge_index_raises():
-    tensors = build_survey_tensors("cmap")
-    graph = tensors.pyg_graph.clone()
-    del graph.edge_index
+    locations, _, _ = build_survey_tensors("cmap")
+    graph = pyg.data.Data(x=locations.x, edge_attr=locations.edge_attr)
 
     with pytest.raises(ValueError, match="no edge index"):
-        dataclasses.replace(tensors, pyg_graph=graph)
+        build_location_tensors(graph, locations.distance_m, locations.node_ids)
 
 
 def test_tensors_that_disagree_on_the_number_of_users_raise():
-    tensors = build_survey_tensors("cmap")
-    one_user_short = tensors.user_attributes_cat[1:]
+    locations, users, schema = build_survey_tensors("cmap")
+    one_user_short = users.attributes_cat[1:]
 
-    with pytest.raises(ValueError, match=f"User count mismatch: .*user_attributes_cat {NUM_USERS - 1}"):
-        dataclasses.replace(tensors, user_attributes_cat=one_user_short)
-
-
-def test_reading_an_uncached_dataset_without_a_builder_raises(tmp_path):
-    with pytest.raises(ValueError, match="no `build` was given"):
-        VisitDataset(str(tmp_path))
+    with pytest.raises(ValueError, match=f"User count mismatch: .*attributes_cat {NUM_USERS - 1}"):
+        check_tensors(locations, dataclasses.replace(users, attributes_cat=one_user_short), schema)
 
 
-def test_prepare_splits_loads_the_dataset_only_while_a_cache_is_stale(tmp_path, compose_config, monkeypatch):
+def test_the_cached_tensors_read_back_unchanged(tmp_path):
+    locations, users, schema = cache_survey_tensors("cmap", tmp_path)
+    read_locations, read_users, read_schema = read_tensors(tmp_path)
+
+    torch.testing.assert_close(read_locations.x, locations.x, rtol=0, atol=0)
+    torch.testing.assert_close(read_locations.distance_m, locations.distance_m, rtol=0, atol=0)
+    torch.testing.assert_close(read_users.visited, users.visited, rtol=0, atol=0)
+    torch.testing.assert_close(read_users.home_node, users.home_node, rtol=0, atol=0)
+    assert read_users.user_ids.equals(users.user_ids)
+    assert read_schema == schema
+
+
+def test_reading_an_uncached_tensor_cache_raises(tmp_path):
+    with pytest.raises(FileNotFoundError, match="is missing"):
+        read_tensors(tmp_path)
+
+
+def test_prepare_splits_loads_the_tensors_only_while_a_cache_is_stale(tmp_path, compose_config, monkeypatch):
     cfg = compose_config("data=cmap")
-    build_dataset("cmap", tmp_path / cfg.data.paths.tensors)
+    cache_survey_tensors("cmap", tmp_path / cfg.data.paths.tensors)
     loads = []
 
-    def counting_load_dataset(*args, **kwargs):
+    def counting_load_tensors(*args, **kwargs):
         loads.append(args)
-        return load_dataset(*args, **kwargs)
+        return load_tensors(*args, **kwargs)
 
-    monkeypatch.setattr(datamodule, "load_dataset", counting_load_dataset)
+    monkeypatch.setattr(datamodule, "load_tensors", counting_load_tensors)
     split = HouseholdSplit(val_size=0.2, test_size=0.2)
 
     datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
@@ -391,12 +431,12 @@ def test_prepare_splits_loads_the_dataset_only_while_a_cache_is_stale(tmp_path, 
 def test_prepare_splits_rebuilds_a_cache_missing_a_tensor_file(tmp_path, compose_config, monkeypatch):
     cfg = compose_config("data=cmap")
     root = tmp_path / cfg.data.paths.tensors
-    dataset = build_dataset("cmap", root)
-    monkeypatch.setattr(datamodule, "load_dataset", lambda *args, **kwargs: build_dataset("cmap", root))
+    cache_survey_tensors("cmap", root)
+    monkeypatch.setattr(datamodule, "load_tensors", lambda *args, **kwargs: cache_survey_tensors("cmap", root))
     split = HouseholdSplit(val_size=0.2, test_size=0.2)
     datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
 
-    missing = Path(dataset.processed_dir) / ProcessedFile.USER_ATTRIBUTES_CAT
+    missing = root / USERS_DIR / UserFile.ATTRIBUTES_CAT
     missing.unlink()
     datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
 

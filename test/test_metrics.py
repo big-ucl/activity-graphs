@@ -5,7 +5,7 @@ import torch
 import torch_geometric as pyg
 from encoders import make_encoder
 
-from activitygraphs.datasets.dataset import compute_home_hop_distance
+from activitygraphs.datasets.locations import compute_hop_distance
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
@@ -18,13 +18,13 @@ PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 
 
 class TestHomeHopDistance:
     def test_path_graph(self):
-        hop = compute_home_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
+        hop = compute_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
         assert hop[0].tolist() == [0, 1, 2, 3, 4]
         assert hop[2].tolist() == [2, 1, 0, 1, 2]
 
     def test_disconnected_is_inf(self):
         edge_index = torch.tensor([[0], [1]])  # only 0-1 connected; node 2 isolated
-        hop = compute_home_hop_distance(edge_index, num_nodes=3)
+        hop = compute_hop_distance(edge_index, num_nodes=3)
         assert hop[0, 2] == float("inf")
 
 
@@ -389,7 +389,7 @@ class TestPerUserColumnsInModule:
         return graph
 
     def test_per_user_columns_populated_at_test_end(self, monkeypatch):
-        hop = compute_home_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
+        hop = compute_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
         encoder = make_encoder(1, 1, 2)
         model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
         module = RankingModule(

@@ -83,7 +83,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
 
     train_dataset = datamodule.train_dataset
 
-    home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
+    home_hop_distance = torch.as_tensor(train_dataset.locations.hop_distance, dtype=torch.float)
     is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
     loss = build_loss(cfg.train.loss, home_hop_distance, is_home_idx, cfg.train.max_recall_k)
 

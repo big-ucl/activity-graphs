@@ -32,7 +32,7 @@ def _():
     from activitygraphs.graph import load_graph
     from activitygraphs.datasets.dataset import VisitDataset
     from activitygraphs.surveys.thats import THATSSurvey, read_tables
-    from activitygraphs.tensors import build_tensors
+    from activitygraphs.tensors import build_tensors, save_tensors
 
     return (
         VisitDataset,
@@ -40,6 +40,7 @@ def _():
         build_tensors,
         load_graph,
         read_tables,
+        save_tensors,
     )
 
 
@@ -58,6 +59,7 @@ def _(
     build_tensors,
     load_graph,
     read_tables,
+    save_tensors,
 ):
     survey = THATSSurvey.load(cfg.data, project_root).with_filter("zone")
     tables = read_tables(cfg.data, project_root)
@@ -68,7 +70,8 @@ def _(
 
     dataset_path = project_root / cfg.data.paths.tensors
 
-    dataset = VisitDataset(str(dataset_path), lambda: survey_tensors)
+    save_tensors(dataset_path, *survey_tensors)
+    dataset = VisitDataset.from_tensors(*survey_tensors, transforms=None)
     return dataset, edges_gdf, nodes_gdf, survey, tables
 
 
@@ -204,10 +207,9 @@ def _(dataset):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    The PyG Dataset is composed of three objects:
-    1. graph (PyG) - simple city2graph call on nodes_gdf & edges_gdf
-    2. user spatial features (Tensor, dim N_users x N_nodes x 1) - is_home indicator, to be concatenated with NG.x in dataset
-    3. user features (Tensor, dim N_users x N_features) - socio-demographics about users, can be concatenated with each row of NG.x
+    The PyG Dataset is composed of two objects:
+    1. `dataset.locations` - the graph from a simple city2graph call on nodes_gdf & edges_gdf, with the RWPE and the node-to-node distances
+    2. `dataset.users` - the home node (Tensor, dim N_users), from which each item builds the is_home indicator, to be concatenated with NG.x in dataset, the visit labels (Tensor, dim N_users x N_nodes), and the user features (Tensor, dim N_users x N_features) - socio-demographics about users, can be concatenated with each row of NG.x
     """)
     return
 

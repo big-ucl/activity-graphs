@@ -82,7 +82,7 @@ def same_users_both_ways(cfg, tmp_path) -> tuple[UserBatch, UserGridBatch, Visit
 @pytest.mark.parametrize("neg_sampler", ["uniform", "hard"])
 def test_the_grid_bpr_loss_matches_the_graph_bpr_loss(cfg, tmp_path, neg_sampler):
     graph_batch, grid_batch, split = same_users_both_ways(cfg, tmp_path)
-    hop_distance = torch.as_tensor(split.home_hop_distance)
+    hop_distance = torch.as_tensor(split.locations.hop_distance)
     is_home_idx = split.schema.user_nodes.index_of("is_home")
     loss_cfg = bpr_config(neg_sampler)
     graph_loss_fn = build_loss(loss_cfg, hop_distance, is_home_idx, MAX_RECALL_K).loss_fn
@@ -106,7 +106,7 @@ def test_the_bias_alone_reproduces_visit_frequency(cfg, tmp_path):
     graph_datamodule = make_datamodule(cfg, tmp_path)
     grid_datamodule = UserGridDataModule(graph_datamodule)
     train_dataset = graph_datamodule.train_dataset
-    home_hop_distance = train_dataset.home_hop_distance
+    home_hop_distance = train_dataset.locations.hop_distance
     is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
 
     baseline = VisitFrequencyBaseline(train_dataset.num_nodes, is_home_idx).fit(graph_datamodule.train_dataloader())

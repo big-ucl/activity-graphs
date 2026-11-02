@@ -33,7 +33,8 @@ def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
     datamodule.setup()
     test_dataset = datamodule.test_dataset
     user_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
-    distances = test_dataset.distances_m[user_idx].squeeze(-1)
+    home_nodes = test_dataset.users.home_node[user_idx]
+    distances = test_dataset.locations.distance_m[home_nodes]
 
     return pl.DataFrame(
         {"user_id": user_idx.tolist(), "distances": distances.tolist()},
@@ -144,7 +145,7 @@ def evaluate_baseline(
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
-    home_hop_distance = datamodule.train_dataset.home_hop_distance
+    home_hop_distance = datamodule.train_dataset.locations.hop_distance
     is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
 
     baseline_module = RankingModule(
@@ -287,7 +288,7 @@ def train_and_evaluate_model(
     datamodule.setup()
 
     lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
-    home_hop_distance = datamodule.train_dataset.home_hop_distance
+    home_hop_distance = datamodule.train_dataset.locations.hop_distance
     is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
 
     lit_model = RankingModule(

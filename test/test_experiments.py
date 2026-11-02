@@ -76,8 +76,7 @@ def make_dataset(num_location_features: int = 5, num_attributes: int = 3, num_ed
     return types.SimpleNamespace(
         schema=schema,
         num_classes=2,
-        edge_attr=torch.zeros(8, num_edge_features),
-        num_rwpe_features=2,
+        locations=types.SimpleNamespace(edge_attr=torch.zeros(8, num_edge_features), num_rwpe_features=2),
     )
 
 
@@ -182,7 +181,7 @@ class TestBuildModel:
 
     def test_home_pe_adds_its_bins(self, cfg):
         dataset = make_dataset()
-        dataset.home_hop_distance = torch.zeros(4, 4)
+        dataset.locations.hop_distance = torch.zeros(4, 4)
         plain = build_feature_encoder(Variant(cfg.models.mlp), dataset, HOME_PE)  # type: ignore[arg-type]
         with_pe = build_feature_encoder(Variant(cfg.models.mlp, use_home_pe=True), dataset, HOME_PE)  # type: ignore[arg-type]
 

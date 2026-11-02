@@ -64,9 +64,10 @@ def _(edges_gdf, nodes_gdf):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.datasets.dataset import load_dataset
+    from activitygraphs.datasets.dataset import VisitDataset
+    from activitygraphs.tensors import load_tensors
 
-    tensors = load_dataset(cfg, project_root)
+    tensors = VisitDataset.from_tensors(*load_tensors(cfg, project_root), transforms=None)
     return (tensors,)
 
 
@@ -103,8 +104,7 @@ def _(cfg):
 @app.cell
 def _(datamodule):
     full_dataset = datamodule.train_dataset
-    is_home_idx = full_dataset.schema.user_nodes.index_of("is_home")
-    full_dataset.user_node_features[:, :, is_home_idx].argmax(dim=1).shape
+    full_dataset.users.home_node.shape
     return
 
 

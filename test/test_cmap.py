@@ -414,12 +414,12 @@ class TestUserNodeTensors:
         assert build_home_nodes(cmap_survey).tolist() == [0, 0, 1]
 
     def test_visit_labels_over_every_purpose_mark_both_trip_ends(self, cmap_survey):
-        labels = build_visit_labels(cmap_survey, list(Purpose)).squeeze(-1)
+        labels = build_visit_labels(cmap_survey, list(Purpose))
 
         assert labels.tolist() == [[1, 1, 0]] * 3
 
     def test_visit_labels_keep_only_the_given_purposes(self, cmap_survey):
-        labels = build_visit_labels(cmap_survey, [Purpose.WORK_MAIN]).squeeze(-1)
+        labels = build_visit_labels(cmap_survey, [Purpose.WORK_MAIN])
 
         assert labels.tolist() == [[0, 1, 0]] * 3
 

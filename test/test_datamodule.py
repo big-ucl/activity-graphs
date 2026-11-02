@@ -23,8 +23,8 @@ def datamodule(load_or_skip) -> VisitDataModule:
 
 class TestVisitDataModule:
     def test_split_covers_all_users(self, datamodule):
-        # Subsets share the full (unsliced) visit_labels tensor, so shape[0] is the total count.
-        total = datamodule.train_dataset.visit_labels.shape[0]
+        # Subsets share the full (unsliced) visited tensor, so shape[0] is the total count.
+        total = datamodule.train_dataset.users.visited.shape[0]
         n_split = len(datamodule.train_dataset) + len(datamodule.val_dataset) + len(datamodule.test_dataset)
         assert n_split == total
 

@@ -7,23 +7,13 @@ import lightning as L
 import polars as pl
 import torch
 import torch_geometric as pyg
-import torch_geometric.transforms as T
 
 from activitygraphs.config import Config
-from activitygraphs.datasets.dataset import Fingerprint, VisitDataset, load_dataset, read_fingerprint
+from activitygraphs.datasets.dataset import VisitDataset, read_fingerprint
 from activitygraphs.datasets.splits import SplitStrategy, load_split_indices, read_split_indices
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
+from activitygraphs.tensors import Fingerprint, load_tensors, read_tensors
 from activitygraphs.utils import get_project_root
-
-RWPE_WALK_LENGTH = 20
-
-
-def positional_encodings() -> T.Compose:
-    """Return the pre-transform adding the positional encodings to the shared graph, as a separate node features."""
-    return T.Compose([
-        T.AddRandomWalkPE(walk_length=RWPE_WALK_LENGTH),
-        # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
-    ])
 
 
 def split_cache_paths(cfg: Config, split: SplitStrategy, seed: int, project_root: Path) -> tuple[Path, Path]:
@@ -38,22 +28,23 @@ def prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: P
     project_root = get_project_root(project_root)
     splits_cache, transforms_cache = split_cache_paths(cfg, split, seed, project_root)
 
-    dataset = None
+    tensors = None
     try:
         fingerprint = read_fingerprint(cfg, project_root)
     except FileNotFoundError:
-        dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
+        tensors = load_tensors(cfg, project_root)
         fingerprint = read_fingerprint(cfg, project_root)
 
     if _caches_match(splits_cache, transforms_cache, fingerprint):
         return
 
-    if dataset is None:
-        dataset = load_dataset(cfg, project_root=project_root, pre_transform=positional_encodings())
+    if tensors is None:
+        tensors = load_tensors(cfg, project_root)
 
-    train_idx, _, _ = load_split_indices(dataset, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
+    locations, users, schema = tensors
+    train_idx, _, _ = load_split_indices(users, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
 
-    transforms = fit_transforms(dataset, train_idx, fingerprint=fingerprint)
+    transforms = fit_transforms(locations, users, schema, train_idx, fingerprint=fingerprint)
     transforms.save(transforms_cache)
 
 
@@ -79,14 +70,14 @@ def read_splits(
         Tuple ``(train_dataset, val_dataset, test_dataset, transforms)``.
 
     Raises:
-        FileNotFoundError: The split indices or transforms are not cached.
-        ValueError: The dataset tensors are not cached, the cached split indices or transforms were built for another
-            dataset, or the cached transforms follow another transform policy.
+        FileNotFoundError: The dataset tensors, split indices or transforms are not cached.
+        ValueError: The cached split indices or transforms were built for another dataset, or the cached transforms
+            follow another transform policy.
     """
     project_root = get_project_root(project_root)
     splits_cache, transforms_cache = split_cache_paths(cfg, split, seed, project_root)
 
-    dataset = VisitDataset(root=str(project_root / cfg.data.paths.tensors), pre_transform=positional_encodings())
+    locations, users, schema = read_tensors(project_root / cfg.data.paths.tensors)
     fingerprint = read_fingerprint(cfg, project_root)
 
     train_idx, val_idx, test_idx = read_split_indices(splits_cache, fingerprint)
@@ -97,7 +88,7 @@ def read_splits(
             f"Cached transforms at `{transforms_cache.name}` do not match the dataset fingerprint or the transform policy."
         )
 
-    transforms.apply(dataset)
+    dataset = VisitDataset.from_tensors(locations, users, schema, transforms)
 
     return (
         cast(VisitDataset, dataset[train_idx]),
@@ -109,7 +100,7 @@ def read_splits(
 
 def _compute_home_coverage(train_dataset: VisitDataset, test_dataset: VisitDataset) -> pl.DataFrame:
     """Compute each _test_ user's survey ``user_id``, home node and whether any training user also has a home there."""
-    home_node_idx = train_dataset.home_nodes
+    home_node_idx = train_dataset.users.home_node
 
     train_idx = torch.as_tensor(list(train_dataset.indices()), dtype=torch.long)
     test_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
@@ -117,7 +108,7 @@ def _compute_home_coverage(train_dataset: VisitDataset, test_dataset: VisitDatas
 
     return pl.DataFrame({
         "user_id": test_idx.tolist(),
-        "survey_user_id": train_dataset.user_ids["user_id"].gather(test_idx.numpy()),
+        "survey_user_id": train_dataset.users.user_ids["user_id"].gather(test_idx.numpy()),
         "home_node": home_node_idx[test_idx].tolist(),
     }).with_columns(home_seen_in_train=pl.col("home_node").is_in(train_home_idx))
 

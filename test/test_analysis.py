@@ -89,16 +89,23 @@ def make_per_user() -> pl.DataFrame:
 
 
 @dataclass
+class FakeUsers:
+    """Minimal stand-in exposing only what ``home_zone_summary`` reads off ``Users``."""
+
+    home_node: torch.Tensor
+
+
+@dataclass
 class FakeDataset:
     """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``VisitDataset``."""
 
-    home_nodes: torch.Tensor
+    users: FakeUsers
     num_nodes: int
 
 
 def make_dataset(home_nodes: list[int], n_nodes: int = 3) -> FakeDataset:
     """Dataset whose user ``i`` lives at node ``home_nodes[i]``."""
-    return FakeDataset(home_nodes=torch.tensor(home_nodes), num_nodes=n_nodes)
+    return FakeDataset(users=FakeUsers(home_node=torch.tensor(home_nodes)), num_nodes=n_nodes)
 
 
 def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:

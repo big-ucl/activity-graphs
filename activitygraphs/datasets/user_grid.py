@@ -30,16 +30,18 @@ class UserGridDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         """Return the per-user tensors of the ``index``-th user of the split."""
         user = self.user_idx[index]
-        split = self.split
+        locations = self.split.locations
+        users = self.split.users
+        home = users.home_node[user]
 
         return {
             "user_id": user,
-            "home_node": split.home_nodes[user],
-            "y": split.visit_labels[user].squeeze(-1),
-            "distances": split.distances[user].squeeze(-1).float(),
-            "distances_m": split.distances_m[user].squeeze(-1),
-            "user_attr": split.user_attributes[user],
-            "user_attr_cat": split.user_attributes_cat[user],
+            "home_node": home,
+            "y": users.visited[user],
+            "distances": locations.distance[home].float(),
+            "distances_m": locations.distance_m[home],
+            "user_attr": users.attributes[user],
+            "user_attr_cat": users.attributes_cat[user],
         }
 
 
