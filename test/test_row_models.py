@@ -1,4 +1,4 @@
-"""Unit tests for the per-user grid data path and ``TwoTowerModule``, on the synthetic CMAP survey."""
+"""Unit tests for the per-user row data path and the models scored from it, on the synthetic CMAP survey."""
 
 import lightning as L
 import polars as pl
@@ -7,12 +7,11 @@ import torch
 from test_input_snapshot import cache_survey_tensors
 
 from activitygraphs.analysis import with_ranking_metrics
-from activitygraphs.config import LossConfig
-from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, SurveyDataModule, UserBatch
+from activitygraphs.datasets import HouseholdSplit, SurveyDataModule, UserBatch
 from activitygraphs.ml.baselines import VisitFrequencyBaseline
 from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss, GridBCELoss, build_grid_loss, build_loss
-from activitygraphs.ml.two_tower import NodeBias, TwoTowerModule
+from activitygraphs.ml.losses import BCELoss
+from activitygraphs.ml.popularity import popularity_logit
 from activitygraphs.tensors import tensors_path
 
 SPLIT = HouseholdSplit(val_size=0.2, test_size=0.2)
@@ -22,8 +21,22 @@ MAX_RECALL_K = 50
 RECALL_KS = (1, 3, 5)
 
 
-def bpr_config(neg_sampler: str) -> LossConfig:
-    return LossConfig(type="bpr", n_pairs=16, neg_sampler=neg_sampler, is_near_threshold=1)
+class FixedNodeScores(torch.nn.Module):
+    """Scores every node of every user with the same fixed logits.
+
+    Args:
+        logits: Logit of each node, ``[num_nodes]``.
+    """
+
+    logits: torch.Tensor
+
+    def __init__(self, logits: torch.Tensor):
+        super().__init__()
+        self.register_buffer("logits", logits)
+
+    def forward(self, batch: UserBatch) -> torch.Tensor:
+        """Return the logits of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
+        return self.logits.expand(batch.num_users, -1)
 
 
 @pytest.fixture
@@ -49,42 +62,15 @@ def test_the_loader_yields_whole_rows_of_users(cfg, tmp_path):
     assert batch.num_users == min(BATCH_SIZE, len(datamodule.test_dataset))
 
 
-def same_users_both_ways(cfg, tmp_path) -> tuple[GraphBatch, UserBatch, Locations]:
-    datamodule = make_datamodule(cfg, tmp_path)
-    train_dataset = datamodule.train_dataset
-    locations = datamodule.locations
-    rows = next(iter(torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset))))
-    batch = UserBatch.join(rows, locations)
-
-    return GraphBatch.expand(batch, locations), batch, locations
-
-
-@pytest.mark.parametrize("neg_sampler", ["uniform", "hard"])
-def test_the_grid_bpr_loss_matches_the_graph_bpr_loss(cfg, tmp_path, neg_sampler):
-    graph_batch, grid_batch, locations = same_users_both_ways(cfg, tmp_path)
-    loss_cfg = bpr_config(neg_sampler)
-    graph_loss_fn = build_loss(loss_cfg, locations.hop_distance, 0, MAX_RECALL_K).loss_fn
-    grid_loss_fn = build_grid_loss(loss_cfg, MAX_RECALL_K).loss_fn
-
-    scores = torch.randn(grid_batch.num_users, grid_batch.num_nodes, generator=torch.Generator().manual_seed(0))
-    flat_scores = scores.reshape(-1, 1)
-
-    graph_loss = graph_loss_fn(flat_scores, graph_batch, torch.Generator().manual_seed(1))
-    grid_loss = grid_loss_fn(scores, grid_batch, torch.Generator().manual_seed(1))
-
-    torch.testing.assert_close(grid_loss, graph_loss)
-
-
-def per_user_avg_recall(module: RankingModule | TwoTowerModule) -> pl.DataFrame:
+def per_user_avg_recall(module: RankingModule) -> pl.DataFrame:
     per_user = pl.DataFrame(module.per_user_columns)
     return with_ranking_metrics(per_user, MAX_RECALL_K).select("user_id", "avg_recall").sort("user_id")
 
 
-def test_the_bias_alone_reproduces_visit_frequency(cfg, tmp_path):
+def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tmp_path):
     datamodule = make_datamodule(cfg, tmp_path)
     train_users = datamodule.train_dataset.users
     locations = datamodule.locations
-    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
 
     baseline = VisitFrequencyBaseline(locations.num_nodes).fit(train_users)
     graph_module = RankingModule(
@@ -93,20 +79,19 @@ def test_the_bias_alone_reproduces_visit_frequency(cfg, tmp_path):
         locations=locations,
         lr=0.0,
         loss=BCELoss,
-        is_home_idx=is_home_idx,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
 
-    bias = NodeBias.fit(train_users)
-    grid_module = TwoTowerModule(
-        model=bias,
+    popularity = popularity_logit(train_users.visited, train_users.home_node)
+    grid_module = RankingModule(
+        model=FixedNodeScores(popularity),
+        feature_encoder=None,
         locations=locations,
         lr=0.0,
-        loss=GridBCELoss,
+        loss=BCELoss,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
-        weight_decay=0.0,
     )
 
     trainer = L.Trainer(logger=False, enable_progress_bar=False, enable_checkpointing=False, accelerator="cpu")

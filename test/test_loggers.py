@@ -46,7 +46,6 @@ def fit_and_test(num_epochs: int) -> list[dict]:
         locations=locations,
         lr=1e-2,
         loss=BCELoss,
-        is_home_idx=0,
         max_recall_k=3,
         recall_ks=[1, 3],
     )

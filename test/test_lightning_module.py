@@ -5,11 +5,11 @@ import types
 import lightning as L
 import pytest
 import torch
-import torch_geometric as pyg
 from encoders import make_encoder
 from graphs import chain_edge_index, make_locations
 from torchmetrics import Metric
 
+from activitygraphs.datasets import GraphBatch, Locations, UserBatch, UserRows
 from activitygraphs.ml.features import HomeAnchoredPE, RandomWalkPE
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import BCELoss
@@ -41,50 +41,56 @@ HOME_NODE = 0
 
 
 def chain_hop_distance(num_nodes: int = 8) -> torch.Tensor:
-    """Hop distances of the chain graphs ``make_batch`` builds: nodes i and j are ``|i - j|`` hops apart."""
+    """Hop distances of the chain graph of ``chain_locations``: nodes i and j are ``|i - j|`` hops apart."""
     idx = torch.arange(num_nodes)
     return (idx[:, None] - idx[None, :]).abs().float()
 
 
-def chain_locations(num_nodes: int = 8):
-    """The chain graph of ``make_batch`` as ``Locations``, read by the module for the hop distances."""
-    x = torch.zeros(num_nodes, NUM_LOCATION_FEATURES)
-    return make_locations(x, chain_edge_index(num_nodes))
+def chain_locations(num_nodes: int = 8) -> Locations:
+    """Return the chain graph ``0 - 1 - ... - (num_nodes - 1)``, with fixed random features, edge features and RWPE."""
+    rng = torch.Generator().manual_seed(0)
+    edge_index = chain_edge_index(num_nodes)
+    x = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=rng)
+    edge_attr = torch.rand(edge_index.size(1), NUM_EDGE_FEATURES, generator=rng)
+    random_walk_pe = torch.rand(num_nodes, NUM_RWPE_FEATURES, generator=rng)
+
+    return make_locations(x, edge_index, edge_attr, random_walk_pe)
 
 
-def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
-    """Return a synthetic PyG Batch with binary node labels, user attributes, and unique user ids.
+def make_batch(
+    num_graphs: int = 2,
+    num_nodes: int = 8,
+    seed: int = 0,
+    start_user_id: int = 0,
+    home_nodes: list[int] | None = None,
+) -> UserBatch:
+    """Return ``num_graphs`` users of the graph of ``chain_locations``, with random visits and attributes.
 
-    Each graph carries ``user_attr`` so the encoder exercises the user attribute path;
-    feature width is ``NUM_NODE_FEATURES + NUM_DEMO_FEATURES`` (== IN_CHANNELS). Node ``HOME_NODE``
-    of every graph is that user's home and is labelled visited, as it always is in the real data.
+    The attribute width is ``NUM_DEMO_FEATURES``, so the encoder exercises the user attribute path. The users have the
+    dataset indices ``start_user_id`` onwards. Each user's home is ``home_nodes``, by default ``HOME_NODE`` for every
+    user, and is labelled visited, as it always is in the real data.
     """
     rng = torch.Generator().manual_seed(seed)
-    graphs = []
-    for g in range(num_graphs):
-        x_loc = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=rng)
-        x_user_node = torch.zeros(num_nodes, NUM_USER_NODE_FEATURES)
-        y = torch.randint(0, 2, (num_nodes, 1), generator=rng).float()
-        x_user_node[HOME_NODE, IS_HOME_IDX] = 1.0
-        y[HOME_NODE] = 1.0
-        # simple chain edges
-        src = torch.arange(num_nodes - 1)
-        dst = torch.arange(1, num_nodes)
-        edge_index = torch.stack([torch.cat([src, dst]), torch.cat([dst, src])], dim=0)
-        edge_attr = torch.rand(edge_index.size(1), NUM_EDGE_FEATURES, generator=rng)
-        data = pyg.data.Data(
-            x_loc=x_loc,
-            x_user_node=x_user_node,
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            y=y,
-            user_id=torch.tensor([start_user_id + g], dtype=torch.long),
-        )
-        data.user_attr = torch.rand(1, NUM_DEMO_FEATURES, generator=rng)
-        data.user_attr_cat = torch.zeros(1, 0, dtype=torch.long)
-        data.random_walk_pe = torch.rand(num_nodes, NUM_RWPE_FEATURES, generator=rng)
-        graphs.append(data)
-    return pyg.data.Batch.from_data_list(graphs)
+    if home_nodes is None:
+        home_nodes = [HOME_NODE] * num_graphs
+
+    home_node = torch.tensor(home_nodes)
+    visited = torch.randint(0, 2, (num_graphs, num_nodes), generator=rng).float()
+    visited[torch.arange(num_graphs), home_node] = 1.0
+    rows = UserRows(
+        user_idx=torch.arange(start_user_id, start_user_id + num_graphs),
+        home_node=home_node,
+        visited=visited,
+        attributes=torch.rand(num_graphs, NUM_DEMO_FEATURES, generator=rng),
+        attributes_cat=torch.zeros(num_graphs, 0, dtype=torch.long),
+    )
+
+    return UserBatch.join(rows, chain_locations(num_nodes))
+
+
+def expand(batch: UserBatch) -> GraphBatch:
+    """Return one copy of the graph of ``chain_locations`` per user of ``batch``, as the module builds it."""
+    return GraphBatch.expand(batch, chain_locations(batch.num_nodes))
 
 
 def make_default_encoder():
@@ -104,24 +110,21 @@ def make_module(
         loss=BCELoss,
         lr_scheduler=lr_scheduler,
         store_score_vectors=store_score_vectors,
-        is_home_idx=IS_HOME_IDX,
         locations=chain_locations(),
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
 
 
-def force_positive_per_graph(batch: pyg.data.Batch) -> None:
-    """Set a non-home node of each graph positive so ranking metrics survive the home exclusion."""
-    for i in range(batch.num_graphs):
-        idx = (batch.batch == i).nonzero(as_tuple=True)[0][HOME_NODE + 1]
-        batch.y[idx] = 1.0
+def force_positive_per_graph(batch: UserBatch) -> None:
+    """Set a non-home node of each user positive so ranking metrics survive the home exclusion."""
+    batch.visited[:, HOME_NODE + 1] = 1.0
 
 
-def scored_nodes(batch: pyg.data.Batch, graph: int) -> torch.Tensor:
-    """Row indices of the nodes of one graph that the ranking metrics score."""
-    rows = (batch.batch == graph).nonzero(as_tuple=True)[0]
-    return rows[rows != rows[HOME_NODE]]
+def scored_nodes(batch: UserBatch, user: int) -> torch.Tensor:
+    """Nodes of one user that the ranking metrics score."""
+    nodes = torch.arange(batch.num_nodes)
+    return nodes[nodes != batch.home_node[user]]
 
 
 def metric_value(value):
@@ -196,10 +199,10 @@ class TestValidationStep:
             out = module.compute_logits(batch)
 
         per_user = []
-        for i in range(batch.num_graphs):
+        for i in range(batch.num_users):
             mask = scored_nodes(batch, i)
-            scores = out[mask].squeeze().sigmoid()
-            labels = batch.y[mask].squeeze()
+            scores = out[i, mask].sigmoid()
+            labels = batch.visited[i, mask]
             recall_curve = [recall_at_k(scores, labels, k) for k in range(1, MAX_RECALL_K + 1)]
             per_user.append({
                 f"val_avg_recall@{MAX_RECALL_K}": sum(recall_curve) / MAX_RECALL_K,
@@ -276,7 +279,6 @@ class TestUseDemographics:
             feature_encoder=encoder,
             lr=1e-3,
             loss=BCELoss,
-            is_home_idx=IS_HOME_IDX,
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -285,16 +287,16 @@ class TestUseDemographics:
     def test_demographics_are_concatenated_by_default(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
 
-        assert self._module(use_demographics=True).compute_logits(batch).shape == (16, 1)
+        assert self._module(use_demographics=True).compute_logits(batch).shape == (2, 8)
 
     def test_a_model_built_without_demographics_runs_without_them(self):
         """Without the runtime flag this raises a shape mismatch, which is what makes the ablation runnable."""
         batch = make_batch(num_graphs=2, num_nodes=8)
 
-        assert self._module(use_demographics=False).compute_logits(batch).shape == (16, 1)
+        assert self._module(use_demographics=False).compute_logits(batch).shape == (2, 8)
 
     def test_the_two_arms_see_different_features(self):
-        batch = make_batch(num_graphs=2, num_nodes=8)
+        batch = expand(make_batch(num_graphs=2, num_nodes=8))
 
         with_demo = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES)(batch)
         without_demo = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0)(batch)
@@ -315,14 +317,13 @@ class TestRwpe:
             feature_encoder=encoder,
             lr=1e-3,
             loss=BCELoss,
-            is_home_idx=IS_HOME_IDX,
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
         )
 
     def test_appends_the_batch_normed_encoding_after_x(self):
-        batch = make_batch(num_graphs=2, num_nodes=8)
+        batch = expand(make_batch(num_graphs=2, num_nodes=8))
         rwpe = RandomWalkPE(NUM_RWPE_FEATURES)
         x = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0, rwpe)(batch)
 
@@ -332,7 +333,7 @@ class TestRwpe:
         torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node, normed], dim=-1))
 
     def test_left_out_without_its_source(self):
-        batch = make_batch(num_graphs=2, num_nodes=8)
+        batch = expand(make_batch(num_graphs=2, num_nodes=8))
         x = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, 0)(batch)
 
         torch.testing.assert_close(x, torch.cat([batch.x_loc, batch.x_user_node], dim=-1))
@@ -352,7 +353,6 @@ class TestTrainRanking:
             feature_encoder=make_default_encoder(),
             lr=1e-3,
             loss=BCELoss,
-            is_home_idx=IS_HOME_IDX,
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -419,11 +419,11 @@ class TestScoreVectors:
         module, batch = self._tested(monkeypatch, store_score_vectors=True)
 
         for row, user_id in enumerate(module.per_user_columns["user_id"]):
-            graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
-            keep = torch.ones(batch.num_nodes // batch.num_graphs, dtype=torch.bool)
+            user = (batch.user_idx == user_id).nonzero(as_tuple=True)[0].item()
+            keep = torch.ones(batch.num_nodes, dtype=torch.bool)
             keep[HOME_NODE] = False
 
-            target = batch.y.squeeze(-1)[batch.batch == graph][keep]
+            target = batch.visited[user][keep]
             scores = torch.tensor(module.per_user_score_vectors[row])[keep]
             r = int(target.sum())
 
@@ -453,8 +453,8 @@ class TestPositiveHops:
         columns = module.per_user_columns
 
         for row, user_id in enumerate(columns["user_id"]):
-            graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
-            positives = batch.y.squeeze(-1)[batch.batch == graph].nonzero(as_tuple=True)[0].tolist()
+            user = (batch.user_idx == user_id).nonzero(as_tuple=True)[0].item()
+            positives = batch.visited[user].nonzero(as_tuple=True)[0].tolist()
             expected = [float(node) for node in positives if node != HOME_NODE]
 
             assert columns["pos_hops"][row] == expected
@@ -487,8 +487,8 @@ class TestHomeExclusion:
         module, batch, _ = self._tested(monkeypatch)
 
         for row, user_id in enumerate(module.per_user_columns["user_id"]):
-            graph = (batch.user_id == user_id).nonzero(as_tuple=True)[0].item()
-            full = int(batch.y.squeeze(-1)[batch.batch == graph].sum())
+            user = (batch.user_idx == user_id).nonzero(as_tuple=True)[0].item()
+            full = int(batch.visited[user].sum())
 
             assert module.per_user_columns["n_pos_home_incl"][row] == full
             assert module.per_user_columns["n_pos"][row] == full - 1
@@ -500,13 +500,13 @@ class TestHomeExclusion:
         capture_logs(module, monkeypatch)
 
         # Each user visits their home and exactly one other node.
-        is_home = batch.x_user_node[:, IS_HOME_IDX] > 0.0
-        batch.y = is_home.clone().float().unsqueeze(-1)
-        for i in range(batch.num_graphs):
-            batch.y[scored_nodes(batch, i)[0]] = 1.0
+        is_home = batch.is_home
+        batch.visited.copy_(is_home.float())
+        for i in range(batch.num_users):
+            batch.visited[i, scored_nodes(batch, i)[0]] = 1.0
 
         # Home on top, and the one visited node ranked below every unvisited one.
-        home_only = -batch.y.clone()
+        home_only = -batch.visited.clone()
         home_only[is_home] = 10.0
         monkeypatch.setattr(module, "compute_logits", lambda _batch: home_only)
 
@@ -522,7 +522,7 @@ class TestHomeExclusion:
         force_positive_per_graph(batch)
 
         # Strip user 1 back to a home-only realised set: their home stays positive, nothing else.
-        batch.y[scored_nodes(batch, 1)] = 0.0
+        batch.visited[1, scored_nodes(batch, 1)] = 0.0
 
         logged = capture_logs(module, monkeypatch)
         with torch.no_grad():
@@ -566,7 +566,7 @@ class TestRankingView:
 
     def test_the_ranking_view_covers_the_scored_candidates_only(self, monkeypatch):
         step, batch = self._step(monkeypatch)
-        n_scored = batch.num_nodes - batch.num_graphs
+        n_scored = batch.num_users * batch.num_nodes - batch.num_users
 
         for values in (step.ranking.logits, step.ranking.probs, step.ranking.target, step.ranking.users):
             assert values.shape == (n_scored,)
@@ -575,16 +575,16 @@ class TestRankingView:
         """The loss, the BCE diagnostics and the sanity metric read these on purpose."""
         step, batch = self._step(monkeypatch)
 
-        for values in (step.probs, step.target, step.users):
-            assert values.shape == (batch.num_nodes,)
+        for values in (step.logits, step.probs, step.target, step.users):
+            assert values.shape == (batch.num_users * batch.num_nodes,)
 
     def test_no_home_node_survives_into_the_ranking_view(self, monkeypatch):
         step, batch = self._step(monkeypatch)
-        home_rows = (batch.x_user_node[:, IS_HOME_IDX] > 0.0).nonzero(as_tuple=True)[0]
+        home_rows = batch.is_home.reshape(-1).nonzero(as_tuple=True)[0]
 
         assert not step.ranking.scored[home_rows].any()
         # Every user still has candidates left, so none of them drops out of the view.
-        assert set(step.ranking.users.tolist()) == set(batch.user_id.tolist())
+        assert set(step.ranking.users.tolist()) == set(batch.user_idx.tolist())
 
 
 class TestConfigureOptimizers:
@@ -625,7 +625,6 @@ class TestCalibration:
             feature_encoder=make_default_encoder(),
             lr=1e-3,
             loss=BCELoss,
-            is_home_idx=IS_HOME_IDX,
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -689,23 +688,16 @@ class TestCheckpoint:
 
 def make_home_batch(
     num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, home_nodes: list[int] | None = None
-) -> tuple[pyg.data.Batch, torch.Tensor, int]:
-    """A batch with a clean one-hot ``is_home`` column plus a chain-graph hop-distance matrix.
+) -> tuple[UserBatch, torch.Tensor, int]:
+    """A batch of users at ``home_nodes`` plus a chain-graph hop-distance matrix.
 
-    Column 0 of ``x_user_node`` is ``is_home`` (one node per graph set to 1). Because the graphs
+    Column 0 of ``x_user_node`` in the graph copies is ``is_home`` (one node per graph set to 1). Because the graphs
     are chains 0-1-...-(N-1), hop distance between nodes i and j is ``|i - j|``, so ``home_hop_distance``
     is the ``[N, N]`` absolute-difference matrix. ``home_nodes`` picks each graph's home node index.
     """
-    batch = make_batch(num_graphs=num_graphs, num_nodes=num_nodes, seed=seed)
-    is_home_idx = 0
-    batch.x_user_node[:, is_home_idx] = 0.0
-    if home_nodes is None:
-        home_nodes = [0] * num_graphs
-    for i, h in enumerate(home_nodes):
-        graph_rows = (batch.batch == i).nonzero(as_tuple=True)[0]
-        batch.x_user_node[graph_rows[h], is_home_idx] = 1.0
+    batch = make_batch(num_graphs=num_graphs, num_nodes=num_nodes, seed=seed, home_nodes=home_nodes)
 
-    return batch, chain_hop_distance(num_nodes), is_home_idx
+    return batch, chain_hop_distance(num_nodes), IS_HOME_IDX
 
 
 def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bins: int = HOME_PE_BINS) -> RankingModule:
@@ -719,7 +711,6 @@ def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bin
         lr=1e-3,
         loss=BCELoss,
         locations=chain_locations(home_hop_distance.shape[0]),
-        is_home_idx=is_home_idx,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
@@ -728,7 +719,8 @@ def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bin
 class TestHomePositionalEncoding:
     def test_shape_and_home_is_peak(self):
         """Encoding is [num_nodes, n_bins]; the home node (hop 0) peaks in the first RBF bin at value 1."""
-        batch, hhd, is_home_idx = make_home_batch()
+        users, hhd, is_home_idx = make_home_batch()
+        batch = expand(users)
         home_pe = HomeAnchoredPE(hhd, is_home_idx, 8, HOME_PE_MAX_HOPS)
         pe = home_pe(batch)
 
@@ -739,10 +731,10 @@ class TestHomePositionalEncoding:
 
     def test_matches_rbf_formula(self):
         """Explicit RBF over hop-to-home reproduces the encoding exactly (single graph, home = node 0)."""
-        batch, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
+        users, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
         n_bins = 8
         home_pe = HomeAnchoredPE(hhd, is_home_idx, n_bins, HOME_PE_MAX_HOPS)
-        pe = home_pe(batch)
+        pe = home_pe(expand(users))
 
         hops = hhd[0].clamp(max=40)  # row 0 == distances from the home node
         centers = torch.linspace(0, 40, n_bins)
@@ -751,23 +743,25 @@ class TestHomePositionalEncoding:
 
     def test_hops_are_capped_at_max_hops(self):
         """Every node at or beyond ``max_hops`` gets the encoding of ``max_hops`` itself."""
-        batch, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
+        users, hhd, is_home_idx = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
         home_pe = HomeAnchoredPE(hhd, is_home_idx, 4, 3)
-        pe = home_pe(batch)
+        pe = home_pe(expand(users))
 
         torch.testing.assert_close(pe[3:], pe[3].expand(5, 4))
         assert not torch.allclose(pe[2], pe[3])
 
     def test_varies_per_user(self):
         """Different home anchors give different encodings for the same node positions (the whole point)."""
-        batch, hhd, is_home_idx = make_home_batch(home_nodes=[0, 7])
+        users, hhd, is_home_idx = make_home_batch(home_nodes=[0, 7])
+        batch = expand(users)
         home_pe = HomeAnchoredPE(hhd, is_home_idx, 8, HOME_PE_MAX_HOPS)
         pe = home_pe(batch)
         assert not torch.allclose(pe[batch.batch == 0], pe[batch.batch == 1])
 
     def test_the_encoder_appends_bins_columns(self):
         """The encoder widens by exactly ``bins`` when the home PE is a source, and ``out_dim`` follows."""
-        batch, hhd, is_home_idx = make_home_batch()
+        users, hhd, is_home_idx = make_home_batch()
+        batch = expand(users)
         home_pe = HomeAnchoredPE(hhd, is_home_idx, HOME_PE_BINS, HOME_PE_MAX_HOPS)
         base = make_default_encoder()
         with_pe = make_encoder(NUM_LOCATION_FEATURES, NUM_USER_NODE_FEATURES, NUM_DEMO_FEATURES, home_pe)

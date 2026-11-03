@@ -81,9 +81,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     datamodule.prepare_data()
     datamodule.setup()
 
-    home_hop_distance = datamodule.locations.hop_distance
-    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
-    loss = build_loss(cfg.train.loss, home_hop_distance, is_home_idx, cfg.train.max_recall_k)
+    loss = build_loss(cfg.train.loss, cfg.train.max_recall_k)
 
     overfitting = cfg.trainer.overfit_batches > 0
     models = dict(cfg.models)

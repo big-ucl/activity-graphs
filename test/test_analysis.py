@@ -6,9 +6,8 @@ import numpy as np
 import polars as pl
 import pytest
 import torch
-import torch_geometric as pyg
 from encoders import make_encoder
-from graphs import chain_edge_index, make_locations
+from graphs import chain_edge_index, join_users, make_locations, make_users
 from torchmetrics import Metric
 
 from activitygraphs.analysis import (
@@ -847,19 +846,12 @@ class TestWithRankingMetrics:
 
 
 def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) -> tuple[dict, pl.DataFrame]:
-    """Test an untrained module on graphs with coarse scores, returning its logged metrics and per-user rows."""
+    """Test an untrained module on users with coarse scores, returning its logged metrics and per-user rows."""
     generator = torch.Generator().manual_seed(0)
-    graphs = []
-    for user in range(num_graphs):
-        x_loc = torch.rand(num_nodes, 1, generator=generator)
-        x_user_node = torch.zeros(num_nodes, 1)
-        x_user_node[0, 0] = 1.0
-        y = (torch.rand(num_nodes, 1, generator=generator) < 0.2).float()
-        y[0] = 1.0
-        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
-        graph.user_attr = torch.zeros(1, 1)
-        graph.user_id = torch.tensor([user])
-        graphs.append(graph)
+    visited = (torch.rand(num_graphs, num_nodes, generator=generator) < 0.2).float()
+    visited[:, 0] = 1.0
+    home_node = torch.zeros(num_graphs, dtype=torch.long)
+    users = make_users(visited, home_node, attributes=torch.zeros(num_graphs, 1))
 
     x = torch.zeros(num_nodes, 1)
     locations = make_locations(x, chain_edge_index(num_nodes))
@@ -870,11 +862,10 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
         locations=locations,
         lr=1e-3,
         loss=BCELoss,
-        is_home_idx=0,
         max_recall_k=budget,
         recall_ks=[1, 5],
     )
-    coarse_logits = (torch.rand(num_graphs * num_nodes, 1, generator=generator) * 4).round()
+    coarse_logits = (torch.rand(num_graphs, num_nodes, generator=generator) * 4).round()
     module.compute_logits = lambda _batch: coarse_logits
 
     logged: dict = {}
@@ -882,7 +873,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
     module.log_dict = lambda mapping, **kw: logged.update(mapping)
 
     with torch.no_grad():
-        module.test_step(pyg.data.Batch.from_data_list(graphs), 0)
+        module.test_step(join_users(locations, users), 0)
     module.on_test_epoch_end()
 
     per_user = pl.DataFrame(module.per_user_columns).with_columns(stage=pl.lit(PER_USER_STAGE))

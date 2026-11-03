@@ -2,9 +2,8 @@
 
 import pytest
 import torch
-import torch_geometric as pyg
 from encoders import make_encoder
-from graphs import make_locations
+from graphs import join_users, make_locations, make_users
 
 from activitygraphs.datasets.locations import compute_hop_distance
 from activitygraphs.ml.lightning_module import RankingModule
@@ -374,20 +373,13 @@ class TestPerUserRanking:
 
 
 class TestPerUserColumnsInModule:
-    def _make_graph(self):
-        """One 5-node graph; node 0 is home, positives at hop 0 and hop 3."""
-        x_user_node = torch.zeros(5, 1)
-        x_user_node[0, 0] = 1.0  # is_home at column 0, node 0
-        y = torch.zeros(5, 1)
-        y[0] = 1.0
-        y[3] = 1.0
-        graph = pyg.data.Data(
-            x_loc=torch.rand(5, 1), x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y
-        )
-        graph.user_attr = torch.zeros(1, 2)
-        graph.user_attr_cat = torch.zeros(1, 0, dtype=torch.long)
-        graph.user_id = torch.tensor([0])
-        return graph
+    def _make_users(self):
+        """One user of the 5-node path; node 0 is home, positives at hop 0 and hop 3."""
+        visited = torch.zeros(1, 5)
+        visited[0, 0] = 1.0
+        visited[0, 3] = 1.0
+        home_node = torch.tensor([0])
+        return make_users(visited, home_node, attributes=torch.zeros(1, 2))
 
     def test_per_user_columns_populated_at_test_end(self, monkeypatch):
         locations = make_locations(torch.zeros(5, 1), PATH_EDGE_INDEX)
@@ -399,7 +391,6 @@ class TestPerUserColumnsInModule:
             locations=locations,
             lr=1e-3,
             loss=BCELoss,
-            is_home_idx=0,
             max_recall_k=BUDGET,
             recall_ks=KS,
         )
@@ -407,7 +398,7 @@ class TestPerUserColumnsInModule:
         monkeypatch.setattr(module, "log", lambda key, val, **kw: None)
         monkeypatch.setattr(module, "log_dict", lambda mapping, **kw: None)
 
-        batch = pyg.data.Batch.from_data_list([self._make_graph()])
+        batch = join_users(locations, self._make_users())
         module.eval()
         with torch.no_grad():
             module.test_step(batch, 0)

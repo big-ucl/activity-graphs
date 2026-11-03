@@ -143,8 +143,6 @@ def evaluate_baseline(
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
-    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
-
     baseline_module = RankingModule(
         model=baseline,
         feature_encoder=None,
@@ -153,7 +151,6 @@ def evaluate_baseline(
         loss=loss,
         max_recall_k=cfg.train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
-        is_home_idx=is_home_idx,
         calibration_bins=cfg.train.calibration_bins,
         store_score_vectors=cfg.train.save_score_vectors,
     )
@@ -285,7 +282,6 @@ def train_and_evaluate_model(
     datamodule.setup()
 
     lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
-    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
 
     lit_model = RankingModule(
         model=model,
@@ -297,7 +293,6 @@ def train_and_evaluate_model(
         recall_ks=list(cfg.analysis.recall_curve_ks),
         weight_decay=variant.model.weight_decay,
         lr_scheduler=lr_scheduler,
-        is_home_idx=is_home_idx,
         calibration_bins=train.calibration_bins,
         compile_model=train.compile,
         store_score_vectors=train.save_score_vectors,

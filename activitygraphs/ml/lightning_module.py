@@ -12,10 +12,10 @@ from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
-from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows, is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.ml.baselines.common import Baseline
-from activitygraphs.ml.features import FeatureEncoder, compute_home_hops
+from activitygraphs.ml.features import FeatureEncoder
 from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
@@ -26,7 +26,11 @@ CALIBRATION_BINS = 15
 class RankingTensors:
     """Set of tensors read by the ranking metrics (R-Precision, Recall@K, etc).
 
-    The tensors are restricted to the non-excluded/scored candidates (i.e. home node is excluded).
+    The tensors are restricted to the non-excluded/scored candidates (i.e. home node is excluded). Each tensor is flat,
+    one entry per scored (user, node) pair, except ``scored``.
+
+    Attributes:
+        scored: Mask of the scored (user, node) pairs, flattened from ``[num_users, num_nodes]``.
     """
 
     logits: Tensor
@@ -41,7 +45,8 @@ class EvaluationTensors:
     """Set of tensors computed during the validation and testing steps.
 
     Metrics are computed using these tensors. All nodes are included in the tensors, whereas the ``ranking`` field
-    contains the set of tensors with the home node excluded (used for the ranking metrics).
+    contains the set of tensors with the home node excluded (used for the ranking metrics). Every tensor but ``loss``
+    and ``bce`` is flattened from ``[num_users, num_nodes]``, user by user.
     """
 
     logits: Tensor
@@ -54,20 +59,24 @@ class EvaluationTensors:
 
 
 class RankingModule(L.LightningModule):
-    """LightningModule wrapping any GNN model for node-level binary prediction on activity graphs.
+    """LightningModule wrapping any model for node-level binary prediction on activity graphs.
 
-    Handles BCE or BPR training and per-epoch ranking metrics.
-    Models must implement ``forward(x, edge_index, edge_attr, batch) -> logits``, except a ``Baseline``, which is
-    given the batch itself. Each batch of user rows is joined with the location graph and expanded to one copy of the
-    graph per user (on device). Every step receives that ``GraphBatch``.
+    Handles BCE or BPR training and per-epoch ranking metrics. Each batch of user rows is joined with the location
+    graph on device, and every step receives the resulting ``UserBatch``. The logits read by the losses/the metrics are
+    of shape ``[num_users, num_nodes]``.
+
+    A model takes one of three forms:
+      1. A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_users * num_nodes, 1]`` logits, given a
+         ``feature_encoder``. It runs on one copy of the location graph per user of the batch.
+      2. A ``Baseline``, given the copies of the graph themselves, with no ``feature_encoder``.
+      3. Any other module with no ``feature_encoder``, mapping the ``UserBatch`` to ``[num_users, num_nodes]`` logits.
 
     Args:
-        model: Any ``nn.Module`` with the GNN forward signature, or a ``Baseline``.
-        feature_encoder: Builds the input ``x`` to the ``model`` from the batch. None for a ``Baseline``.
+        model: The model, in one of the three forms above.
+        feature_encoder: Builds the input ``x`` to a GNN ``model`` from the copies of the graph. None otherwise.
         locations: The location graph joined with each batch of users.
         lr: Initial learning rate for AdamW.
         loss: ``Loss`` instance.
-        is_home_idx: Column index of ``is_home`` in ``batch.x_user_node``.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
         recall_ks: Rank cutoffs of the logged ``recall@k``.
         weight_decay: AdamW weight decay.
@@ -80,7 +89,7 @@ class RankingModule(L.LightningModule):
             computation becomes expensive.
 
     Raises:
-        ValueError: ``feature_encoder`` is None for a model that is not a ``Baseline``, or given for a ``Baseline``.
+        ValueError: ``feature_encoder`` is given for a ``Baseline``.
     """
 
     model: torch.nn.Module
@@ -92,7 +101,6 @@ class RankingModule(L.LightningModule):
         locations: Locations,
         lr: float,
         loss: Loss,
-        is_home_idx: int,
         max_recall_k: int,
         recall_ks: Sequence[int],
         weight_decay: float = 1e-4,
@@ -103,8 +111,8 @@ class RankingModule(L.LightningModule):
         log_train_ranking: bool = True,
     ):
         super().__init__()
-        if (feature_encoder is None) != isinstance(model, Baseline):
-            raise ValueError("Every model but a `Baseline` takes a `FeatureEncoder`, and a `Baseline` takes none.")
+        if feature_encoder is not None and isinstance(model, Baseline):
+            raise ValueError("A `Baseline` takes no `FeatureEncoder`.")
 
         self.save_hyperparameters(ignore=["model", "feature_encoder", "locations", "loss"])
         self.model = model
@@ -130,8 +138,6 @@ class RankingModule(L.LightningModule):
 
         self.val_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
         self.test_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
-
-        self.is_home_idx = is_home_idx
 
         # Metrics: per-user test scores retained for paired model comparison, in column format
         # (one entry per test user), populated by `on_test_epoch_end`.
@@ -165,23 +171,23 @@ class RankingModule(L.LightningModule):
         """Return the wrapped model's logits for a batch's features."""
         return self.model(x, edge_index, edge_attr, batch)
 
-    def on_after_batch_transfer(self, batch: UserRows, dataloader_idx: int) -> GraphBatch:
-        """Expand the on-device ``UserRows`` batch with the locations graph to return a ``GraphBatch``.
+    def on_after_batch_transfer(self, batch: UserRows, dataloader_idx: int) -> UserBatch:
+        """Join the on-device ``UserRows`` batch with the locations graph to return a ``UserBatch``.
 
         Lightning hook: triggers after batch has been loaded to device, subsequent steps and callbacks thus receive a
-        ``GraphBatch`` as input.
+        ``UserBatch`` as input.
         """
         self.locations = self.locations.to(batch.home_node.device)
-        users = UserBatch.join(batch, self.locations)
 
-        return GraphBatch.expand(users, self.locations)
+        return UserBatch.join(batch, self.locations)
 
-    def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: UserBatch, batch_idx: int) -> torch.Tensor:
         """Compute and log the training loss for one batch."""
         out = self.compute_logits(batch)
         loss = self.loss.loss_fn(out, batch)
 
-        self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=batch.num_nodes)
+        num_pairs = batch.num_users * batch.num_nodes
+        self.log("train_loss", loss, on_step=False, on_epoch=True, batch_size=num_pairs)
 
         if self.train_avg_recall is not None:
             ranking_tensors = self._compute_ranking_tensors(batch, out)
@@ -194,36 +200,39 @@ class RankingModule(L.LightningModule):
                 self.train_avg_recall,
                 on_step=False,
                 on_epoch=True,
-                batch_size=batch.num_nodes,
+                batch_size=num_pairs,
             )
 
         return loss
 
-    def _compute_ranking_tensors(self, batch: GraphBatch, logits: Tensor) -> RankingTensors:
-        scored_mask = ~is_home_node_mask(batch.x_user_node, self.is_home_idx)
-        flat_logits = logits.squeeze(-1)
+    def _compute_ranking_tensors(self, batch: UserBatch, logits: Tensor) -> RankingTensors:
+        scored_mask = ~batch.is_home.reshape(-1)
+        flat_logits = logits.reshape(-1)
+        target = batch.visited.reshape(-1).long()
+        users = _flat_user_idx(batch)
 
         return RankingTensors(
             logits=flat_logits[scored_mask],
             probs=flat_logits.sigmoid()[scored_mask],
-            target=batch.y.squeeze(-1).long()[scored_mask],
-            users=batch.user_id[batch.batch][scored_mask],
+            target=target[scored_mask],
+            users=users[scored_mask],
             scored=scored_mask,
         )
 
-    def _common_evaluation_step(self, batch: GraphBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
+    def _common_evaluation_step(self, batch: UserBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
         out = self.compute_logits(batch)
 
         generator = torch.Generator(device=out.device).manual_seed(42)
         loss = self.loss.loss_fn(out, batch, generator)
-        bce = F.binary_cross_entropy_with_logits(out, batch.y.float())
-        probs = out.squeeze(-1).sigmoid()
-        target = batch.y.squeeze(-1)
-        users = batch.user_id[batch.batch]
+        bce = F.binary_cross_entropy_with_logits(out, batch.visited.float())
+        flat_logits = out.reshape(-1)
+        probs = flat_logits.sigmoid()
+        target = batch.visited.reshape(-1)
+        users = _flat_user_idx(batch)
         ranking_tensors = self._compute_ranking_tensors(batch, out)
 
         eval_tensors = EvaluationTensors(
-            logits=out,
+            logits=flat_logits,
             loss=loss,
             bce=bce,
             probs=probs,
@@ -233,7 +242,8 @@ class RankingModule(L.LightningModule):
         )
 
         # Log loss metrics
-        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": batch.num_nodes}
+        num_pairs = batch.num_users * batch.num_nodes
+        log_loss_kwargs = {"on_step": False, "on_epoch": True, "batch_size": num_pairs}
         if self.loss.name != "bce":
             self.log(f"{step_prefix}_{self.loss.name}", eval_tensors.loss, **log_loss_kwargs)
 
@@ -252,7 +262,7 @@ class RankingModule(L.LightningModule):
 
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
-    def validation_step(self, batch: GraphBatch, batch_idx: int) -> None:
+    def validation_step(self, batch: UserBatch, batch_idx: int) -> None:
         """Update the validation ranking, BCE and calibration metrics for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "val")
         ranking_tensors = eval_tensors.ranking
@@ -271,13 +281,12 @@ class RankingModule(L.LightningModule):
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
 
-    def test_step(self, batch: GraphBatch, batch_idx: int) -> None:
+    def test_step(self, batch: UserBatch, batch_idx: int) -> None:
         """Update the test metrics and collect per-user rankings and score vectors for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "test")
         ranking = eval_tensors.ranking
 
-        hop_distance = self.locations.hop_distance
-        node_home_hops = compute_home_hops(batch, hop_distance, self.is_home_idx)
+        node_home_hops = batch.home_hops.reshape(-1)
 
         # Ranking metrics
         self.test_metrics.update(  # Feed sigmoid (see validation step)
@@ -324,10 +333,21 @@ class RankingModule(L.LightningModule):
 
         return optimizer
 
-    def compute_logits(self, batch: GraphBatch) -> torch.Tensor:
-        """Model logits for a batch."""
-        if self.encoder is None:
+    def compute_logits(self, batch: UserBatch) -> torch.Tensor:
+        """Return the model logits of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
+        if self.encoder is None and not isinstance(self.model, Baseline):
             return self.model(batch)
 
-        x = self.encoder(batch)
-        return self(x, batch.edge_index, batch.edge_attr, batch.batch)
+        graphs = GraphBatch.expand(batch, self.locations)
+        if self.encoder is None:
+            logits = self.model(graphs)
+        else:
+            x = self.encoder(graphs)
+            logits = self(x, graphs.edge_index, graphs.edge_attr, graphs.batch)
+
+        return logits.reshape(batch.num_users, batch.num_nodes)
+
+
+def _flat_user_idx(batch: UserBatch) -> Tensor:
+    """Return the dataset index of the user of each (user, node) pair, flattened from ``[num_users, num_nodes]``."""
+    return batch.user_idx[:, None].expand(-1, batch.num_nodes).reshape(-1)

@@ -47,7 +47,7 @@ class GlobalBaseline(Baseline):
 
     def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return the global visit-rate logit for every node, shape ``(num_nodes, 1)``."""
-        return self.logit.expand(1, batch.num_nodes).to(batch.batch.device)
+        return self.logit.expand(batch.num_nodes, 1).to(batch.batch.device)
 
 
 class VisitFrequencyBaseline(Baseline):
