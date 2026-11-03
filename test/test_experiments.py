@@ -16,7 +16,7 @@ from omegaconf import OmegaConf
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, HomePEConfig, read_config
 from activitygraphs.experiments import runners
-from activitygraphs.experiments.architectures import BUILDERS, architecture_builder
+from activitygraphs.experiments.architectures import BUILDERS, lookup_architecture
 from activitygraphs.experiments.results import (
     create_output_dir,
     drop_empty_columns,
@@ -27,10 +27,17 @@ from activitygraphs.experiments.results import (
 from activitygraphs.experiments.runners import run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
 from activitygraphs.experiments.training import WandBParams, build_callbacks
-from activitygraphs.experiments.variants import Variant, build_feature_encoder, build_model, variant_hyperparams
+from activitygraphs.experiments.variants import (
+    Variant,
+    build_feature_encoder,
+    build_model,
+    build_scorer,
+    variant_hyperparams,
+)
 from activitygraphs.main import EXPERIMENTS
 from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
+from activitygraphs.ml.scorers import GraphScorer, NodeScorer
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
@@ -48,7 +55,7 @@ def cfg() -> Config:
 
 
 def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
-    """An ExperimentSetup with no datamodule; ``build_feature_encoder`` and ``build_model`` are stubbed by the tests, so no data is needed."""
+    """An ExperimentSetup with no datamodule; ``build_scorer`` is stubbed by the tests, so no data is needed."""
     return ExperimentSetup(
         cfg=cfg,
         run_dir=None,
@@ -77,11 +84,11 @@ def make_schema(num_location_features: int = 5, num_attributes: int = 3, num_edg
 
 def make_locations() -> types.SimpleNamespace:
     """Stand-in exposing only what ``build_feature_encoder`` reads off ``Locations``."""
-    return types.SimpleNamespace(num_rwpe_features=2, hop_distance=torch.zeros(4, 4))
+    return types.SimpleNamespace(num_rwpe_features=2)
 
 
 def record_training(monkeypatch, frame=None) -> list[dict]:
-    """Replace model building and training with stubs, returning the list each training call is recorded into."""
+    """Replace scorer building and training with stubs, returning the list each training call is recorded into."""
     calls: list[dict] = []
 
     def train_and_evaluate_model(**kwargs):
@@ -90,12 +97,7 @@ def record_training(monkeypatch, frame=None) -> list[dict]:
         return frame(name) if frame else pl.DataFrame({"name": [name], "stage": ["test"]})
 
     monkeypatch.setattr(runners, "train_and_evaluate_model", train_and_evaluate_model)
-    monkeypatch.setattr(
-        runners,
-        "build_feature_encoder",
-        lambda variant, locations, schema, home_pe_cfg: types.SimpleNamespace(out_dim=1),
-    )
-    monkeypatch.setattr(runners, "build_model", lambda variant, schema, in_channels: torch.nn.Linear(1, 1))
+    monkeypatch.setattr(runners, "build_scorer", lambda variant, locations, schema, home_pe_cfg: torch.nn.Linear(1, 1))
 
     return calls
 
@@ -210,6 +212,12 @@ class TestBuildModel:
         assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.convs.norms)  # type: ignore[union-attr]
         assert all(isinstance(norm, torch.nn.Identity) for norm in plain.convs.norms)  # type: ignore[union-attr]
 
+    @pytest.mark.parametrize(("key", "scorer_type"), [("mlp", NodeScorer), ("gat", GraphScorer), ("gps", GraphScorer)])
+    def test_each_architecture_runs_in_its_scorer(self, cfg, key, scorer_type):
+        scorer = build_scorer(Variant(cfg.models[key]), make_locations(), make_schema(), HOME_PE)  # type: ignore[arg-type]
+
+        assert isinstance(scorer, scorer_type)
+
     def test_unknown_gat_norm_raises(self, cfg):
         with pytest.raises(KeyError, match="normalisation"):
             build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_schema(), IN_CHANNELS)
@@ -258,7 +266,7 @@ class TestArchitectureRegistry:
         model = with_overrides(cfg.models.mlp, {"architecture": "unknown"})
 
         with pytest.raises(KeyError, match="unknown"):
-            architecture_builder(model)
+            lookup_architecture(model)
 
 
 class TestRunVariants:
@@ -282,11 +290,11 @@ class TestRunVariants:
         record_training(monkeypatch)
         built: list[torch.nn.Module] = []
 
-        def build(variant, dataset, in_channels):
+        def build(variant, locations, schema, home_pe_cfg):
             built.append(torch.nn.Linear(1, 1))
             return built[-1]
 
-        monkeypatch.setattr(runners, "build_model", build)
+        monkeypatch.setattr(runners, "build_scorer", build)
         run_variants(make_setup(cfg, [1, 2]), [Variant(cfg.models.mlp)])
 
         assert len(built) == 2

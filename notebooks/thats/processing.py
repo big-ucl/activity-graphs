@@ -90,21 +90,21 @@ def _():
 
 @app.cell
 def _(locations, torch, users):
-    from activitygraphs.datasets import GraphBatch, UserBatch, UserDataset
+    from activitygraphs.datasets import UserBatch, UserDataset
 
     _first_users = UserDataset(users, list(range(64)))
     _rows = next(iter(torch.utils.data.DataLoader(_first_users, batch_size=64)))
-    batch = GraphBatch.expand(UserBatch.join(_rows, locations), locations)
+    batch = UserBatch.join(_rows, locations)
     batch
     return (batch,)
 
 
 @app.cell
 def _(batch, torch):
-    y = batch.y
+    y = batch.visited.reshape(-1, 1)
 
-    logits = torch.rand_like(batch.y)
-    batch_index = batch.batch
+    logits = torch.rand_like(y)
+    batch_index = torch.arange(batch.num_users).repeat_interleave(batch.num_nodes)
 
     neg_restrict = None
     return batch_index, logits, neg_restrict, y

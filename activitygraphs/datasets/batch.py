@@ -1,4 +1,4 @@
-"""Typed views over a PyG batch: the rows of a batch of users, and the copies of the location graph built from them."""
+"""Typed batches: the rows of a batch of users, their join with the location graph, and the graph copies of a GNN."""
 
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -8,11 +8,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from activitygraphs.datasets.locations import Locations
-
-
-def is_home_node_mask(x: torch.Tensor, is_home_idx: int) -> torch.Tensor:
-    """Boolean mask over the rows of ``x``, ``True`` at each user's own home node."""
-    return (x[..., is_home_idx] > 0.0).bool()
 
 
 class UserRows(NamedTuple):
@@ -99,82 +94,41 @@ class UserBatch:
 
 @dataclass(frozen=True)
 class GraphBatch:
-    """Batch of users with one copy of the location graph per user of a batch, joined into one disjoint graph.
+    """The model input of a batch of users on one copy of the location graph per user, joined into one disjoint graph.
 
     Attributes:
-        x_loc: Location features of each node, ``[num_nodes, num_location_features]``.
-        x_user_node: Per-user node features of each node, ``[num_nodes, num_user_node_features]``.
-        edge_index: Edge list, ``[2, num_edges]``.
-        edge_attr: Edge features, ``[num_edges, num_edge_features]``.
-        y: Visit labels, ``[num_nodes, 1]``.
-        batch: Graph index of each node, ``[num_nodes]``.
-        ptr: Offset of each graph's first node, ``[num_graphs + 1]``.
-        user_attr: Per-user numeric attributes, ``[num_graphs, num_numeric_attributes]``.
-        user_attr_cat: Per-user codes of the categorical attributes, int64, ``[num_graphs, num_categorical_attributes]``.
-        user_id: Dataset index of each user, ``[num_graphs]``.
-        distances: Distance from the user's home to each node, as fed to the model, ``[num_nodes, 1]``.
-        distances_m: Distance in metres from the user's home to each node, ``[num_nodes, 1]``.
-        random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, walk_length]``.
+        x: Model input of each node of each copy, ``[num_users * num_nodes, num_features]``.
+        edge_index: Edge list, ``[2, num_users * num_edges]``.
+        edge_attr: Edge features, ``[num_users * num_edges, num_edge_features]``.
+        batch: Copy (user) of each node, ``[num_users * num_nodes]``.
     """
 
-    x_loc: Tensor
-    x_user_node: Tensor
+    x: Tensor
     edge_index: Tensor
     edge_attr: Tensor
-    y: Tensor
     batch: Tensor
-    ptr: Tensor
-    user_attr: Tensor
-    user_attr_cat: Tensor
-    user_id: Tensor
-    distances: Tensor
-    distances_m: Tensor
-    random_walk_pe: Tensor
 
     @classmethod
-    def expand(cls, batch: UserBatch, locations: Locations) -> "GraphBatch":
-        """Return a corresponding ``GraphBatch`` from a ``batch`` of users and ``locations``.
+    def expand(cls, x: Tensor, locations: Locations) -> "GraphBatch":
+        """Return the copies of the graph of ``locations`` that carry the model input ``x``, one copy per user.
 
         Args:
-            locations: The location graph, on the device of ``batch``.
-            batch: The users, one copy each.
+            x: Model input of every node for every user, ``[num_users, num_nodes, num_features]``.
+            locations: The location graph, on the device of ``x``.
 
         Returns:
             The copies of the graph. Copy ``i`` holds the nodes ``i * N`` to ``(i + 1) * N - 1``, in node order, with
             ``N`` the number of nodes.
         """
-        num_users = batch.num_users
-        num_nodes = locations.num_nodes
-        device = batch.home_node.device
+        num_users, num_nodes, num_features = x.shape
 
-        users = torch.arange(num_users, device=device)
+        users = torch.arange(num_users, device=x.device)
         offsets = users * num_nodes
         edge_index = (locations.edge_index.unsqueeze(1) + offsets.view(1, -1, 1)).reshape(2, -1)
-        x_user_node = batch.is_home.to(locations.x.dtype).reshape(-1, 1)
-        ptr = torch.arange(num_users + 1, device=device) * num_nodes
 
         return cls(
-            x_loc=locations.x.repeat(num_users, 1),
-            x_user_node=x_user_node,
+            x=x.reshape(-1, num_features),
             edge_index=edge_index,
             edge_attr=locations.edge_attr.repeat(num_users, 1),
-            y=batch.visited.reshape(-1, 1),
             batch=users.repeat_interleave(num_nodes),
-            ptr=ptr,
-            user_attr=batch.attributes,
-            user_attr_cat=batch.attributes_cat,
-            user_id=batch.user_idx,
-            distances=batch.home_distance.reshape(-1, 1),
-            distances_m=batch.home_distance_m.reshape(-1, 1),
-            random_walk_pe=locations.random_walk_pe.repeat(num_users, 1),
         )
-
-    @property
-    def num_nodes(self) -> int:
-        """Number of nodes over all graphs in the batch."""
-        return self.x_loc.shape[0]
-
-    @property
-    def num_graphs(self) -> int:
-        """Number of graphs (users) in the batch."""
-        return self.user_id.shape[0]

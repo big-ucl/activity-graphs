@@ -52,12 +52,11 @@ def measure_baselines(
     train_users = datamodule.train_dataset.users
     val_users = datamodule.val_dataset.users
     distance_m = datamodule.locations.distance_m
-    is_home_idx_user_node = datamodule.schema.user_nodes.index_of("is_home")
 
     gravity = GravityBaseline().fit(train_users, distance_m)
     gravity_binned = GravityBinnedBaseline().fit(train_users, distance_m)
-    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes, is_home_idx_user_node)
-    conditional_gravity = ConditionalGravityBaseline(gravity, is_home_idx_user_node)
+    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes)
+    conditional_gravity = ConditionalGravityBaseline(gravity)
 
     baselines = [
         BaselineSpec("Uniform", UniformBaseline()),
@@ -78,7 +77,7 @@ def measure_baselines(
     ]
 
     for train_seed in train_seeds:
-        home_zone_mf = HomeZoneMFBaseline(num_nodes, is_home_idx_user_node, max_recall_k, seed=train_seed)
+        home_zone_mf = HomeZoneMFBaseline(num_nodes, max_recall_k, seed=train_seed)
         home_zone_mf_fitted = home_zone_mf.fit(train_users, val_users)
         run_tag = f"seed{train_seed}" if len(train_seeds) > 1 else None
 

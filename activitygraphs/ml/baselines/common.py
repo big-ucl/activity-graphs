@@ -1,19 +1,14 @@
 """Common utilies for baseline models."""
 
 import torch
-from torch_geometric.utils import to_dense_batch
 
-from activitygraphs.datasets.batch import GraphBatch, is_home_node_mask
 from activitygraphs.datasets.users import Users
 from activitygraphs.ml.popularity import POPULARITY_EPS
+from activitygraphs.ml.scorers import Scorer
 
 
-class Baseline(torch.nn.Module):
+class Baseline(Scorer):
     """A model scored from the batch itself, rather than from the model input built by the ``FeatureEncoder``."""
-
-    def forward(self, batch: GraphBatch) -> torch.Tensor:
-        """Return the logit of each node of ``batch``, shape ``(num_nodes, 1)``."""
-        raise NotImplementedError
 
 
 def non_home_mask(users: Users) -> torch.Tensor:
@@ -21,29 +16,6 @@ def non_home_mask(users: Users) -> torch.Tensor:
     mask = torch.ones_like(users.visited, dtype=torch.bool)
     mask[torch.arange(len(mask)), users.home_node] = False
     return mask
-
-
-def graph_node_indices(batch: GraphBatch) -> torch.Tensor:
-    """Return, for each node, its within-graph index, ``[num_nodes]``."""
-    return torch.arange(batch.num_nodes, device=batch.batch.device) - batch.ptr[batch.batch]
-
-
-def graph_home_indices(batch: GraphBatch, is_home_idx_user_node: int) -> torch.Tensor:
-    """Return, for each node, the within-graph index of the corresponding home node, ``[num_nodes]``.
-
-    Args:
-        batch: The batch.
-        is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
-
-    Raises:
-        ValueError: If a graph has no home node.
-    """
-    home_mask = is_home_node_mask(batch.x_user_node, is_home_idx_user_node)
-    is_home, _ = to_dense_batch(home_mask, batch.batch, fill_value=False)
-    if not is_home.any(dim=1).all():
-        raise ValueError("No home node found.")
-
-    return is_home.int().argmax(dim=1)[batch.batch]
 
 
 SMOOTHING_GRID = torch.logspace(-2, 3, 30)

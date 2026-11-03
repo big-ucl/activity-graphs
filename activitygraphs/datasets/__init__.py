@@ -8,10 +8,10 @@ It is split into the following modules:
   - ``transforms``: ``FeatureTransforms``, fitted on the training split.
   - ``datamodule``: ``prepare_splits``, ``read_splits`` and ``SurveyDataModule``, the Lightning entry point.
   - ``batch``: ``UserRows``, the tensors of one user or of a collated batch of users, ``UserBatch``, a batch of
-    users joined with the location graph, and ``GraphBatch``, one copy of the graph per user.
+    users joined with the location graph, and ``GraphBatch``, the model input on one copy of the graph per user.
 """
 
-from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows, is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows
 from activitygraphs.datasets.datamodule import SurveyDataModule, prepare_splits, read_splits
 from activitygraphs.datasets.dataset import UserDataset
 from activitygraphs.datasets.locations import Locations
@@ -30,7 +30,6 @@ __all__ = [
     "UserDataset",
     "UserRows",
     "Users",
-    "is_home_node_mask",
     "prepare_splits",
     "read_splits",
 ]

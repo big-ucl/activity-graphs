@@ -11,7 +11,7 @@ from activitygraphs.config import Config, DepthSweepConfig
 from activitygraphs.experiments.results import save_results
 from activitygraphs.experiments.setup import ExperimentSetup, setup_experiment, with_overrides
 from activitygraphs.experiments.training import train_and_evaluate_model
-from activitygraphs.experiments.variants import Variant, build_feature_encoder, build_model
+from activitygraphs.experiments.variants import Variant, build_scorer
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +31,11 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
         L.seed_everything(train_seed, workers=True)
 
         for variant in variants:
-            encoder = build_feature_encoder(variant, locations, schema, cfg.train.home_pe)
-            model = build_model(variant, schema, encoder.out_dim)
+            scorer = build_scorer(variant, locations, schema, cfg.train.home_pe)
             run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
 
             result_df = train_and_evaluate_model(
-                model=model,
-                feature_encoder=encoder,
+                scorer=scorer,
                 variant=variant,
                 datamodule=setup.datamodule,
                 loss=setup.loss,

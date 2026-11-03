@@ -6,7 +6,6 @@ from typing import cast
 
 import lightning as L
 import polars as pl
-import torch
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import OmegaConf
@@ -17,10 +16,10 @@ from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.ml.baselines import Baseline
 from activitygraphs.ml.callbacks import OverfitDebugCallback
-from activitygraphs.ml.features import FeatureEncoder
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.loggers import MetricsLogger
 from activitygraphs.ml.losses import Loss
+from activitygraphs.ml.scorers import Scorer
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
 
 
@@ -144,8 +143,7 @@ def evaluate_baseline(
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
     baseline_module = RankingModule(
-        model=baseline,
-        feature_encoder=None,
+        scorer=baseline,
         locations=datamodule.locations,
         lr=0.0,
         loss=loss,
@@ -238,8 +236,7 @@ def build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: str
 
 
 def train_and_evaluate_model(
-    model: torch.nn.Module,
-    feature_encoder: FeatureEncoder,
+    scorer: Scorer,
     variant: Variant,
     datamodule: SurveyDataModule,
     loss: Loss,
@@ -252,9 +249,8 @@ def train_and_evaluate_model(
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
     Args:
-        model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
-        feature_encoder: Builds the inputs ``x`` for ``model`` from each batch.
-        variant: The variant ``model`` was built from, giving its name, optimiser settings and input features.
+        scorer: Scorer to train.
+        variant: The variant ``scorer`` was built from, giving its name, optimiser settings and input features.
         datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
         cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, ``cfg.train`` the
@@ -284,8 +280,7 @@ def train_and_evaluate_model(
     lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
 
     lit_model = RankingModule(
-        model=model,
-        feature_encoder=feature_encoder,
+        scorer=scorer,
         locations=datamodule.locations,
         lr=variant.model.lr,
         loss=loss,

@@ -12,6 +12,7 @@ from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.loggers import MetricsLogger
 from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.models import NodeMLP
+from activitygraphs.ml.scorers import NodeScorer
 
 NUM_NODES = 6
 NUM_FEATURES = 3
@@ -39,10 +40,11 @@ def make_survey(num_users: int = 8):
 def fit_and_test(num_epochs: int) -> list[dict]:
     """Rows logged by a real ``Trainer`` fitting a small ``RankingModule`` for ``num_epochs`` and testing it."""
     locations, users = make_survey()
-    encoder = make_encoder(NUM_FEATURES - 1, 1, 1)
+    encoder = make_encoder(NUM_FEATURES - 1, 1)
     module = RankingModule(
-        model=NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=4, out_channels=1),
-        feature_encoder=encoder,
+        scorer=NodeScorer(
+            encoder, NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=4, out_channels=1)
+        ),
         locations=locations,
         lr=1e-2,
         loss=BCELoss,

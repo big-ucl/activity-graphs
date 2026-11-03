@@ -2,15 +2,10 @@
 
 import torch
 
-from activitygraphs.datasets.batch import GraphBatch
+from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.ml.baselines.common import (
-    Baseline,
-    fit_smoothing_strength,
-    graph_home_indices,
-    graph_node_indices,
-    smoothed_rate,
-)
+from activitygraphs.ml.baselines.common import Baseline, fit_smoothing_strength, smoothed_rate
 from activitygraphs.ml.popularity import home_excluded_visit_rate, home_visit_counts, popularity_logit
 
 
@@ -22,9 +17,9 @@ def inverse_sigmoid(prob):
 class UniformBaseline(Baseline):
     """P(y_i = 1) = 0.5 for all nodes."""
 
-    def forward(self, batch: GraphBatch) -> torch.Tensor:
-        """Return a zero logit for every node, shape ``(num_nodes, 1)``."""
-        return torch.zeros(batch.num_nodes, 1, device=batch.batch.device)
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
+        """Return a zero logit for every node of every user, ``[num_users, num_nodes]``."""
+        return torch.zeros(batch.num_users, batch.num_nodes, device=batch.visited.device)
 
 
 class GlobalBaseline(Baseline):
@@ -45,9 +40,9 @@ class GlobalBaseline(Baseline):
 
         return self
 
-    def forward(self, batch: GraphBatch) -> torch.Tensor:
-        """Return the global visit-rate logit for every node, shape ``(num_nodes, 1)``."""
-        return self.logit.expand(batch.num_nodes, 1).to(batch.batch.device)
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
+        """Return the global visit-rate logit for every node of every user, ``[num_users, num_nodes]``."""
+        return self.logit.expand(batch.num_users, batch.num_nodes).to(batch.visited.device)
 
 
 class VisitFrequencyBaseline(Baseline):
@@ -65,9 +60,9 @@ class VisitFrequencyBaseline(Baseline):
 
         return self
 
-    def forward(self, batch: GraphBatch) -> torch.Tensor:
-        """Return the visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
-        return self.logits.to(batch.batch.device)[graph_node_indices(batch)].unsqueeze(1)
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
+        """Return the visit-frequency logit of every node for every user, ``[num_users, num_nodes]``."""
+        return self.logits.to(batch.visited.device).expand(batch.num_users, -1)
 
 
 class ConditionalVisitFrequencyBaseline(Baseline):
@@ -86,10 +81,9 @@ class ConditionalVisitFrequencyBaseline(Baseline):
     strength: float
     logits: torch.Tensor
 
-    def __init__(self, num_nodes: int, is_home_idx_user_node: int):
+    def __init__(self, num_nodes: int):
         super().__init__()
         self.num_nodes = num_nodes
-        self.is_home_idx_user_node = is_home_idx_user_node
 
     def fit(self, train: Users, val: Users):
         """Count visits per home over the ``train`` users and pick the smoothing strength on the ``val`` users."""
@@ -102,7 +96,6 @@ class ConditionalVisitFrequencyBaseline(Baseline):
 
         return self
 
-    def forward(self, batch: GraphBatch) -> torch.Tensor:
-        """Return the user's home-conditioned visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(batch, self.is_home_idx_user_node)
-        return self.logits.to(batch.batch.device)[homes, graph_node_indices(batch)].unsqueeze(1)
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
+        """Return each user's home-conditioned visit-frequency logit of every node, ``[num_users, num_nodes]``."""
+        return self.logits.to(batch.visited.device)[batch.home_node]

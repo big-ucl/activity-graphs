@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from activitygraphs.config import HomePEConfig, ModelConfig
 from activitygraphs.datasets import Locations
-from activitygraphs.experiments.architectures import ModelSizes, architecture_builder
+from activitygraphs.experiments.architectures import ModelSizes, lookup_architecture
 from activitygraphs.ml.features import (
     Demographics,
     FeatureEncoder,
@@ -18,6 +18,7 @@ from activitygraphs.ml.features import (
     RandomWalkPE,
     UserNodeFeatures,
 )
+from activitygraphs.ml.scorers import Scorer
 from activitygraphs.schema import DatasetSchema
 
 
@@ -87,9 +88,7 @@ def build_feature_encoder(
     if variant.use_rwpe:
         sources.append(RandomWalkPE(locations.num_rwpe_features))
     if variant.use_home_pe:
-        is_home_idx = schema.user_nodes.index_of("is_home")
-        home_pe = HomeAnchoredPE(locations.hop_distance, is_home_idx, home_pe_cfg.bins, home_pe_cfg.max_hops)
-        sources.append(home_pe)
+        sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
     if variant.use_demographics:
         sources.append(Demographics(schema.user_attributes))
     if variant.full_info:
@@ -99,7 +98,7 @@ def build_feature_encoder(
 
 
 def build_model(variant: Variant, schema: DatasetSchema, in_channels: int) -> torch.nn.Module:
-    """Instantiate the model of ``variant``, sized for the tensors of ``schema`` and its input width.
+    """Instantiate the network of ``variant``, sized for the tensors of ``schema`` and its input width.
 
     Args:
         variant: The variant to build.
@@ -112,7 +111,22 @@ def build_model(variant: Variant, schema: DatasetSchema, in_channels: int) -> to
         edge_dim=schema.edges.width,
     )
 
-    return architecture_builder(variant.model)(variant.model, sizes)
+    return lookup_architecture(variant.model).build(variant.model, sizes)
+
+
+def build_scorer(variant: Variant, locations: Locations, schema: DatasetSchema, home_pe_cfg: HomePEConfig) -> Scorer:
+    """Instantiate the scorer of ``variant``: its ``FeatureEncoder`` and its network, run by its architecture's scorer.
+
+    Args:
+        variant: The variant to build.
+        locations: The location graph the model is trained on.
+        schema: The column schema of each tensor group.
+        home_pe_cfg: Settings of the home-anchored positional encoding, read when the variant uses it.
+    """
+    encoder = build_feature_encoder(variant, locations, schema, home_pe_cfg)
+    network = build_model(variant, schema, encoder.out_dim)
+
+    return lookup_architecture(variant.model).scorer(encoder, network)
 
 
 def variant_hyperparams(variant: Variant) -> dict:

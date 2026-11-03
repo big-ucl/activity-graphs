@@ -1,4 +1,4 @@
-"""The architecture registry: maps the ``architecture`` key of a model config to the builder of its model."""
+"""The architecture registry: maps the ``architecture`` key of a model config to the builder of its network and its scorer."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -6,7 +6,9 @@ from dataclasses import dataclass
 import torch
 
 from activitygraphs.config import GATConfig, GPSConfig, MLPConfig, ModelConfig
+from activitygraphs.ml.features import FeatureEncoder
 from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
+from activitygraphs.ml.scorers import GraphScorer, NodeScorer, Scorer
 
 
 @dataclass(frozen=True)
@@ -77,18 +79,31 @@ def build_gps(config: GPSConfig, sizes: ModelSizes) -> GraphTransformer:
     )
 
 
-BUILDERS: dict[str, Callable[..., torch.nn.Module]] = {
-    "mlp": build_mlp,
-    "gat": build_gat,
-    "gps": build_gps,
+@dataclass(frozen=True)
+class Architecture:
+    """A registered architecture.
+
+    Attributes:
+        build: Builds the network from its config and its ``ModelSizes``.
+        scorer: Wraps the ``FeatureEncoder`` and the network into the scorer that runs them.
+    """
+
+    build: Callable[..., torch.nn.Module]
+    scorer: Callable[[FeatureEncoder, torch.nn.Module], Scorer]
+
+
+BUILDERS: dict[str, Architecture] = {
+    "mlp": Architecture(build_mlp, NodeScorer),
+    "gat": Architecture(build_gat, GraphScorer),
+    "gps": Architecture(build_gps, GraphScorer),
 }
 
 
-def architecture_builder(config: ModelConfig) -> Callable[..., torch.nn.Module]:
-    """Return the builder corresponding to ``config.architecture`` from ``BUILDERS``.
+def lookup_architecture(config: ModelConfig) -> Architecture:
+    """Return the architecture registered in ``BUILDERS`` under ``config.architecture``.
 
     Raises:
-        KeyError: If no builder is registered under ``config.architecture``.
+        KeyError: If no architecture is registered under ``config.architecture``.
     """
     if config.architecture not in BUILDERS:
         raise KeyError(f"No architecture registered under {config.architecture!r}, expected one of {sorted(BUILDERS)}")

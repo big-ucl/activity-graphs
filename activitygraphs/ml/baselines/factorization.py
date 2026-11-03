@@ -2,14 +2,10 @@
 
 import torch
 
-from activitygraphs.datasets.batch import GraphBatch
+from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.ml.baselines.common import (
-    Baseline,
-    graph_home_indices,
-    graph_node_indices,
-    non_home_mask,
-)
+from activitygraphs.ml.baselines.common import Baseline, non_home_mask
 from activitygraphs.ml.losses import dense_bpr_loss
 from activitygraphs.ml.metrics import per_user_recall
 from activitygraphs.ml.popularity import home_visit_counts
@@ -35,7 +31,6 @@ class HomeZoneMFBaseline(Baseline):
 
     Args:
         num_nodes: Number of nodes in the graph.
-        is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
         max_recall_k: Largest rank cutoff ``K`` of the validation ``avg_recall@K`` that selects the kept factors.
         n_factors: Latent dimension ``k``.
         lr: Adam learning rate.
@@ -58,7 +53,6 @@ class HomeZoneMFBaseline(Baseline):
     def __init__(
         self,
         num_nodes: int,
-        is_home_idx_user_node: int,
         max_recall_k: int,
         n_factors: int = N_FACTORS,
         lr: float = LEARNING_RATE,
@@ -70,7 +64,6 @@ class HomeZoneMFBaseline(Baseline):
     ):
         super().__init__()
         self.num_nodes = num_nodes
-        self.is_home_idx_user_node = is_home_idx_user_node
         self.max_recall_k = max_recall_k
         self.n_factors = n_factors
         self.lr = lr
@@ -135,7 +128,6 @@ class HomeZoneMFBaseline(Baseline):
 
         return float(avg_recall.mean())
 
-    def forward(self, batch: GraphBatch) -> torch.Tensor:
-        """Return the fitted home-by-node score of each node, shape ``(num_nodes, 1)``."""
-        homes = graph_home_indices(batch, self.is_home_idx_user_node)
-        return self.scores.to(batch.batch.device)[homes, graph_node_indices(batch)].unsqueeze(1)
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
+        """Return the fitted home-by-node score of every node for every user, ``[num_users, num_nodes]``."""
+        return self.scores.to(batch.visited.device)[batch.home_node]

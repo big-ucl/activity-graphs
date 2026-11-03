@@ -7,11 +7,12 @@ import torch
 from test_input_snapshot import cache_survey_tensors
 
 from activitygraphs.analysis import with_ranking_metrics
-from activitygraphs.datasets import HouseholdSplit, SurveyDataModule, UserBatch
+from activitygraphs.datasets import HouseholdSplit, Locations, SurveyDataModule, UserBatch
 from activitygraphs.ml.baselines import VisitFrequencyBaseline
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.popularity import popularity_logit
+from activitygraphs.ml.scorers import Scorer
 from activitygraphs.tensors import tensors_path
 
 SPLIT = HouseholdSplit(val_size=0.2, test_size=0.2)
@@ -21,7 +22,7 @@ MAX_RECALL_K = 50
 RECALL_KS = (1, 3, 5)
 
 
-class FixedNodeScores(torch.nn.Module):
+class FixedNodeScores(Scorer):
     """Scores every node of every user with the same fixed logits.
 
     Args:
@@ -34,7 +35,7 @@ class FixedNodeScores(torch.nn.Module):
         super().__init__()
         self.register_buffer("logits", logits)
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
         """Return the logits of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
         return self.logits.expand(batch.num_users, -1)
 
@@ -74,8 +75,7 @@ def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tm
 
     baseline = VisitFrequencyBaseline(locations.num_nodes).fit(train_users)
     graph_module = RankingModule(
-        model=baseline,
-        feature_encoder=None,
+        scorer=baseline,
         locations=locations,
         lr=0.0,
         loss=BCELoss,
@@ -85,8 +85,7 @@ def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tm
 
     popularity = popularity_logit(train_users.visited, train_users.home_node)
     grid_module = RankingModule(
-        model=FixedNodeScores(popularity),
-        feature_encoder=None,
+        scorer=FixedNodeScores(popularity),
         locations=locations,
         lr=0.0,
         loss=BCELoss,

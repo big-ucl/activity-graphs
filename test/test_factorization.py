@@ -2,14 +2,13 @@
 
 import pytest
 import torch
-from graphs import expand_users, make_locations, make_users
+from graphs import join_users, make_locations, make_users
 
 from activitygraphs.datasets import Users
 from activitygraphs.ml.baselines.factorization import HomeZoneMFBaseline
 from activitygraphs.ml.losses import dense_bpr_loss
 
 NUM_LOCATION_FEATURES = 1
-IS_HOME_IDX = 0
 MAX_RECALL_K = 5
 
 N_NODES = 12
@@ -65,7 +64,6 @@ def splits():
 def fitted(splits, **kwargs) -> HomeZoneMFBaseline:
     baseline = HomeZoneMFBaseline(
         num_nodes=N_NODES,
-        is_home_idx_user_node=IS_HOME_IDX,
         max_recall_k=MAX_RECALL_K,
         n_factors=4,
         n_epochs=200,
@@ -142,13 +140,13 @@ class TestHomeZoneMFBaseline:
         users = train.subset(list(range(6)))
         x = torch.zeros(N_NODES, NUM_LOCATION_FEATURES)
         locations = make_locations(x, torch.zeros(2, 0, dtype=torch.long))
-        batch = expand_users(locations, users)
+        batch = join_users(locations, users)
 
-        out = baseline(batch)
+        out = baseline(locations, batch)
         homes = users.home_node
         expected = baseline.scores[homes.repeat_interleave(N_NODES), torch.arange(N_NODES).repeat(len(homes))]
 
-        assert out.shape == (len(homes) * N_NODES, 1)
+        assert out.shape == (len(homes), N_NODES)
         assert torch.allclose(out.reshape(-1), expected)
 
     def test_it_reports_the_validation_recall_of_the_epoch_it_keeps(self, splits):

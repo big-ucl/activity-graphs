@@ -37,11 +37,10 @@ def make_two_users():
     return make_users(visited, home_node, attributes, attributes_cat)
 
 
-def join_two_users() -> tuple[UserBatch, GraphBatch]:
+def join_two_users() -> UserBatch:
     locations = make_path_locations()
     rows = next(iter(DataLoader(UserDataset(make_two_users(), [7, 4]), batch_size=2)))
-    batch = UserBatch.join(rows, locations)
-    return batch, GraphBatch.expand(batch, locations)
+    return UserBatch.join(rows, locations)
 
 
 def test_an_item_holds_the_rows_of_one_user():
@@ -63,7 +62,7 @@ def test_the_split_holds_its_users_in_the_order_of_the_indices():
 
 
 def test_the_join_reads_each_users_row_of_the_location_graph():
-    batch, _ = join_two_users()
+    batch = join_two_users()
 
     assert batch.user_idx.tolist() == [7, 4]
     assert batch.is_home.tolist() == [[False, False, True], [True, False, False]]
@@ -74,23 +73,13 @@ def test_the_join_reads_each_users_row_of_the_location_graph():
 
 
 def test_the_expansion_holds_one_copy_of_the_graph_per_user():
-    _, graph = join_two_users()
+    x = torch.arange(12.0).reshape(2, 3, 2)
+    graph = GraphBatch.expand(x, make_path_locations())
 
-    assert graph.x_loc.squeeze(-1).tolist() == [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
-    assert graph.x_user_node.squeeze(-1).tolist() == [0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    assert graph.x.tolist() == [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0], [6.0, 7.0], [8.0, 9.0], [10.0, 11.0]]
     assert graph.edge_index.tolist() == [[0, 1, 1, 2, 3, 4, 4, 5], [1, 0, 2, 1, 4, 3, 5, 4]]
     assert graph.edge_attr.squeeze(-1).tolist() == [10.0, 11.0, 12.0, 13.0] * 2
-    assert graph.y.squeeze(-1).tolist() == [1.0, 1.0, 0.0, 1.0, 0.0, 1.0]
     assert graph.batch.tolist() == [0, 0, 0, 1, 1, 1]
-    assert graph.ptr.tolist() == [0, 3, 6]
-    assert graph.user_id.tolist() == [7, 4]
-    assert graph.user_attr.tolist() == [[7.0], [4.0]]
-    assert graph.user_attr_cat.tolist() == [[7], [4]]
-    torch.testing.assert_close(graph.distances.squeeze(-1), torch.tensor([0.9, 0.4, 0.0, 0.0, 0.5, 0.9]))
-    assert graph.distances_m.squeeze(-1).tolist() == [9.0, 4.0, 0.0, 0.0, 5.0, 9.0]
-    torch.testing.assert_close(graph.random_walk_pe, make_path_locations().random_walk_pe.repeat(2, 1))
-    assert graph.num_nodes == 6
-    assert graph.num_graphs == 2
 
 
 def test_moving_the_locations_moves_every_tensor_and_keeps_the_node_ids():

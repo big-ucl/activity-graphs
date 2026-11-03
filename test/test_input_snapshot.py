@@ -18,12 +18,12 @@ import polars as pl
 import pytest
 import torch
 import torch_geometric as pyg
-from graphs import expand_users, join_users
+from graphs import join_users
 from shapely.geometry import box
 
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
 from activitygraphs.config import HomePEConfig, read_config
-from activitygraphs.datasets import HouseholdSplit, Locations, UserDataset, Users, datamodule
+from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, UserDataset, Users, datamodule
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.experiments.variants import Variant, build_feature_encoder
 from activitygraphs.ml.schema_encoder import default_emb_dim
@@ -216,17 +216,20 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
     """
     locations, users, schema, _ = build_scaled_survey(survey_name, root)
 
-    batch = expand_users(locations, users)
+    batch = join_users(locations, users)
     mlp = read_config(get_project_root(), verbose=False).models.mlp
 
-    inputs = {"edge_attr": batch.edge_attr, "y": batch.y}
+    edge_attr = locations.edge_attr.repeat(batch.num_users, 1)
+    y = batch.visited.reshape(-1, 1)
+    inputs = {"edge_attr": edge_attr, "y": y}
     for active in itertools.product([False, True], repeat=len(FLAGS)):
         flags = dict(zip(FLAGS, active, strict=True))
         key = "+".join(name for name, on in flags.items() if on) or "none"
         torch.manual_seed(0)
         encoder = build_feature_encoder(Variant(mlp, **flags), locations, schema, HOME_PE)
         with torch.no_grad():
-            inputs[key] = encoder(batch)
+            x = encoder(locations, batch)
+        inputs[key] = x.reshape(-1, x.shape[-1])
         assert inputs[key].shape[1] == encoder.out_dim
 
     return inputs
@@ -284,17 +287,20 @@ def test_an_item_carries_the_rows_of_one_user(tmp_path):
 
 
 def test_each_graph_copy_carries_the_location_and_user_node_features_apart(tmp_path):
-    locations, users, _ = build_survey("cmap", tmp_path)
-    batch = expand_users(locations, users)
+    locations, users, schema = build_survey("cmap", tmp_path)
+    batch = join_users(locations, users)
+    mlp = read_config(get_project_root(), verbose=False).models.mlp
+    variant = Variant(mlp, use_demographics=False, use_rwpe=False)
+    encoder = build_feature_encoder(variant, locations, schema, HOME_PE)
+    graphs = GraphBatch.expand(encoder(locations, batch), locations)
     num_nodes = locations.num_nodes
     third_copy = slice(3 * num_nodes, 4 * num_nodes)
 
     is_home = torch.zeros(num_nodes, 1)
     is_home[users.home_node[3]] = 1.0
 
-    torch.testing.assert_close(batch.x_loc[third_copy], locations.x)
-    torch.testing.assert_close(batch.x_user_node[third_copy], is_home)
-    assert batch.num_nodes == NUM_USERS * num_nodes
+    torch.testing.assert_close(graphs.x[third_copy], torch.cat([locations.x, is_home], dim=-1))
+    assert graphs.x.shape[0] == NUM_USERS * num_nodes
 
 
 def test_a_joined_batch_carries_the_distances_in_metres_beside_the_scaled_ones(tmp_path):
@@ -314,18 +320,17 @@ def test_a_joined_batch_carries_the_distances_in_metres_beside_the_scaled_ones(t
 )
 def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attributes, tmp_path):
     locations, users, schema = build_survey(survey_name, tmp_path)
-    batch = expand_users(locations, users)
 
     assert schema.user_attributes == user_attributes
     assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential"]
     assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2]
     assert schema.locations.width == locations.x.shape[1]
     assert schema.edges.width == locations.edge_attr.shape[1]
-    assert schema.user_nodes.width == batch.x_user_node.shape[-1]
+    assert schema.user_nodes.names == ["is_home"]
     assert schema.user_attributes.numeric.width == users.attributes.shape[-1]
     assert schema.user_attributes.categorical.width == users.attributes_cat.shape[-1]
-    assert schema.distances.width == batch.distances.shape[-1]
-    assert schema.targets.width == batch.y.shape[-1]
+    assert schema.distances.width == 1
+    assert schema.targets.width == 1
 
 
 def test_without_demographics_use_demographics_leaves_the_inputs_unchanged(tmp_path):
@@ -346,7 +351,7 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     categories = categorical.columns[employment_idx].categories
     expected_codes = torch.tensor([0 if status is None else categories.index(status) + 1 for status in employment])
 
-    batch = expand_users(locations, users)
+    batch = join_users(locations, users)
     mlp = read_config(get_project_root(), verbose=False).models.mlp
     plain = build_feature_encoder(Variant(mlp, use_demographics=False), locations, schema, HOME_PE)
     encoder = build_feature_encoder(Variant(mlp), locations, schema, HOME_PE)
@@ -365,9 +370,9 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     ]
     assert users.attributes.shape[-1] == DEMOGRAPHICS_SCHEMA.numeric.width
     torch.testing.assert_close(users.attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
-    torch.testing.assert_close(batch.user_attr_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(batch.attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
     assert encoder.out_dim == plain.out_dim + DEMOGRAPHICS_SCHEMA.numeric.width + embedded_width
-    assert encoder(batch).shape == (batch.num_nodes, encoder.out_dim)
+    assert encoder(locations, batch).shape == (batch.num_users, batch.num_nodes, encoder.out_dim)
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises():

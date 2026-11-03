@@ -2,6 +2,7 @@
 
 from activitygraphs.ml.features import Demographics, FeatureEncoder, FeatureSource, LocationFeatures, UserNodeFeatures
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
+from activitygraphs.tensors import USER_NODE_SCHEMA
 
 
 def continuous_schema(group: str, width: int) -> TensorSchema:
@@ -10,16 +11,14 @@ def continuous_schema(group: str, width: int) -> TensorSchema:
     return TensorSchema(group, columns)
 
 
-def make_encoder(
-    num_location_features: int, num_user_node_features: int, num_demographics: int, *extra_sources: FeatureSource
-) -> FeatureEncoder:
-    """Return the encoder of the location and user-node features, then ``extra_sources``, then the demographics.
+def make_encoder(num_location_features: int, num_demographics: int, *extra_sources: FeatureSource) -> FeatureEncoder:
+    """Return the encoder of the location features and ``is_home``, then ``extra_sources``, then the demographics.
 
     The demographics are left out when ``num_demographics`` is 0.
     """
     sources: list[FeatureSource] = [
         LocationFeatures(continuous_schema("locations", num_location_features)),
-        UserNodeFeatures(continuous_schema("user_nodes", num_user_node_features)),
+        UserNodeFeatures(USER_NODE_SCHEMA),
         *extra_sources,
     ]
     if num_demographics > 0:

@@ -12,12 +12,11 @@ from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
-from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows
+from activitygraphs.datasets.batch import UserBatch, UserRows
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.ml.baselines.common import Baseline
-from activitygraphs.ml.features import FeatureEncoder
 from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
+from activitygraphs.ml.scorers import Scorer
 
 CALIBRATION_BINS = 15
 
@@ -59,22 +58,16 @@ class EvaluationTensors:
 
 
 class RankingModule(L.LightningModule):
-    """LightningModule wrapping any model for node-level binary prediction on activity graphs.
+    """LightningModule wrapping any scorer for node-level binary prediction on activity graphs.
 
     Handles BCE or BPR training and per-epoch ranking metrics. Each batch of user rows is joined with the location
     graph on device, and every step receives the resulting ``UserBatch``. The logits read by the losses/the metrics are
     of shape ``[num_users, num_nodes]``.
 
-    A model takes one of three forms:
-      1. A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_users * num_nodes, 1]`` logits, given a
-         ``feature_encoder``. It runs on one copy of the location graph per user of the batch.
-      2. A ``Baseline``, given the copies of the graph themselves, with no ``feature_encoder``.
-      3. Any other module with no ``feature_encoder``, mapping the ``UserBatch`` to ``[num_users, num_nodes]`` logits.
-
     Args:
-        model: The model, in one of the three forms above.
-        feature_encoder: Builds the input ``x`` to a GNN ``model`` from the copies of the graph. None otherwise.
-        locations: The location graph joined with each batch of users.
+        scorer: The model, a ``Scorer`` such as a ``NodeScorer``, a ``GraphScorer`` or a ``Baseline``, mapping the
+            locations and the ``UserBatch`` to the logits.
+        locations: The location graph joined with each batch of users, and passed to the scorer.
         lr: Initial learning rate for AdamW.
         loss: ``Loss`` instance.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
@@ -83,21 +76,17 @@ class RankingModule(L.LightningModule):
         lr_scheduler: Keyword arguments of a ReduceLROnPlateau scheduler on the loss's monitored metric. None trains
             without a scheduler.
         calibration_bins: number of probability bins of the calibration error, default ``CALIBRATION_BINS``.
-        compile_model: torch.compile the inner NN, default False.
+        compile_model: torch.compile the trained network of the scorer, default False.
         store_score_vectors: retain each test user's full per-node score vector.
         log_train_ranking: log ``train_avg_recall@K`` on the training batches, default True. Turn it off when per-user
             computation becomes expensive.
-
-    Raises:
-        ValueError: ``feature_encoder`` is given for a ``Baseline``.
     """
 
-    model: torch.nn.Module
+    scorer: Scorer
 
     def __init__(
         self,
-        model: torch.nn.Module,
-        feature_encoder: FeatureEncoder | None,
+        scorer: Scorer,
         locations: Locations,
         lr: float,
         loss: Loss,
@@ -111,12 +100,8 @@ class RankingModule(L.LightningModule):
         log_train_ranking: bool = True,
     ):
         super().__init__()
-        if feature_encoder is not None and isinstance(model, Baseline):
-            raise ValueError("A `Baseline` takes no `FeatureEncoder`.")
-
-        self.save_hyperparameters(ignore=["model", "feature_encoder", "locations", "loss"])
-        self.model = model
-        self.encoder = feature_encoder
+        self.save_hyperparameters(ignore=["scorer", "locations", "loss"])
+        self.scorer = scorer
         self.locations = locations
         self.lr = lr
         self.loss = loss
@@ -152,24 +137,14 @@ class RankingModule(L.LightningModule):
         self._compiled = False
 
     def configure_model(self) -> None:
-        """Compile the inner NN with ``torch.compile``."""
+        """Compile the trained network of the scorer with ``torch.compile``."""
         if self._compiled or not self.compile_model:
             return
         if self.trainer.fast_dev_run or self.trainer.overfit_batches:  # pyrefly: ignore[missing-attribute]
             return
 
-        self.model.compile(dynamic=True)  # dynamic=True since graph sizes (i.e. batch sizes) differ
+        self.scorer.compile_network()
         self._compiled = True
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor | None,
-        batch: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Return the wrapped model's logits for a batch's features."""
-        return self.model(x, edge_index, edge_attr, batch)
 
     def on_after_batch_transfer(self, batch: UserRows, dataloader_idx: int) -> UserBatch:
         """Join the on-device ``UserRows`` batch with the locations graph to return a ``UserBatch``.
@@ -334,18 +309,8 @@ class RankingModule(L.LightningModule):
         return optimizer
 
     def compute_logits(self, batch: UserBatch) -> torch.Tensor:
-        """Return the model logits of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
-        if self.encoder is None and not isinstance(self.model, Baseline):
-            return self.model(batch)
-
-        graphs = GraphBatch.expand(batch, self.locations)
-        if self.encoder is None:
-            logits = self.model(graphs)
-        else:
-            x = self.encoder(graphs)
-            logits = self(x, graphs.edge_index, graphs.edge_attr, graphs.batch)
-
-        return logits.reshape(batch.num_users, batch.num_nodes)
+        """Return the scorer's logits of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
+        return self.scorer(self.locations, batch)
 
 
 def _flat_user_idx(batch: UserBatch) -> Tensor:

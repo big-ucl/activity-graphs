@@ -4,7 +4,7 @@ import polars as pl
 import torch
 from torch.utils.data import DataLoader
 
-from activitygraphs.datasets import GraphBatch, Locations, UserBatch, UserDataset, Users
+from activitygraphs.datasets import Locations, UserBatch, UserDataset, Users
 from activitygraphs.datasets.locations import compute_hop_distance
 
 
@@ -83,8 +83,3 @@ def join_users(locations: Locations, users: Users) -> UserBatch:
     """Return every user of ``users`` in one batch, joined with ``locations`` as ``RankingModule`` joins its batches."""
     rows = next(iter(loader_of(users, batch_size=users.num_users)))
     return UserBatch.join(rows, locations)
-
-
-def expand_users(locations: Locations, users: Users) -> GraphBatch:
-    """Return one copy of the graph of ``locations`` per user of ``users``, as ``RankingModule`` builds it."""
-    return GraphBatch.expand(join_users(locations, users), locations)

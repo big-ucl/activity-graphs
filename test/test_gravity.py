@@ -5,9 +5,9 @@ import dataclasses
 import numpy as np
 import pytest
 import torch
-from graphs import expand_users, make_locations, make_users
+from graphs import join_users, make_locations, make_users
 
-from activitygraphs.datasets import Users
+from activitygraphs.datasets import Locations, UserBatch, Users
 from activitygraphs.ml.baselines.gravity import (
     MIN_DISTANCE_M,
     ConditionalGravityBaseline,
@@ -18,15 +18,14 @@ from activitygraphs.ml.baselines.gravity import (
 from activitygraphs.ml.popularity import home_excluded_visit_rate
 
 NUM_LOCATION_FEATURES = 1
-IS_HOME_IDX = 0
 
 
-def expand(users: Users, distance_m: torch.Tensor):
-    """Return one copy per user of a graph with no edges whose nodes are ``distance_m`` metres apart."""
+def join(users: Users, distance_m: torch.Tensor) -> tuple[Locations, UserBatch]:
+    """Return a graph with no edges whose nodes are ``distance_m`` metres apart, and ``users`` joined to it."""
     num_nodes = distance_m.shape[0]
     x = torch.zeros(num_nodes, NUM_LOCATION_FEATURES)
     locations = make_locations(x, torch.zeros(2, 0, dtype=torch.long), distance_m=distance_m)
-    return expand_users(locations, users)
+    return locations, join_users(locations, users)
 
 
 def simulate(
@@ -59,9 +58,9 @@ class TestDistanceDecay:
     def test_ranks_nearest_first(self):
         distance_m = torch.zeros(5, 5)
         distance_m[0] = torch.tensor([0.0, 900.0, 300.0, 5000.0, 1200.0])
-        batch = expand(make_users(torch.zeros(1, 5), torch.tensor([0])), distance_m)
+        locations, batch = join(make_users(torch.zeros(1, 5), torch.tensor([0])), distance_m)
 
-        scores = DistanceDecayBaseline()(batch).squeeze(-1)
+        scores = DistanceDecayBaseline()(locations, batch).squeeze(0)
 
         assert scores.argsort(descending=True).tolist() == [0, 2, 1, 4, 3]
         assert scores.sigmoid().unique().numel() == 5
@@ -93,11 +92,11 @@ class TestGravity:
         users, distance_m = simulate(n_users=200, n_nodes=10, beta_log=0.5, rate_per_m=1e-4)
         gravity = GravityBaseline().fit(users, distance_m)
 
-        batch = expand(users.subset([0, 1]), distance_m)
-        out = gravity(batch).squeeze(-1)
+        locations, batch = join(users.subset([0, 1]), distance_m)
+        out = gravity(locations, batch)[0]
 
         node = 3
-        relative = max(float(batch.distances_m[node]), MIN_DISTANCE_M) / gravity.d0
+        relative = max(float(batch.home_distance_m[0, node]), MIN_DISTANCE_M) / gravity.d0
         expected = (
             gravity.alpha
             + float(gravity.popularity_logit[node])
@@ -143,22 +142,22 @@ class TestConditionalGravity:
         users = dataclasses.replace(users, home_node=users.home_node % 9)
         train, val = users.subset(list(range(150))), users.subset(list(range(150, 200)))
         gravity = GravityBaseline().fit(users, distance_m)
-        conditional = ConditionalGravityBaseline(gravity, IS_HOME_IDX).fit(train, val, distance_m)
+        conditional = ConditionalGravityBaseline(gravity).fit(train, val, distance_m)
 
-        unseen = expand(make_users(torch.zeros(1, 10), torch.tensor([9])), distance_m)
+        unseen = join(make_users(torch.zeros(1, 10), torch.tensor([9])), distance_m)
 
-        prior = gravity(unseen)
-        out = conditional(unseen)
+        prior = gravity(*unseen)
+        out = conditional(*unseen)
 
         non_home = slice(0, 9)
-        torch.testing.assert_close(out[non_home], prior[non_home], rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(out[:, non_home], prior[:, non_home], rtol=1e-4, atol=1e-4)
 
     def test_the_strength_is_fitted(self):
         users, distance_m = simulate(n_users=200, n_nodes=10, beta_log=0.5, rate_per_m=1e-4)
         train, val = users.subset(list(range(150))), users.subset(list(range(150, 200)))
         gravity = GravityBaseline().fit(users, distance_m)
 
-        conditional = ConditionalGravityBaseline(gravity, IS_HOME_IDX).fit(train, val, distance_m)
+        conditional = ConditionalGravityBaseline(gravity).fit(train, val, distance_m)
 
         assert conditional.strength is not None
         assert conditional.counts.shape == (10, 10)

@@ -2,15 +2,14 @@
 
 import pytest
 import torch
-from graphs import expand_users, make_locations, make_users
+from graphs import join_users, make_locations, make_users
 
-from activitygraphs.datasets import Users
+from activitygraphs.datasets import Locations, UserBatch, Users
 from activitygraphs.ml.baselines import ConditionalVisitFrequencyBaseline, VisitFrequencyBaseline
 from activitygraphs.ml.baselines.common import fit_smoothing_strength, smoothed_rate
 from activitygraphs.ml.popularity import home_excluded_visit_rate, home_visit_counts
 
 NUM_LOCATION_FEATURES = 2
-IS_HOME_IDX = 0
 
 
 def random_users(num_users: int, num_nodes: int, seed: int = 0) -> Users:
@@ -21,18 +20,18 @@ def random_users(num_users: int, num_nodes: int, seed: int = 0) -> Users:
     return make_users(visited, home_node)
 
 
-def expand(users: Users):
-    """Return one copy of a graph of ``users``' node count per user, with random location features and no edges."""
+def join(users: Users) -> tuple[Locations, UserBatch]:
+    """Return a graph of ``users``' node count, with random location features and no edges, and ``users`` joined to it."""
     num_nodes = users.visited.shape[1]
     x = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=torch.Generator().manual_seed(1))
     locations = make_locations(x, torch.zeros(2, 0, dtype=torch.long))
-    return expand_users(locations, users)
+    return locations, join_users(locations, users)
 
 
 @pytest.fixture
 def batch_uniform():
-    """One copy of a 5-node graph for each of 4 users."""
-    return expand(random_users(num_users=4, num_nodes=5))
+    """A 5-node graph and 4 users joined to it."""
+    return join(random_users(num_users=4, num_nodes=5))
 
 
 class TestVisitFrequencyBaseline:
@@ -40,14 +39,14 @@ class TestVisitFrequencyBaseline:
         num_nodes = 5
         baseline = VisitFrequencyBaseline(num_nodes=num_nodes)
         baseline.fit(random_users(8, num_nodes))
-        out = baseline(batch_uniform)
-        assert out.shape == (batch_uniform.num_nodes, 1)
+        out = baseline(*batch_uniform)
+        assert out.shape == (4, num_nodes)
 
     def test_forward_values_in_logit_range(self, batch_uniform):
         num_nodes = 5
         baseline = VisitFrequencyBaseline(num_nodes=num_nodes)
         baseline.fit(random_users(8, num_nodes))
-        out = baseline(batch_uniform)
+        out = baseline(*batch_uniform)
         assert torch.isfinite(out).all()
 
     def test_scores_are_the_home_excluded_visit_rate(self, batch_uniform):
@@ -56,21 +55,21 @@ class TestVisitFrequencyBaseline:
         baseline.fit(users)
 
         expected = torch.logit(home_excluded_visit_rate(users.visited, users.home_node))
-        out = baseline(batch_uniform)
+        out = baseline(*batch_uniform)
 
-        torch.testing.assert_close(out.squeeze(-1), expected.repeat(batch_uniform.num_graphs))
+        torch.testing.assert_close(out, expected.expand(4, -1))
 
 
 class TestConditionalVisitFrequencyBaseline:
     def test_forward_shape(self):
         num_nodes = 5
         users = random_users(num_users=8, num_nodes=num_nodes)
-        batched = expand(users.subset(list(range(4))))
+        batched = join(users.subset(list(range(4))))
 
-        baseline = ConditionalVisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx_user_node=IS_HOME_IDX)
+        baseline = ConditionalVisitFrequencyBaseline(num_nodes=num_nodes)
         baseline.fit(users, users)
-        out = baseline(batched)
-        assert out.shape == (batched.num_nodes, 1)
+        out = baseline(*batched)
+        assert out.shape == (4, num_nodes)
 
 
 def split_of(labels: list[list[int]], homes: list[int]) -> Users:
@@ -129,19 +128,17 @@ class TestConditionalVisitFrequencySmoothing:
     def test_an_unseen_home_is_scored_with_the_visit_frequency(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])
         val = split_of([[1, 1, 0, 1], [0, 1, 0, 0]], [0, 1])
-        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4, is_home_idx_user_node=IS_HOME_IDX).fit(train, val)
+        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4).fit(train, val)
         frequency = VisitFrequencyBaseline(num_nodes=4).fit(train)
 
-        unseen = expand(split_of([[0, 0, 0, 1]], [3]))
+        unseen = join(split_of([[0, 0, 0, 1]], [3]))
 
-        torch.testing.assert_close(conditional(unseen), frequency(unseen))
+        torch.testing.assert_close(conditional(*unseen), frequency(*unseen))
 
     def test_the_strength_is_fitted(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])
 
-        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4, is_home_idx_user_node=IS_HOME_IDX).fit(
-            train, train
-        )
+        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4).fit(train, train)
 
         assert conditional.strength is not None
         assert conditional.logits.shape == (4, 4)

@@ -11,6 +11,7 @@ from activitygraphs.ml.losses import BCELoss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
 from activitygraphs.ml.models import NodeMLP
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
+from activitygraphs.ml.scorers import NodeScorer
 
 # Path graph 0-1-2-3-4 (both directions): hop distance from node 0 is [0, 1, 2, 3, 4].
 PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 3]])
@@ -383,11 +384,10 @@ class TestPerUserColumnsInModule:
 
     def test_per_user_columns_populated_at_test_end(self, monkeypatch):
         locations = make_locations(torch.zeros(5, 1), PATH_EDGE_INDEX)
-        encoder = make_encoder(1, 1, 2)
+        encoder = make_encoder(1, 2)
         model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
         module = RankingModule(
-            model=model,
-            feature_encoder=encoder,
+            scorer=NodeScorer(encoder, model),
             locations=locations,
             lr=1e-3,
             loss=BCELoss,
