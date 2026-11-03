@@ -162,6 +162,41 @@ def core_experiment(cfg: Config):
     save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
 
 
+def two_tower_ablation_experiment(cfg: Config):
+    """Ablate the inputs of the two-tower model and run its in-city diagnostics, beside ``MLP-hpe-dist``.
+
+    Trains the two-tower model without the pairwise features and the demographics, with each, and with both. With both,
+    it also trains the free per-node bias in place of the location bias, and the node-identity embedding. Every model
+    is trained once per training seed.
+    """
+    setup = setup_experiment(cfg)
+    mlp, two_tower = setup.models["mlp"], setup.models["two_tower"]
+    node_bias = with_overrides(two_tower, {"bias": "node"})
+    node_embedding = with_overrides(two_tower, {"node_embedding": True})
+
+    bare = InputFeatures(use_demographics=False)
+    pairwise = InputFeatures(full_info=True, use_home_pe=True, use_demographics=False)
+    demographics = InputFeatures()
+    both = InputFeatures(full_info=True, use_home_pe=True)
+
+    variants = [
+        Variant(mlp, both),
+        Variant(two_tower, bare, suffix="nodemo"),
+        Variant(two_tower, pairwise, suffix="nodemo"),
+        Variant(two_tower, demographics),
+        Variant(two_tower, both),
+        Variant(node_bias, both),
+        Variant(node_embedding, both),
+    ]
+
+    model_results = run_variants(setup, variants)
+
+    if setup.run_dir is None:
+        return
+
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
+
+
 def overfit_health_experiment(cfg: Config):
     """Check if each architecture can overfit on a single batch.
 

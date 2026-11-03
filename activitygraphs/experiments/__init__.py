@@ -18,6 +18,7 @@ from activitygraphs.experiments.runners import (
     demographics_ablation_experiment,
     depth_sweep_experiment,
     overfit_health_experiment,
+    two_tower_ablation_experiment,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "demographics_ablation_experiment",
     "depth_sweep_experiment",
     "overfit_health_experiment",
+    "two_tower_ablation_experiment",
 ]

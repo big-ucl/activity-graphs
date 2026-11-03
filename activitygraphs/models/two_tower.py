@@ -21,19 +21,29 @@ class NodeTower(torch.nn.Module):
         network: A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_nodes, d]``, such as ``GAT``.
         num_rwpe_features: Width of the random-walk positional encoding appended to the location features, through a
             batch norm of each column. None leaves the encoding out.
+        node_embedding: Learned embedding of each node's identity, appended after the encoding. None leaves it out.
     """
 
-    def __init__(self, network: torch.nn.Module, num_rwpe_features: int | None):
+    def __init__(
+        self,
+        network: torch.nn.Module,
+        num_rwpe_features: int | None,
+        node_embedding: torch.nn.Embedding | None,
+    ):
         super().__init__()
         self.network = network
         self.rwpe_norm = None if num_rwpe_features is None else torch.nn.BatchNorm1d(num_rwpe_features)
+        self.node_embedding = node_embedding
 
     def forward(self, locations: Locations) -> Tensor:
         """Return the embedding of every node, ``[num_nodes, d]``."""
-        x = locations.x
+        inputs = [locations.x]
         if self.rwpe_norm is not None:
-            random_walk_pe = self.rwpe_norm(locations.random_walk_pe)
-            x = torch.cat([x, random_walk_pe], dim=-1)
+            inputs.append(self.rwpe_norm(locations.random_walk_pe))
+        if self.node_embedding is not None:
+            inputs.append(self.node_embedding.weight)
+
+        x = torch.cat(inputs, dim=-1)
 
         return self.network(x, locations.edge_index, locations.edge_attr, None)
 
@@ -83,6 +93,24 @@ class LocationBias(torch.nn.Module):
         return self.linear(node_embedding).squeeze(-1)
 
 
+class NodeBias(torch.nn.Module):
+    """The bias of each node, a free parameter per node, starting at zero.
+
+    It cannot score a node of another graph, so it is an in-city diagnostic.
+
+    Args:
+        num_nodes: Number of nodes of the graph.
+    """
+
+    def __init__(self, num_nodes: int):
+        super().__init__()
+        self.bias = torch.nn.Parameter(torch.zeros(num_nodes))
+
+    def forward(self, node_embedding: Tensor) -> Tensor:
+        """Return the bias of every node, ``[num_nodes]``. The node embeddings, ``[num_nodes, d]``, are not read."""
+        return self.bias
+
+
 class TwoTowerScorer(Scorer):
     """Scores each (user, node) pair by the dot product of the two embeddings, a pairwise block and a location bias.
 
@@ -95,7 +123,7 @@ class TwoTowerScorer(Scorer):
             None gives the pairwise block the two embeddings alone.
         pair_network: Maps the pairwise input of each pair, ``[num_pairs, 2 * d + pair_encoder.out_dim]``, to its
             logit, ``[num_pairs, 1]``, such as ``NodeMLP``.
-        location_bias: The bias of every node, from the node embeddings.
+        bias: The bias of every node, from the node embeddings, such as ``LocationBias`` or ``NodeBias``.
     """
 
     def __init__(
@@ -104,14 +132,14 @@ class TwoTowerScorer(Scorer):
         user_tower: UserTower,
         pair_encoder: FeatureEncoder | None,
         pair_network: torch.nn.Module,
-        location_bias: LocationBias,
+        bias: LocationBias | NodeBias,
     ):
         super().__init__()
         self.node_tower = node_tower
         self.user_tower = user_tower
         self.pair_encoder = pair_encoder
         self.pair_network = pair_network
-        self.location_bias = location_bias
+        self.bias = bias
 
     def compile_network(self) -> None:
         """Compile the node tower's network and the pairwise network with ``torch.compile``."""
@@ -139,6 +167,6 @@ class TwoTowerScorer(Scorer):
         flat_pair_x = pair_x.reshape(num_users * num_nodes, -1)
         pair_logits = self.pair_network(flat_pair_x, None).reshape(num_users, num_nodes)
 
-        bias = self.location_bias(node_embedding)
+        bias = self.bias(node_embedding)
 
         return interaction + pair_logits + bias

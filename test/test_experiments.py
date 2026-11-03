@@ -390,6 +390,37 @@ class TestDemographicsAblation:
         assert len(self._recorded(cfg, monkeypatch)) == 8  # 2 architectures x 2 arms x 2 seeds
 
 
+class TestTwoTowerAblation:
+    def _recorded(self, cfg, monkeypatch) -> list[dict]:
+        calls = record_training(monkeypatch, frame=make_model_frame)
+        setup = make_setup(cfg, [42, 43])
+        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
+        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
+
+        run_cfg = types.SimpleNamespace(
+            paths=types.SimpleNamespace(reports="reports"), data=types.SimpleNamespace(name="CMAP")
+        )
+        runners.two_tower_ablation_experiment(run_cfg)  # type: ignore[arg-type]
+
+        return calls
+
+    def test_trains_every_ablation_and_diagnostic_beside_the_mlp(self, cfg, monkeypatch):
+        names = [call["variant"].name for call in self._recorded(cfg, monkeypatch)]
+
+        assert names[:7] == [
+            "MLP-hpe-dist",
+            "TwoTower-8-nodemo",
+            "TwoTower-8-hpe-dist-nodemo",
+            "TwoTower-8",
+            "TwoTower-8-hpe-dist",
+            "TwoTower-8-nodebias-hpe-dist",
+            "TwoTower-8-nodeemb-hpe-dist",
+        ]
+
+    def test_every_variant_runs_once_per_seed(self, cfg, monkeypatch):
+        assert len(self._recorded(cfg, monkeypatch)) == 14  # 7 variants x 2 seeds
+
+
 class TestCore:
     """The core experiment trains the RWPE control and every architecture at the features of ``MLP-hpe-dist``."""
 

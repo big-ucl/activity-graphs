@@ -7,12 +7,13 @@ import pytest
 import torch
 from encoders import continuous_schema
 from graphs import chain_edge_index, join_users, loader_of, make_locations, make_users
+from omegaconf import OmegaConf
 
 from activitygraphs.config import HomePEConfig, LossConfig, read_config
 from activitygraphs.datasets import Locations, Users
 from activitygraphs.models.architectures import build_scorer
 from activitygraphs.models.features import InputFeatures
-from activitygraphs.models.two_tower import TwoTowerScorer
+from activitygraphs.models.two_tower import LocationBias, NodeBias, TwoTowerScorer
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.training.lightning_module import RankingModule
@@ -105,8 +106,8 @@ class TestTwoTowerScorer:
         last_pair_layer = scorer.pair_network.lins[-1]
         torch.nn.init.zeros_(last_pair_layer.weight)
         torch.nn.init.zeros_(last_pair_layer.bias)
-        torch.nn.init.zeros_(scorer.location_bias.linear.weight)
-        torch.nn.init.zeros_(scorer.location_bias.linear.bias)
+        torch.nn.init.zeros_(scorer.bias.linear.weight)
+        torch.nn.init.zeros_(scorer.bias.linear.bias)
         batch = join_users(locations, users)
 
         with torch.no_grad():
@@ -156,3 +157,51 @@ class TestTwoTowerScorer:
 
         after = list(scorer.parameters())
         assert any(not torch.equal(old, new.detach()) for old, new in zip(before, after, strict=True))
+
+
+class TestInCityDiagnostics:
+    def test_the_default_bias_is_the_location_bias(self, config):
+        locations, _ = make_survey()
+
+        assert isinstance(scorer_of(config, InputFeatures(), locations).bias, LocationBias)
+
+    def test_the_node_bias_is_a_free_parameter_per_node_starting_at_zero(self, config):
+        locations, users = make_survey()
+        node_bias = OmegaConf.merge(config, {"bias": "node"})
+        scorer = scorer_of(node_bias, InputFeatures(), locations)
+
+        assert isinstance(scorer.bias, NodeBias)
+        assert torch.equal(scorer.bias(torch.ones(NUM_NODES, config.embedding_dim)), torch.zeros(NUM_NODES))
+        assert scorer(locations, join_users(locations, users)).shape == (NUM_USERS, NUM_NODES)
+
+    def test_an_unknown_bias_raises(self, config):
+        locations, _ = make_survey()
+        unknown = OmegaConf.merge(config, {"bias": "nope"})
+
+        with pytest.raises(ValueError, match="nope"):
+            scorer_of(unknown, InputFeatures(), locations)
+
+    def test_the_node_embedding_widens_the_node_tower_input(self, config):
+        locations, users = make_survey()
+        features = InputFeatures(use_rwpe=False)
+        plain = scorer_of(config, features, locations)
+        embedded = scorer_of(OmegaConf.merge(config, {"node_embedding": True}), features, locations)
+
+        assert plain.node_tower.node_embedding is None
+        assert embedded.node_tower.node_embedding is not None
+        assert embedded.node_tower.node_embedding.weight.shape == (NUM_NODES, config.embedding_dim)
+        width = embedded.node_tower.network.pre_lin.lins[0].in_features
+        assert width == NUM_LOCATION_FEATURES + config.embedding_dim
+        assert embedded(locations, join_users(locations, users)).shape == (NUM_USERS, NUM_NODES)
+
+    @pytest.mark.parametrize(
+        ("overrides", "name"),
+        [
+            ({}, "TwoTower-2"),
+            ({"bias": "node"}, "TwoTower-2-nodebias"),
+            ({"node_embedding": True}, "TwoTower-2-nodeemb"),
+            ({"bias": "node", "node_embedding": True}, "TwoTower-2-nodebias-nodeemb"),
+        ],
+    )
+    def test_the_name_records_the_diagnostics(self, config, overrides, name):
+        assert OmegaConf.merge(config, overrides).name == name

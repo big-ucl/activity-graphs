@@ -410,11 +410,31 @@ class TwoTowerConfig(GATConfig):
         embedding_dim: Width ``d`` of the node and user embeddings.
         num_user_layers: Number of linear layers of the user tower.
         num_pair_layers: Number of linear layers of the pairwise block.
+        bias: The bias of each node. ``location`` is a function of the node embedding, and ``node`` is a free
+            parameter per node, an in-city diagnostic.
+        node_embedding: Append a learned embedding of each node's identity, of width ``d``, to the node tower's
+            input. It is an in-city diagnostic.
     """
 
     embedding_dim: int
     num_user_layers: int
     num_pair_layers: int
+    bias: Literal["location", "node"]
+    node_embedding: bool
+
+
+def two_tower_name_suffix(bias: str, node_embedding: bool) -> str:
+    """Return the part of a two-tower name that records its in-city diagnostics, empty for the transferable model."""
+    suffix = ""
+    if bias == "node":
+        suffix += "-nodebias"
+    if node_embedding:
+        suffix += "-nodeemb"
+
+    return suffix
+
+
+OmegaConf.register_new_resolver("two_tower_suffix", two_tower_name_suffix)
 
 
 @dataclass

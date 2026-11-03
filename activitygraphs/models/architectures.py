@@ -28,7 +28,7 @@ from activitygraphs.models.features import (
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.schema_encoder import SchemaEncoder
 from activitygraphs.models.scorers import EncodedScorer, GraphScorer, NodeScorer, Scorer
-from activitygraphs.models.two_tower import LocationBias, NodeTower, TwoTowerScorer, UserTower
+from activitygraphs.models.two_tower import LocationBias, NodeBias, NodeTower, TwoTowerScorer, UserTower
 from activitygraphs.schema import DatasetSchema
 
 type ScorerBuilder = Callable[[ModelConfig, InputFeatures, Locations, DatasetSchema, HomePEConfig], Scorer]
@@ -169,21 +169,32 @@ def build_two_tower(
     ``use_rwpe`` appends the random-walk PE to the node tower's input, ``use_demographics`` gives the user attributes
     to the user tower, and ``use_home_pe`` and ``full_info`` give the home-anchored PE and the distance from home to
     the pairwise block.
+
+    Raises:
+        ValueError: If ``config.bias`` is neither ``location`` nor ``node``.
     """
     two_tower = cast(TwoTowerConfig, config)
     embedding_dim = two_tower.embedding_dim
     hidden_channels = two_tower.hidden_channels
     dropout = two_tower.dropout
+    num_nodes = locations.num_nodes
+
+    if two_tower.bias not in ("location", "node"):
+        raise ValueError(f"The two-tower bias is `location` or `node`, got {two_tower.bias!r}")
 
     num_rwpe_features = locations.num_rwpe_features if features.use_rwpe else None
+    node_embedding = torch.nn.Embedding(num_nodes, embedding_dim) if two_tower.node_embedding else None
     node_in_channels = schema.locations.width + (num_rwpe_features or 0)
+    if node_embedding is not None:
+        node_in_channels += embedding_dim
+
     node_sizes = NetworkSizes(
         in_channels=node_in_channels,
         out_channels=embedding_dim,
         edge_dim=schema.edges.width,
     )
     node_network = build_gat(two_tower, node_sizes)
-    node_tower = NodeTower(node_network, num_rwpe_features)
+    node_tower = NodeTower(node_network, num_rwpe_features, node_embedding)
 
     attributes = SchemaEncoder(schema.user_attributes) if features.use_demographics else None
     user_in_channels = embedding_dim + (0 if attributes is None else attributes.out_dim)
@@ -200,9 +211,9 @@ def build_two_tower(
     pair_in_channels = 2 * embedding_dim + (0 if pair_encoder is None else pair_encoder.out_dim)
     pair_network = NodeMLP(two_tower.num_pair_layers, pair_in_channels, hidden_channels, 1, dropout)
 
-    location_bias = LocationBias(embedding_dim)
+    bias = LocationBias(embedding_dim) if two_tower.bias == "location" else NodeBias(num_nodes)
 
-    return TwoTowerScorer(node_tower, user_tower, pair_encoder, pair_network, location_bias)
+    return TwoTowerScorer(node_tower, user_tower, pair_encoder, pair_network, bias)
 
 
 BUILDERS: dict[str, ScorerBuilder] = {
