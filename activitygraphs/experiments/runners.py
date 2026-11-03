@@ -86,15 +86,18 @@ def comparison_experiment(cfg: Config):
 
 
 def depth_sweep_experiment(cfg: Config):
-    """Sweep number of message passing layers of the GAT (with HPE and home distance) over ``cfg.experiment.depths``."""
+    """Sweep number of message passing layers of the GAT (with HPE and home distance) over ``cfg.experiment.depths``.
+
+    The depth-0 anchor is the ``NodeMLP`` with the same input features.
+    """
     setup = setup_experiment(cfg)
     gat = setup.models["gat"]
+    features = InputFeatures(full_info=True, use_home_pe=True)
 
-    variants = [Variant(setup.models["mlp"], InputFeatures(full_info=True), extra_hyperparams={"depth": 0})]
+    variants = [Variant(setup.models["mlp"], features, extra_hyperparams={"depth": 0})]
 
     for depth in cast(DepthSweepConfig, cfg.experiment).depths:
         gat_at_depth = with_overrides(gat, {"num_gcn_layers": depth})
-        features = InputFeatures(full_info=True, use_home_pe=True)
         variants.append(Variant(gat_at_depth, features, extra_hyperparams={"depth": depth}))
 
     model_results = run_variants(setup, variants)

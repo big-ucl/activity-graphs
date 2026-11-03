@@ -464,13 +464,13 @@ class TestDepthSweep:
     def test_the_mlp_anchor_is_depth_zero(self, cfg, monkeypatch):
         anchor = self._recorded(cfg, monkeypatch, [2])[0]
 
-        assert anchor["variant"].name == "MLP-dist"
+        assert anchor["variant"].name == "MLP-hpe-dist"
         assert variant_hyperparams(anchor["variant"])["depth"] == 0
 
     def test_each_depth_is_named_after_it(self, cfg, monkeypatch):
         names = [call["variant"].name for call in self._recorded(cfg, monkeypatch, [2, 4])]
 
-        assert names == ["MLP-dist", "GATv2-2-hpe-dist", "GATv2-4-hpe-dist"]
+        assert names == ["MLP-hpe-dist", "GATv2-2-hpe-dist", "GATv2-4-hpe-dist"]
 
 
 class TestWandBParams:
