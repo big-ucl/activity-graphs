@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from activitygraphs.config import Config
-from activitygraphs.datasets import VisitDataModule
+from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.training import WandBParams, evaluate_baseline
 from activitygraphs.ml.baselines import (
     Baseline,
@@ -32,7 +32,7 @@ class BaselineSpec:
 
 def measure_baselines(
     num_nodes,
-    datamodule: VisitDataModule,
+    datamodule: SurveyDataModule,
     loss: Loss,
     cfg: Config,
     wandb_params: WandBParams,
@@ -49,24 +49,25 @@ def measure_baselines(
     datamodule.setup()
     max_recall_k = cfg.train.max_recall_k
     train_seeds = list(cfg.train.train_seeds)
-    train_loader = datamodule.train_dataloader()
-    val_loader = datamodule.val_dataloader()
-    is_home_idx_user_node = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
+    train_users = datamodule.train_dataset.users
+    val_users = datamodule.val_dataset.users
+    distance_m = datamodule.locations.distance_m
+    is_home_idx_user_node = datamodule.schema.user_nodes.index_of("is_home")
 
-    gravity = GravityBaseline(is_home_idx_user_node).fit(train_loader)
-    gravity_binned = GravityBinnedBaseline(is_home_idx_user_node).fit(train_loader)
+    gravity = GravityBaseline().fit(train_users, distance_m)
+    gravity_binned = GravityBinnedBaseline().fit(train_users, distance_m)
     conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes, is_home_idx_user_node)
-    conditional_gravity = ConditionalGravityBaseline(gravity)
+    conditional_gravity = ConditionalGravityBaseline(gravity, is_home_idx_user_node)
 
     baselines = [
         BaselineSpec("Uniform", UniformBaseline()),
-        BaselineSpec("GlobalMarginal", GlobalBaseline().fit(train_loader)),
-        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes, is_home_idx_user_node).fit(train_loader)),
-        BaselineSpec("ConditionalVisitFrequency", conditional_visit_frequency.fit(train_loader, val_loader)),
+        BaselineSpec("GlobalMarginal", GlobalBaseline().fit(train_users)),
+        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes).fit(train_users)),
+        BaselineSpec("ConditionalVisitFrequency", conditional_visit_frequency.fit(train_users, val_users)),
         BaselineSpec("DistanceDecay", DistanceDecayBaseline()),
         BaselineSpec("Gravity", gravity),
         BaselineSpec("GravityBinned", gravity_binned),
-        BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_loader, val_loader)),
+        BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_users, val_users, distance_m)),
     ]
 
     results = [
@@ -78,7 +79,7 @@ def measure_baselines(
 
     for train_seed in train_seeds:
         home_zone_mf = HomeZoneMFBaseline(num_nodes, is_home_idx_user_node, max_recall_k, seed=train_seed)
-        home_zone_mf_fitted = home_zone_mf.fit(train_loader, val_loader)
+        home_zone_mf_fitted = home_zone_mf.fit(train_users, val_users)
         run_tag = f"seed{train_seed}" if len(train_seeds) > 1 else None
 
         home_zone_mf_results = evaluate_baseline(

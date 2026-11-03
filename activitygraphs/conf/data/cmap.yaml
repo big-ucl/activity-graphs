@@ -29,7 +29,5 @@ paths:
   external: data/external
   gtfs: ${..paths.external}/gtfs
 
-  tensors: ${..paths.processed}/Tensors
-
 # Upper edges in km of the distance-from-home bands the within-band AUC is read on.
 distance_bands: [ 2, 5, 10, 25 ]

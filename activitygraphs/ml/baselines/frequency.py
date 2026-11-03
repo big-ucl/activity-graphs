@@ -1,12 +1,11 @@
 """Frequency-based (no learning) baselines for visit prediction."""
 
 import torch
-import torch_geometric as pyg
 
-from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.batch import GraphBatch
+from activitygraphs.datasets.users import Users
 from activitygraphs.ml.baselines.common import (
     Baseline,
-    extract_per_user_tensors,
     fit_smoothing_strength,
     graph_home_indices,
     graph_node_indices,
@@ -23,7 +22,7 @@ def inverse_sigmoid(prob):
 class UniformBaseline(Baseline):
     """P(y_i = 1) = 0.5 for all nodes."""
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return a zero logit for every node, shape ``(num_nodes, 1)``."""
         return torch.zeros(batch.num_nodes, 1, device=batch.batch.device)
 
@@ -36,23 +35,19 @@ class GlobalBaseline(Baseline):
     def __init__(self):
         super().__init__()
 
-    def fit(self, loader: pyg.loader.DataLoader):
-        """Compute the global positive rate over ``loader`` and store as a logit."""
-        num_pos = 0
-        num_total = 0
-
-        for batch in loader:
-            num_pos += batch.y.sum().item()
-            num_total += batch.y.numel()
+    def fit(self, train: Users):
+        """Compute the global positive rate over the ``train`` users and store as a logit."""
+        num_pos = train.visited.sum().item()
+        num_total = train.visited.numel()
 
         p = torch.tensor(num_pos / num_total).clamp(1e-6, 1 - 1e-6)
         self.logit = inverse_sigmoid(p)
 
         return self
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return the global visit-rate logit for every node, shape ``(num_nodes, 1)``."""
-        return self.logit.expand(batch.num_nodes, 1).to(batch.batch.device)
+        return self.logit.expand(1, batch.num_nodes).to(batch.batch.device)
 
 
 class VisitFrequencyBaseline(Baseline):
@@ -60,19 +55,17 @@ class VisitFrequencyBaseline(Baseline):
 
     logits: torch.Tensor
 
-    def __init__(self, num_nodes: int, is_home_idx_user_node: int):
+    def __init__(self, num_nodes: int):
         super().__init__()
         self.num_nodes = num_nodes
-        self.is_home_idx_user_node = is_home_idx_user_node
 
-    def fit(self, loader: pyg.loader.DataLoader):
-        """Compute the home-excluded per-node visit rates over ``loader`` and store them as logits."""
-        per_user_tensors = extract_per_user_tensors(loader, self.is_home_idx_user_node)
-        self.logits = popularity_logit(per_user_tensors.labels, per_user_tensors.home_idx)
+    def fit(self, train: Users):
+        """Compute the home-excluded per-node visit rates over the ``train`` users and store them as logits."""
+        self.logits = popularity_logit(train.visited, train.home_node)
 
         return self
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return the visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
         return self.logits.to(batch.batch.device)[graph_node_indices(batch)].unsqueeze(1)
 
@@ -98,20 +91,18 @@ class ConditionalVisitFrequencyBaseline(Baseline):
         self.num_nodes = num_nodes
         self.is_home_idx_user_node = is_home_idx_user_node
 
-    def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
-        """Count visits per home on ``train_loader`` and pick the smoothing strength on ``val_loader``."""
-        train = extract_per_user_tensors(train_loader, self.is_home_idx_user_node)
-        val = extract_per_user_tensors(val_loader, self.is_home_idx_user_node)
+    def fit(self, train: Users, val: Users):
+        """Count visits per home over the ``train`` users and pick the smoothing strength on the ``val`` users."""
+        prior = home_excluded_visit_rate(train.visited, train.home_node)
+        counts, users = home_visit_counts(train.visited, train.home_node)
+        val_prior = prior.expand_as(val.visited)
 
-        prior = home_excluded_visit_rate(train.labels, train.home_idx)
-        counts, users = home_visit_counts(train.labels, train.home_idx)
-
-        self.strength = fit_smoothing_strength(counts, users, val, prior.expand_as(val.labels))
+        self.strength = fit_smoothing_strength(counts, users, val, val_prior)
         self.logits = torch.logit(smoothed_rate(counts, users, prior, self.strength))
 
         return self
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return the user's home-conditioned visit-frequency logit of each node, shape ``(num_nodes, 1)``."""
         homes = graph_home_indices(batch, self.is_home_idx_user_node)
         return self.logits.to(batch.batch.device)[homes, graph_node_indices(batch)].unsqueeze(1)

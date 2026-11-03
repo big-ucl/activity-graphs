@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from activitygraphs.datasets.dataset import dataset_fingerprint, read_fingerprint
 from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
-from activitygraphs.tensors import Fingerprint, LocationTensors, UserTensors, tensors_fingerprint
+from activitygraphs.tensors import Fingerprint, LocationTensors, UserTensors, tensors_fingerprint, tensors_path
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.tensors.bundles import UserFile
 from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR, tensor_cache_files
@@ -87,7 +87,7 @@ def make_cfg(name: str = "TPG", epochs: int = 50):
     return OmegaConf.create({
         "data": {
             "name": name,
-            "paths": {"processed": "data/processed/${..name}", "tensors": "${..paths.processed}/Tensors"},
+            "paths": {"processed": "data/processed/${..name}"},
         },
         "train": {"epochs": epochs, "split_seed": 42, "loss": {"type": "bpr"}},
     })
@@ -145,7 +145,7 @@ class TestDatasetFingerprint:
 
     def test_is_read_back_from_the_file_beside_the_tensors(self, tmp_path, cfg):
         dataset = make_dataset()
-        self.write_cache(tmp_path / cfg.data.paths.tensors, dataset)
+        self.write_cache(tensors_path(cfg.data, tmp_path), dataset)
 
         assert read_fingerprint(cfg, tmp_path) == fingerprint_of(cfg, dataset)
 
@@ -154,7 +154,7 @@ class TestDatasetFingerprint:
             read_fingerprint(cfg, tmp_path)
 
     def test_a_cache_missing_a_tensor_file_reads_as_uncached(self, tmp_path, cfg):
-        root = tmp_path / cfg.data.paths.tensors
+        root = tensors_path(cfg.data, tmp_path)
         self.write_cache(root, make_dataset())
         (root / USERS_DIR / UserFile.ATTRIBUTES_CAT).unlink()
 

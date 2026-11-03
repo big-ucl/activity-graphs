@@ -11,7 +11,7 @@ import torch
 from omegaconf import OmegaConf
 
 from activitygraphs.config import Config, ModelConfig
-from activitygraphs.datasets import HouseholdSplit, VisitDataModule
+from activitygraphs.datasets import HouseholdSplit, SurveyDataModule
 from activitygraphs.experiments.baselines import measure_baselines
 from activitygraphs.experiments.results import create_output_dir, run_config, save_config
 from activitygraphs.experiments.training import WandBParams, home_distance_frame
@@ -33,7 +33,7 @@ class ExperimentSetup:
 
     cfg: Config
     run_dir: Path | None
-    datamodule: VisitDataModule
+    datamodule: SurveyDataModule
     loss: Loss
     models: dict[str, ModelConfig]
     baseline_results: list[pl.DataFrame]
@@ -71,7 +71,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     L.seed_everything(split_seed, workers=True)
     torch.set_float32_matmul_precision("high")
 
-    datamodule = VisitDataModule(
+    datamodule = SurveyDataModule(
         cfg,
         split,
         seed=split_seed,
@@ -81,10 +81,8 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     datamodule.prepare_data()
     datamodule.setup()
 
-    train_dataset = datamodule.train_dataset
-
-    home_hop_distance = torch.as_tensor(train_dataset.locations.hop_distance, dtype=torch.float)
-    is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
+    home_hop_distance = datamodule.locations.hop_distance
+    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
     loss = build_loss(cfg.train.loss, home_hop_distance, is_home_idx, cfg.train.max_recall_k)
 
     overfitting = cfg.trainer.overfit_batches > 0
@@ -111,7 +109,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         run_dir=None if run_dir is None else str(run_dir),
     )
 
-    num_nodes = train_dataset.num_nodes
+    num_nodes = datamodule.locations.num_nodes
     baseline_results = measure_baselines(num_nodes, datamodule, loss, cfg, wandb_params) if with_baselines else []
 
     return ExperimentSetup(

@@ -15,6 +15,7 @@ from activitygraphs.tensors.cache import (
     read_tensors_fingerprint,
     save_tensors,
     tensors_fingerprint,
+    tensors_path,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "read_tensors_fingerprint",
     "save_tensors",
     "tensors_fingerprint",
+    "tensors_path",
 ]

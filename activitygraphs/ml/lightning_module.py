@@ -5,17 +5,15 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 import lightning as L
-import numpy as np
 import torch
 import torch.nn.functional as F
-import torch_geometric as pyg
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from torch import Tensor
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
-from activitygraphs.datasets.batch import UserBatch
-from activitygraphs.datasets.dataset import is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows, is_home_node_mask
+from activitygraphs.datasets.locations import Locations
 from activitygraphs.ml.baselines.common import Baseline
 from activitygraphs.ml.features import FeatureEncoder, compute_home_hops
 from activitygraphs.ml.losses import Loss
@@ -60,11 +58,13 @@ class RankingModule(L.LightningModule):
 
     Handles BCE or BPR training and per-epoch ranking metrics.
     Models must implement ``forward(x, edge_index, edge_attr, batch) -> logits``, except a ``Baseline``, which is
-    given the batch itself.
+    given the batch itself. Each batch of user rows is joined with the location graph and expanded to one copy of the
+    graph per user (on device). Every step receives that ``GraphBatch``.
 
     Args:
         model: Any ``nn.Module`` with the GNN forward signature, or a ``Baseline``.
         feature_encoder: Builds the input ``x`` to the ``model`` from the batch. None for a ``Baseline``.
+        locations: The location graph joined with each batch of users.
         lr: Initial learning rate for AdamW.
         loss: ``Loss`` instance.
         is_home_idx: Column index of ``is_home`` in ``batch.x_user_node``.
@@ -73,8 +73,6 @@ class RankingModule(L.LightningModule):
         weight_decay: AdamW weight decay.
         lr_scheduler: Keyword arguments of a ReduceLROnPlateau scheduler on the loss's monitored metric. None trains
             without a scheduler.
-        home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix, read for the per-positive hop
-            distances.
         calibration_bins: number of probability bins of the calibration error, default ``CALIBRATION_BINS``.
         compile_model: torch.compile the inner NN, default False.
         store_score_vectors: retain each test user's full per-node score vector.
@@ -86,16 +84,15 @@ class RankingModule(L.LightningModule):
     """
 
     model: torch.nn.Module
-    home_hop_distance: torch.Tensor
 
     def __init__(
         self,
         model: torch.nn.Module,
         feature_encoder: FeatureEncoder | None,
+        locations: Locations,
         lr: float,
         loss: Loss,
         is_home_idx: int,
-        home_hop_distance: np.ndarray | torch.Tensor,
         max_recall_k: int,
         recall_ks: Sequence[int],
         weight_decay: float = 1e-4,
@@ -109,9 +106,10 @@ class RankingModule(L.LightningModule):
         if (feature_encoder is None) != isinstance(model, Baseline):
             raise ValueError("Every model but a `Baseline` takes a `FeatureEncoder`, and a `Baseline` takes none.")
 
-        self.save_hyperparameters(ignore=["model", "feature_encoder", "loss", "home_hop_distance"])
+        self.save_hyperparameters(ignore=["model", "feature_encoder", "locations", "loss"])
         self.model = model
         self.encoder = feature_encoder
+        self.locations = locations
         self.lr = lr
         self.loss = loss
         self.max_recall_k = max_recall_k
@@ -134,9 +132,6 @@ class RankingModule(L.LightningModule):
         self.test_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
 
         self.is_home_idx = is_home_idx
-        self.register_buffer(
-            "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
-        )
 
         # Metrics: per-user test scores retained for paired model comparison, in column format
         # (one entry per test user), populated by `on_test_epoch_end`.
@@ -170,11 +165,18 @@ class RankingModule(L.LightningModule):
         """Return the wrapped model's logits for a batch's features."""
         return self.model(x, edge_index, edge_attr, batch)
 
-    def on_after_batch_transfer(self, batch: pyg.data.Batch, dataloader_idx: int) -> UserBatch:
-        """Return the typed view of each batch, which every step and callback then receives."""
-        return UserBatch.from_pyg(batch)
+    def on_after_batch_transfer(self, batch: UserRows, dataloader_idx: int) -> GraphBatch:
+        """Expand the on-device ``UserRows`` batch with the locations graph to return a ``GraphBatch``.
 
-    def training_step(self, batch: UserBatch, batch_idx: int) -> torch.Tensor:
+        Lightning hook: triggers after batch has been loaded to device, subsequent steps and callbacks thus receive a
+        ``GraphBatch`` as input.
+        """
+        self.locations = self.locations.to(batch.home_node.device)
+        users = UserBatch.join(batch, self.locations)
+
+        return GraphBatch.expand(users, self.locations)
+
+    def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
         """Compute and log the training loss for one batch."""
         out = self.compute_logits(batch)
         loss = self.loss.loss_fn(out, batch)
@@ -197,7 +199,7 @@ class RankingModule(L.LightningModule):
 
         return loss
 
-    def _compute_ranking_tensors(self, batch: UserBatch, logits: Tensor) -> RankingTensors:
+    def _compute_ranking_tensors(self, batch: GraphBatch, logits: Tensor) -> RankingTensors:
         scored_mask = ~is_home_node_mask(batch.x_user_node, self.is_home_idx)
         flat_logits = logits.squeeze(-1)
 
@@ -209,7 +211,7 @@ class RankingModule(L.LightningModule):
             scored=scored_mask,
         )
 
-    def _common_evaluation_step(self, batch: UserBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
+    def _common_evaluation_step(self, batch: GraphBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
         out = self.compute_logits(batch)
 
         generator = torch.Generator(device=out.device).manual_seed(42)
@@ -250,7 +252,7 @@ class RankingModule(L.LightningModule):
 
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
-    def validation_step(self, batch: UserBatch, batch_idx: int) -> None:
+    def validation_step(self, batch: GraphBatch, batch_idx: int) -> None:
         """Update the validation ranking, BCE and calibration metrics for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "val")
         ranking_tensors = eval_tensors.ranking
@@ -269,12 +271,13 @@ class RankingModule(L.LightningModule):
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
 
-    def test_step(self, batch: UserBatch, batch_idx: int) -> None:
+    def test_step(self, batch: GraphBatch, batch_idx: int) -> None:
         """Update the test metrics and collect per-user rankings and score vectors for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "test")
         ranking = eval_tensors.ranking
 
-        node_home_hops = compute_home_hops(batch, self.home_hop_distance, self.is_home_idx)
+        hop_distance = self.locations.hop_distance
+        node_home_hops = compute_home_hops(batch, hop_distance, self.is_home_idx)
 
         # Ranking metrics
         self.test_metrics.update(  # Feed sigmoid (see validation step)
@@ -321,7 +324,7 @@ class RankingModule(L.LightningModule):
 
         return optimizer
 
-    def compute_logits(self, batch: UserBatch) -> torch.Tensor:
+    def compute_logits(self, batch: GraphBatch) -> torch.Tensor:
         """Model logits for a batch."""
         if self.encoder is None:
             return self.model(batch)

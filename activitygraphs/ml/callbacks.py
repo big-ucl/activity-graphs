@@ -5,7 +5,7 @@ import logging
 import lightning as L
 import torch
 
-from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.batch import GraphBatch
 from activitygraphs.ml.lightning_module import RankingModule
 
 log = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ class OverfitDebugCallback(L.Callback):
     """Logs stats on the first batch and output stats on the last epoch's first batch."""
 
     def on_train_batch_start(
-        self, trainer: L.Trainer, pl_module: L.LightningModule, batch: UserBatch, batch_idx: int
+        self, trainer: L.Trainer, pl_module: L.LightningModule, batch: GraphBatch, batch_idx: int
     ) -> None:
         """Log input statistics on the first epoch and output statistics on the last."""
         if batch_idx != 0:

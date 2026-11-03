@@ -32,6 +32,4 @@ paths:
   external: data/external
   gtfs: ${..paths.external}/gtfs
 
-  tensors: ${..paths.processed}/Tensors
-
 distance_bands: [ 2, 5, 10, 25 ]

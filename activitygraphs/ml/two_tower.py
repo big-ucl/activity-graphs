@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import Literal, cast
 
 import lightning as L
-import numpy as np
 import torch
 import torch.nn.functional as F
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
@@ -12,8 +11,9 @@ from torch import Tensor
 from torchmetrics import MetricCollection
 from torchmetrics.classification import BinaryCalibrationError
 
-from activitygraphs.datasets.batch import UserGridBatch
-from activitygraphs.datasets.dataset import VisitDataset
+from activitygraphs.datasets.batch import UserBatch, UserRows
+from activitygraphs.datasets.locations import Locations
+from activitygraphs.datasets.users import Users
 from activitygraphs.ml.lightning_module import CALIBRATION_BINS, EvaluationTensors, RankingTensors
 from activitygraphs.ml.losses import Loss
 from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
@@ -36,15 +36,11 @@ class NodeBias(torch.nn.Module):
         self.register_buffer("logits", logits)
 
     @classmethod
-    def fit(cls, dataset: VisitDataset) -> "NodeBias":
-        """Return the bias at the home-excluded popularity logit of the users of ``dataset``."""
-        user_idx = torch.as_tensor(list(dataset.indices()), dtype=torch.long)
-        labels = dataset.users.visited[user_idx]
-        home_idx = dataset.users.home_node[user_idx]
+    def fit(cls, users: Users) -> "NodeBias":
+        """Return the bias at the home-excluded popularity logit of ``users``."""
+        return cls(popularity_logit(users.visited, users.home_node))
 
-        return cls(popularity_logit(labels, home_idx))
-
-    def forward(self, batch: UserGridBatch) -> Tensor:
+    def forward(self, batch: UserBatch) -> Tensor:
         """Return the bias of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
         return self.logits.expand(batch.num_users, -1)
 
@@ -52,15 +48,14 @@ class NodeBias(torch.nn.Module):
 class TwoTowerModule(L.LightningModule):
     """LightningModule for the models that score every node of a batch of users at once, from per-user rows.
 
-    The model maps a ``UserGridBatch`` to logits ``[num_users, num_nodes]``. The metrics are those of
+    The model maps a ``UserBatch`` to logits ``[num_users, num_nodes]``. The metrics are those of
     ``RankingModule``, over the same candidates: every node but each user's own home node.
 
     Args:
-        model: Module mapping a ``UserGridBatch`` to logits ``[num_users, num_nodes]``.
+        model: Module mapping a ``UserBatch`` to logits ``[num_users, num_nodes]``.
+        locations: The location graph joined with each batch of users.
         lr: Initial learning rate for AdamW.
-        loss: ``Loss`` over the grid of a ``UserGridBatch``.
-        home_hop_distance: ``[num_nodes, num_nodes]`` contiguity-hop distance matrix, read for the per-positive hop
-            distances.
+        loss: ``Loss`` over the grid of a ``UserBatch``.
         max_recall_k: Largest rank cutoff ``K`` of the headline ``avg_recall@K``.
         recall_ks: Rank cutoffs of the logged ``recall@k``.
         weight_decay: AdamW weight decay.
@@ -68,14 +63,12 @@ class TwoTowerModule(L.LightningModule):
         store_score_vectors: Retain each test user's full per-node score vector.
     """
 
-    home_hop_distance: Tensor
-
     def __init__(
         self,
         model: torch.nn.Module,
+        locations: Locations,
         lr: float,
-        loss: Loss[UserGridBatch],
-        home_hop_distance: np.ndarray | Tensor,
+        loss: Loss[UserBatch],
         max_recall_k: int,
         recall_ks: Sequence[int],
         weight_decay: float,
@@ -83,8 +76,9 @@ class TwoTowerModule(L.LightningModule):
         store_score_vectors: bool = False,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "loss", "home_hop_distance"])
+        self.save_hyperparameters(ignore=["model", "locations", "loss"])
         self.model = model
+        self.locations = locations
         self.lr = lr
         self.loss = loss
         self.max_recall_k = max_recall_k
@@ -100,23 +94,21 @@ class TwoTowerModule(L.LightningModule):
         self.val_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
         self.test_calibration = BinaryCalibrationError(n_bins=calibration_bins, norm="l1")
 
-        self.register_buffer(
-            "home_hop_distance", torch.as_tensor(home_hop_distance, dtype=torch.float), persistent=False
-        )
-
         self.test_per_user = PerUserRanking(store_score_vectors=store_score_vectors)
         self.per_user_columns: dict[str, list] = {}
         self.per_user_score_vectors: list[list[float]] = []
 
-    def forward(self, batch: UserGridBatch) -> Tensor:
+    def forward(self, batch: UserBatch) -> Tensor:
         """Return the model's logits for every node of every user of ``batch``, ``[num_users, num_nodes]``."""
         return self.model(batch)
 
-    def on_after_batch_transfer(self, batch: dict[str, Tensor], dataloader_idx: int) -> UserGridBatch:
-        """Return the typed view of each batch, which every step then receives."""
-        return UserGridBatch.from_dict(batch)
+    def on_after_batch_transfer(self, batch: UserRows, dataloader_idx: int) -> UserBatch:
+        """Return the rows ``batch`` joined with the location graph, the ``UserBatch`` every step receives."""
+        self.locations = self.locations.to(batch.home_node.device)
 
-    def training_step(self, batch: UserGridBatch, batch_idx: int) -> Tensor:
+        return UserBatch.join(batch, self.locations)
+
+    def training_step(self, batch: UserBatch, batch_idx: int) -> Tensor:
         """Compute and log the training loss for one batch."""
         logits = self(batch)
         loss = self.loss.loss_fn(logits, batch)
@@ -126,20 +118,19 @@ class TwoTowerModule(L.LightningModule):
 
         return loss
 
-    def _evaluation_tensors(self, batch: UserGridBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
+    def _evaluation_tensors(self, batch: UserBatch, step_prefix: Literal["val", "test"]) -> EvaluationTensors:
         """Score ``batch``, log its losses, and return its tensors flattened to one row per (user, node) pair."""
         logits = self(batch)
 
         generator = torch.Generator(device=logits.device).manual_seed(42)
         loss = self.loss.loss_fn(logits, batch, generator)
-        bce = F.binary_cross_entropy_with_logits(logits, batch.y.float())
+        bce = F.binary_cross_entropy_with_logits(logits, batch.visited.float())
 
-        is_home = F.one_hot(batch.home_node, batch.num_nodes).bool()
-        scored = ~is_home.reshape(-1)
+        scored = ~batch.is_home.reshape(-1)
         flat_logits = logits.reshape(-1)
         probs = flat_logits.sigmoid()
-        target = batch.y.reshape(-1)
-        users = batch.user_id[:, None].expand_as(logits).reshape(-1)
+        target = batch.visited.reshape(-1)
+        users = batch.user_idx[:, None].expand_as(logits).reshape(-1)
 
         ranking = RankingTensors(
             logits=flat_logits[scored],
@@ -171,7 +162,7 @@ class TwoTowerModule(L.LightningModule):
 
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
-    def validation_step(self, batch: UserGridBatch, batch_idx: int) -> None:
+    def validation_step(self, batch: UserBatch, batch_idx: int) -> None:
         """Update the validation ranking, BCE and calibration metrics for one batch."""
         eval_tensors = self._evaluation_tensors(batch, "val")
         ranking = eval_tensors.ranking
@@ -187,12 +178,12 @@ class TwoTowerModule(L.LightningModule):
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
 
-    def test_step(self, batch: UserGridBatch, batch_idx: int) -> None:
+    def test_step(self, batch: UserBatch, batch_idx: int) -> None:
         """Update the test metrics and collect per-user rankings and score vectors for one batch."""
         eval_tensors = self._evaluation_tensors(batch, "test")
         ranking = eval_tensors.ranking
 
-        node_home_hops = self.home_hop_distance[batch.home_node].reshape(-1)
+        node_home_hops = batch.home_hops.reshape(-1)
 
         self.test_metrics.update(ranking.probs, ranking.target, indexes=ranking.users)
 

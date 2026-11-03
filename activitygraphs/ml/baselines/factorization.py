@@ -1,13 +1,11 @@
 """Matrix factorisation baseline: the MTF_BPR model of Phan et al. (2022), indexed by home node."""
 
 import torch
-import torch_geometric as pyg
 
-from activitygraphs.datasets.batch import UserBatch
+from activitygraphs.datasets.batch import GraphBatch
+from activitygraphs.datasets.users import Users
 from activitygraphs.ml.baselines.common import (
     Baseline,
-    PerUserTensors,
-    extract_per_user_tensors,
     graph_home_indices,
     graph_node_indices,
     non_home_mask,
@@ -82,15 +80,12 @@ class HomeZoneMFBaseline(Baseline):
         self.eval_every = eval_every
         self.seed = seed
 
-    def fit(self, train_loader: pyg.loader.DataLoader, val_loader: pyg.loader.DataLoader):
-        """Fit the factors by BPR on the home-pooled training visit counts, keeping the best validation epoch.
+    def fit(self, train: Users, val: Users):
+        """Fit the factors by BPR on the home-pooled visit counts of the ``train`` users, keeping the best epoch.
 
-        The best epoch is the one whose validation ``avg_recall`` is highest.
+        The best epoch is the one whose ``avg_recall`` over the ``val`` users is highest.
         """
-        train = extract_per_user_tensors(train_loader, self.is_home_idx_user_node)
-        val = extract_per_user_tensors(val_loader, self.is_home_idx_user_node)
-
-        counts, _ = home_visit_counts(train.labels, train.home_idx)
+        counts, _ = home_visit_counts(train.visited, train.home_node)
         pos_weight = counts.fill_diagonal_(0)
         neg_weight = (pos_weight == 0).float().fill_diagonal_(0)
 
@@ -124,15 +119,15 @@ class HomeZoneMFBaseline(Baseline):
 
         return self
 
-    def _val_avg_recall(self, scores: torch.Tensor, val: PerUserTensors) -> float:
+    def _val_avg_recall(self, scores: torch.Tensor, val: Users) -> float:
         """Mean ``avg_recall@max_recall_k`` of the validation users, ranking every node but their own home."""
-        user_scores = scores[val.home_idx]
+        user_scores = scores[val.home_node]
         candidates = non_home_mask(val)
-        users = torch.arange(len(val.home_idx)).unsqueeze(1).expand_as(user_scores)
+        users = torch.arange(len(val.home_node)).unsqueeze(1).expand_as(user_scores)
 
         avg_recall, _, _ = per_user_recall(
             user_scores[candidates],
-            val.labels[candidates],
+            val.visited[candidates],
             users[candidates],
             self.max_recall_k,
             [self.max_recall_k],
@@ -140,7 +135,7 @@ class HomeZoneMFBaseline(Baseline):
 
         return float(avg_recall.mean())
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return the fitted home-by-node score of each node, shape ``(num_nodes, 1)``."""
         homes = graph_home_indices(batch, self.is_home_idx_user_node)
         return self.scores.to(batch.batch.device)[homes, graph_node_indices(batch)].unsqueeze(1)

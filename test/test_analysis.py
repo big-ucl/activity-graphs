@@ -1,7 +1,6 @@
 """Tests for the post-hoc analysis of experiment outputs (seed spread, pairing, hop bands, home zones)."""
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
@@ -9,6 +8,7 @@ import pytest
 import torch
 import torch_geometric as pyg
 from encoders import make_encoder
+from graphs import chain_edge_index, make_locations
 from torchmetrics import Metric
 
 from activitygraphs.analysis import (
@@ -86,26 +86,6 @@ def make_per_user() -> pl.DataFrame:
     ]
 
     return pl.DataFrame(rows).with_columns(pl.col("user_id").replace_strict(REALISED_SIZES).alias(REALISED_SIZE_COLUMN))
-
-
-@dataclass
-class FakeUsers:
-    """Minimal stand-in exposing only what ``home_zone_summary`` reads off ``Users``."""
-
-    home_node: torch.Tensor
-
-
-@dataclass
-class FakeDataset:
-    """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``VisitDataset``."""
-
-    users: FakeUsers
-    num_nodes: int
-
-
-def make_dataset(home_nodes: list[int], n_nodes: int = 3) -> FakeDataset:
-    """Dataset whose user ``i`` lives at node ``home_nodes[i]``."""
-    return FakeDataset(users=FakeUsers(home_node=torch.tensor(home_nodes)), num_nodes=n_nodes)
 
 
 def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:
@@ -881,15 +861,16 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
         graph.user_id = torch.tensor([user])
         graphs.append(graph)
 
-    idx = torch.arange(num_nodes)
+    x = torch.zeros(num_nodes, 1)
+    locations = make_locations(x, chain_edge_index(num_nodes))
     encoder = make_encoder(1, 1, 1)
     module = RankingModule(
         model=NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1),
         feature_encoder=encoder,
+        locations=locations,
         lr=1e-3,
         loss=BCELoss,
         is_home_idx=0,
-        home_hop_distance=(idx[:, None] - idx[None, :]).abs().float(),
         max_recall_k=budget,
         recall_ks=[1, 5],
     )
@@ -944,27 +925,27 @@ class TestLiftOverReference:
 class TestHomeZones:
     def test_counts_users_by_argmax_of_the_home_column(self):
         # Four users over three nodes; is_home is column 1. Homes: node 2, 2, 0, 2.
-        row = home_zone_summary(make_dataset([2, 2, 0, 2])).to_dicts()[0]
+        row = home_zone_summary(torch.tensor([2, 2, 0, 2]), num_nodes=3).to_dicts()[0]
         assert row["n_users"] == 4
         assert row["n_occupied_zones"] == 2
         assert row["max"] == 3
 
     def test_summary_divides_by_occupied_zones_not_all_nodes(self):
-        dataset = make_dataset([0] * 30 + [1] * 10, n_nodes=100)
-        row = home_zone_summary(dataset).to_dicts()[0]
+        home_node = torch.tensor([0] * 30 + [1] * 10)
+        row = home_zone_summary(home_node, num_nodes=100).to_dicts()[0]
         assert row["n_users"] == 40
         assert row["n_occupied_zones"] == 2
         assert row["users_per_occupied_zone"] == 20.0
         assert row["users_per_node"] == 0.4
 
     def test_occupancy_shares_are_over_users(self):
-        dataset = make_dataset([0] * 60 + [1] * 20 + [2] * 5)
-        row = home_zone_summary(dataset).to_dicts()[0]
+        home_node = torch.tensor([0] * 60 + [1] * 20 + [2] * 5)
+        row = home_zone_summary(home_node, num_nodes=3).to_dicts()[0]
         assert row["share_users_ge_10"] == 80 / 85
         assert row["share_users_ge_60"] == 60 / 85
 
     def test_thresholds_are_configurable(self):
-        dataset = make_dataset([0] * 60 + [1] * 20 + [2] * 5)
-        row = home_zone_summary(dataset, occupancy_thresholds=[5]).to_dicts()[0]
+        home_node = torch.tensor([0] * 60 + [1] * 20 + [2] * 5)
+        row = home_zone_summary(home_node, num_nodes=3, occupancy_thresholds=[5]).to_dicts()[0]
         assert set(row) & {"share_users_ge_5"} == {"share_users_ge_5"}
         assert row["share_users_ge_5"] == 1.0

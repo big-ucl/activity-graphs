@@ -18,7 +18,7 @@ from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorS
 from activitygraphs.surveys.base import SurveyData
 from activitygraphs.surveys.registry import load_survey
 from activitygraphs.tensors.bundles import LocationTensors, SurveyTensors, UserTensors, check_tensors
-from activitygraphs.tensors.cache import read_tensors, save_tensors
+from activitygraphs.tensors.cache import read_tensors, save_tensors, tensors_path
 from activitygraphs.utils import get_project_root
 
 COLS_EXCLUDED_FROM_FEATURES = [
@@ -303,13 +303,13 @@ def build_survey_tensors(cfg: DataConfig, project_root: Path) -> SurveyTensors:
 
 
 def load_tensors(cfg: Config, project_root: Path | None = None) -> SurveyTensors:
-    """Return the ``SurveyTensors`` cached at ``cfg.data.paths.tensors``, building and caching them first if needed.
+    """Return the ``SurveyTensors`` cached at ``tensors_path``, building and caching them first if needed.
 
     Raises:
         ValueError: The cached tensors fail ``check_tensors``.
     """
     project_root = get_project_root(project_root)
-    root = project_root / cfg.data.paths.tensors
+    root = tensors_path(cfg.data, project_root)
 
     try:
         return read_tensors(root)

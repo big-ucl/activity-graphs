@@ -2,8 +2,9 @@
 
 import pytest
 import torch
-import torch_geometric as pyg
+from graphs import expand_users, make_locations, make_users
 
+from activitygraphs.datasets import Users
 from activitygraphs.ml.baselines.factorization import HomeZoneMFBaseline
 from activitygraphs.ml.losses import dense_bpr_loss
 
@@ -16,21 +17,6 @@ BLOCK_SIZE = 4
 # Only the first two nodes of each block house anyone, so the other rows of the visit matrix stay empty.
 HOME_NODES = [0, 1, 4, 5, 8, 9]
 RESIDENTS_PER_HOME = 6
-
-
-def make_graphs(labels: torch.Tensor, homes: torch.Tensor) -> list[pyg.data.Data]:
-    """One graph per user, with ``is_home`` as the only per-user node feature."""
-    graphs = []
-    for user_labels, home in zip(labels, homes, strict=True):
-        x_user_node = torch.zeros(len(user_labels), 1)
-        x_user_node[home, IS_HOME_IDX] = 1.0
-        x_loc = torch.zeros(len(user_labels), NUM_LOCATION_FEATURES)
-        y = user_labels.float().unsqueeze(-1)
-        edge_index = torch.zeros(2, 0, dtype=torch.long)
-        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=edge_index, y=y)
-        graph.distances_m = torch.zeros(len(user_labels), 1)
-        graphs.append(graph)
-    return graphs
 
 
 def block_preference(seed: int = 0, visit_home: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
@@ -65,18 +51,18 @@ def block_of(node: int) -> int:
     return node // BLOCK_SIZE
 
 
-def make_loaders(**kwargs) -> tuple[pyg.loader.DataLoader, pyg.loader.DataLoader]:
-    """Train and validation loaders over the same block-preference users."""
-    graphs = make_graphs(*block_preference(**kwargs))
-    return pyg.loader.DataLoader(graphs, batch_size=6), pyg.loader.DataLoader(graphs, batch_size=6)
+def make_splits(**kwargs) -> tuple[Users, Users]:
+    """Train and validation splits of the same block-preference users."""
+    users = make_users(*block_preference(**kwargs))
+    return users, users
 
 
 @pytest.fixture
-def loaders():
-    return make_loaders()
+def splits():
+    return make_splits()
 
 
-def fitted(loaders, **kwargs) -> HomeZoneMFBaseline:
+def fitted(splits, **kwargs) -> HomeZoneMFBaseline:
     baseline = HomeZoneMFBaseline(
         num_nodes=N_NODES,
         is_home_idx_user_node=IS_HOME_IDX,
@@ -86,7 +72,7 @@ def fitted(loaders, **kwargs) -> HomeZoneMFBaseline:
         eval_every=20,
         **kwargs,
     )
-    return baseline.fit(*loaders)
+    return baseline.fit(*splits)
 
 
 class TestDenseBPRLoss:
@@ -128,8 +114,8 @@ class TestDenseBPRLoss:
 
 
 class TestHomeZoneMFBaseline:
-    def test_it_ranks_the_home_block_above_the_others(self, loaders):
-        scores = fitted(loaders).scores
+    def test_it_ranks_the_home_block_above_the_others(self, splits):
+        scores = fitted(splits).scores
 
         for home in HOME_NODES:
             same_block = torch.tensor([block_of(n) == block_of(home) and n != home for n in range(N_NODES)])
@@ -137,39 +123,42 @@ class TestHomeZoneMFBaseline:
 
             assert scores[home][same_block].min() > scores[home][other_block].max()
 
-    def test_a_home_without_residents_scores_the_bias_alone(self, loaders):
-        scores = fitted(loaders).scores
+    def test_a_home_without_residents_scores_the_bias_alone(self, splits):
+        scores = fitted(splits).scores
         empty = [n for n in range(N_NODES) if n not in HOME_NODES]
 
         rows = scores[empty]
         assert torch.allclose(rows, rows[0].expand_as(rows), atol=1e-6)
 
     def test_visits_to_the_home_node_do_not_change_the_fit(self):
-        with_home = fitted(make_loaders(visit_home=True), seed=4).scores
-        without_home = fitted(make_loaders(visit_home=False), seed=4).scores
+        with_home = fitted(make_splits(visit_home=True), seed=4).scores
+        without_home = fitted(make_splits(visit_home=False), seed=4).scores
 
         assert torch.equal(with_home, without_home)
 
-    def test_forward_reads_the_score_of_each_user_home_and_node(self, loaders):
-        train_loader, _ = loaders
-        baseline = fitted(loaders)
-        batch = next(iter(train_loader))
+    def test_forward_reads_the_score_of_each_user_home_and_node(self, splits):
+        train, _ = splits
+        baseline = fitted(splits)
+        users = train.subset(list(range(6)))
+        x = torch.zeros(N_NODES, NUM_LOCATION_FEATURES)
+        locations = make_locations(x, torch.zeros(2, 0, dtype=torch.long))
+        batch = expand_users(locations, users)
 
         out = baseline(batch)
-        homes = batch.x_user_node[:, IS_HOME_IDX].reshape(-1, N_NODES).argmax(dim=1)
+        homes = users.home_node
         expected = baseline.scores[homes.repeat_interleave(N_NODES), torch.arange(N_NODES).repeat(len(homes))]
 
         assert out.shape == (len(homes) * N_NODES, 1)
         assert torch.allclose(out.reshape(-1), expected)
 
-    def test_it_reports_the_validation_recall_of_the_epoch_it_keeps(self, loaders):
-        baseline = fitted(loaders)
+    def test_it_reports_the_validation_recall_of_the_epoch_it_keeps(self, splits):
+        baseline = fitted(splits)
 
         assert 0.0 < baseline.val_avg_recall <= 1.0
         assert baseline.best_epoch is not None
 
-    def test_the_same_seed_gives_the_same_scores(self, loaders):
-        assert torch.equal(fitted(loaders, seed=3).scores, fitted(loaders, seed=3).scores)
+    def test_the_same_seed_gives_the_same_scores(self, splits):
+        assert torch.equal(fitted(splits, seed=3).scores, fitted(splits, seed=3).scores)
 
-    def test_different_seeds_give_different_scores(self, loaders):
-        assert not torch.equal(fitted(loaders, seed=1).scores, fitted(loaders, seed=2).scores)
+    def test_different_seeds_give_different_scores(self, splits):
+        assert not torch.equal(fitted(splits, seed=1).scores, fitted(splits, seed=2).scores)

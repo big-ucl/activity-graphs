@@ -8,8 +8,7 @@ import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 
 from activitygraphs.config import LossConfig
-from activitygraphs.datasets.batch import UserBatch, UserGridBatch
-from activitygraphs.datasets.dataset import is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, UserBatch, is_home_node_mask
 
 
 class LossFn[BatchT](Protocol):
@@ -31,7 +30,7 @@ class Loss[BatchT]:
 
 def bce_loss(
     logits: torch.Tensor,
-    batch: UserBatch,
+    batch: GraphBatch,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Standard BCE loss with logits."""
@@ -52,11 +51,11 @@ def build_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_idx: int,
 
 
 def _build_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_idx: int, max_recall_k: int) -> Loss:
-    def _uniform_bpr_loss(logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None):
+    def _uniform_bpr_loss(logits: torch.Tensor, batch: GraphBatch, generator: torch.Generator | None = None):
         return bpr_loss(logits, batch.y, batch.batch, n_pairs=cfg.n_pairs, generator=generator)
 
     def _hard_neg_bpr_loss(
-        logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
+        logits: torch.Tensor, batch: GraphBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
         neg_restrict = _near_home_negative_mask(batch, distance_matrix, is_home_idx, cfg.is_near_threshold)
         return bpr_loss(logits, batch.y, batch.batch, cfg.n_pairs, neg_restrict, generator)
@@ -137,7 +136,7 @@ def dense_bpr_loss(
 
 
 def _near_home_negative_mask(
-    batch: UserBatch, distance_matrix: torch.Tensor, is_home_idx: int, is_near_threshold: int
+    batch: GraphBatch, distance_matrix: torch.Tensor, is_home_idx: int, is_near_threshold: int
 ) -> torch.Tensor:
     """Boolean ``[B, N]`` mask of unvisited nodes within ``hard_k`` hops of each user's home.
 
@@ -167,38 +166,37 @@ def _near_home_negative_mask(
 
 def grid_bce_loss(
     logits: torch.Tensor,
-    batch: UserGridBatch,
+    batch: UserBatch,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Standard BCE loss with logits, over the ``[num_users, num_nodes]`` grid of scores."""
-    return F.binary_cross_entropy_with_logits(logits, batch.y.float())
+    return F.binary_cross_entropy_with_logits(logits, batch.visited.float())
 
 
 GridBCELoss = Loss(name="bce", loss_fn=grid_bce_loss, monitor="val_bce", monitor_mode="min")
 
 
-def build_grid_loss(cfg: LossConfig, distance_matrix: torch.Tensor, max_recall_k: int) -> Loss[UserGridBatch]:
-    """Build the loss selected by ``cfg.type``, over the ``[num_users, num_nodes]`` grid of a ``UserGridBatch``."""
+def build_grid_loss(cfg: LossConfig, max_recall_k: int) -> Loss[UserBatch]:
+    """Build the loss selected by ``cfg.type``, over the ``[num_users, num_nodes]`` grid of a ``UserBatch``."""
     if cfg.type == "bce":
         return GridBCELoss
     if cfg.type == "bpr":
-        return _build_grid_bpr_loss(cfg, distance_matrix, max_recall_k)
+        return _build_grid_bpr_loss(cfg, max_recall_k)
 
     raise ValueError(f"Unknown loss type {cfg.type}")
 
 
-def _build_grid_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, max_recall_k: int) -> Loss[UserGridBatch]:
+def _build_grid_bpr_loss(cfg: LossConfig, max_recall_k: int) -> Loss[UserBatch]:
     def _uniform_bpr_loss(
-        logits: torch.Tensor, batch: UserGridBatch, generator: torch.Generator | None = None
+        logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
-        return grid_bpr_loss(logits, batch.y, cfg.n_pairs, generator=generator)
+        return grid_bpr_loss(logits, batch.visited, cfg.n_pairs, generator=generator)
 
     def _hard_neg_bpr_loss(
-        logits: torch.Tensor, batch: UserGridBatch, generator: torch.Generator | None = None
+        logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
-        home_distances = distance_matrix.to(logits.device)[batch.home_node]
-        near_home = home_distances <= cfg.is_near_threshold
-        return grid_bpr_loss(logits, batch.y, cfg.n_pairs, near_home, generator)
+        near_home = batch.home_hops <= cfg.is_near_threshold
+        return grid_bpr_loss(logits, batch.visited, cfg.n_pairs, near_home, generator)
 
     _bpr_loss = _hard_neg_bpr_loss if cfg.neg_sampler == "hard" else _uniform_bpr_loss
     return Loss(name="bpr", loss_fn=_bpr_loss, monitor=f"val_avg_recall@{max_recall_k}", monitor_mode="max")

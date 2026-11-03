@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from activitygraphs.config import DataConfig
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.bundles import (
     LocationFile,
@@ -16,10 +17,16 @@ from activitygraphs.tensors.bundles import (
 
 type Fingerprint = dict
 
+TENSORS_DIR = "Tensors"
 LOCATIONS_DIR = "locations"
 USERS_DIR = "users"
 SCHEMA_FILE = "schema.json"
 FINGERPRINT_FILE = "fingerprint.json"
+
+
+def tensors_path(cfg: DataConfig, project_root: Path) -> Path:
+    """Return the directory of the tensor cache of the survey of ``cfg``, ``cfg.paths.processed/Tensors/``."""
+    return project_root / cfg.paths.processed / TENSORS_DIR
 
 
 def tensor_cache_files(root: Path) -> list[Path]:

@@ -52,7 +52,7 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
     return ExperimentSetup(
         cfg=cfg,
         run_dir=None,
-        datamodule=types.SimpleNamespace(train_dataset=None),  # type: ignore[arg-type]
+        datamodule=types.SimpleNamespace(locations=None, schema=None),  # type: ignore[arg-type]
         loss=None,  # type: ignore[arg-type]
         models=dict(cfg.models),
         baseline_results=[],
@@ -63,9 +63,9 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
     )
 
 
-def make_dataset(num_location_features: int = 5, num_attributes: int = 3, num_edge_features: int = 2):
-    """Stand-in exposing only what ``build_feature_encoder`` and ``build_model`` read off a ``VisitDataset``."""
-    schema = DatasetSchema(
+def make_schema(num_location_features: int = 5, num_attributes: int = 3, num_edge_features: int = 2) -> DatasetSchema:
+    """The schema of a survey with continuous location, edge and user attribute columns."""
+    return DatasetSchema(
         locations=continuous_schema("locations", num_location_features),
         edges=continuous_schema("edges", num_edge_features),
         user_nodes=USER_NODE_SCHEMA,
@@ -73,11 +73,11 @@ def make_dataset(num_location_features: int = 5, num_attributes: int = 3, num_ed
         distances=continuous_schema("distances", 1),
         targets=continuous_schema("targets", 1),
     )
-    return types.SimpleNamespace(
-        schema=schema,
-        num_classes=2,
-        locations=types.SimpleNamespace(edge_attr=torch.zeros(8, num_edge_features), num_rwpe_features=2),
-    )
+
+
+def make_locations() -> types.SimpleNamespace:
+    """Stand-in exposing only what ``build_feature_encoder`` reads off ``Locations``."""
+    return types.SimpleNamespace(num_rwpe_features=2, hop_distance=torch.zeros(4, 4))
 
 
 def record_training(monkeypatch, frame=None) -> list[dict]:
@@ -91,9 +91,11 @@ def record_training(monkeypatch, frame=None) -> list[dict]:
 
     monkeypatch.setattr(runners, "train_and_evaluate_model", train_and_evaluate_model)
     monkeypatch.setattr(
-        runners, "build_feature_encoder", lambda variant, dataset, home_pe_cfg: types.SimpleNamespace(out_dim=1)
+        runners,
+        "build_feature_encoder",
+        lambda variant, locations, schema, home_pe_cfg: types.SimpleNamespace(out_dim=1),
     )
-    monkeypatch.setattr(runners, "build_model", lambda variant, dataset, in_channels: torch.nn.Linear(1, 1))
+    monkeypatch.setattr(runners, "build_model", lambda variant, schema, in_channels: torch.nn.Linear(1, 1))
 
     return calls
 
@@ -161,56 +163,56 @@ class TestVariant:
 class TestBuildModel:
     @pytest.mark.parametrize("key", ["mlp", "gat", "gps"])
     def test_every_architecture_builds(self, cfg, key):
-        model = build_model(Variant(cfg.models[key]), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
+        model = build_model(Variant(cfg.models[key]), make_schema(), IN_CHANNELS)
 
         assert isinstance(model, torch.nn.Module)
 
     def test_input_width_follows_the_variant_features(self, cfg):
-        dataset = make_dataset(num_location_features=5, num_attributes=3)
-        plain = build_feature_encoder(Variant(cfg.models.mlp, use_demographics=False), dataset, HOME_PE)  # type: ignore[arg-type]
-        dist = build_feature_encoder(Variant(cfg.models.mlp, full_info=True), dataset, HOME_PE)  # type: ignore[arg-type]
+        locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
+        plain = build_feature_encoder(Variant(cfg.models.mlp, use_demographics=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        dist = build_feature_encoder(Variant(cfg.models.mlp, full_info=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert plain.out_dim == 5 + 1 + 2
         assert dist.out_dim == 5 + 1 + 2 + 3 + 1
 
     def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
-        dataset = make_dataset(num_location_features=5, num_attributes=3)
-        encoder = build_feature_encoder(Variant(cfg.models.mlp, full_info=True, use_rwpe=False), dataset, HOME_PE)  # type: ignore[arg-type]
+        locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
+        variant = Variant(cfg.models.mlp, full_info=True, use_rwpe=False)
+        encoder = build_feature_encoder(variant, locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert encoder.out_dim == 5 + 1 + 3 + 1
 
     def test_home_pe_adds_its_bins(self, cfg):
-        dataset = make_dataset()
-        dataset.locations.hop_distance = torch.zeros(4, 4)
-        plain = build_feature_encoder(Variant(cfg.models.mlp), dataset, HOME_PE)  # type: ignore[arg-type]
-        with_pe = build_feature_encoder(Variant(cfg.models.mlp, use_home_pe=True), dataset, HOME_PE)  # type: ignore[arg-type]
+        locations, schema = make_locations(), make_schema()
+        plain = build_feature_encoder(Variant(cfg.models.mlp), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        with_pe = build_feature_encoder(Variant(cfg.models.mlp, use_home_pe=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert with_pe.out_dim - plain.out_dim == HOME_PE.bins
 
     def test_the_model_takes_the_given_input_width(self, cfg):
-        model = build_model(Variant(cfg.models.mlp), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
+        model = build_model(Variant(cfg.models.mlp), make_schema(), IN_CHANNELS)
 
         assert isinstance(model, NodeMLP)
         assert model.lins[0].in_features == IN_CHANNELS
 
     def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
-        dataset = make_dataset(num_edge_features=2)
-        gat = build_model(Variant(cfg.models.gat), dataset, IN_CHANNELS)  # type: ignore[arg-type]
-        gps = build_model(Variant(cfg.models.gps), dataset, IN_CHANNELS)  # type: ignore[arg-type]
+        schema = make_schema(num_edge_features=2)
+        gat = build_model(Variant(cfg.models.gat), schema, IN_CHANNELS)
+        gps = build_model(Variant(cfg.models.gps), schema, IN_CHANNELS)
 
         assert isinstance(gat, GAT) and isinstance(gps, GraphTransformer)
         assert gps.edge_proj.in_features == 2
 
     def test_gat_norm_follows_the_config(self, cfg):
-        normed = build_model(Variant(cfg.models.gat), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
-        plain = build_model(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
+        normed = build_model(Variant(cfg.models.gat), make_schema(), IN_CHANNELS)
+        plain = build_model(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_schema(), IN_CHANNELS)
 
         assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.convs.norms)  # type: ignore[union-attr]
         assert all(isinstance(norm, torch.nn.Identity) for norm in plain.convs.norms)  # type: ignore[union-attr]
 
     def test_unknown_gat_norm_raises(self, cfg):
         with pytest.raises(KeyError, match="normalisation"):
-            build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_dataset(), IN_CHANNELS)  # type: ignore[arg-type]
+            build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_schema(), IN_CHANNELS)
 
 
 class TestTrainerConfig:

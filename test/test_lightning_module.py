@@ -7,6 +7,7 @@ import pytest
 import torch
 import torch_geometric as pyg
 from encoders import make_encoder
+from graphs import chain_edge_index, make_locations
 from torchmetrics import Metric
 
 from activitygraphs.ml.features import HomeAnchoredPE, RandomWalkPE
@@ -43,6 +44,12 @@ def chain_hop_distance(num_nodes: int = 8) -> torch.Tensor:
     """Hop distances of the chain graphs ``make_batch`` builds: nodes i and j are ``|i - j|`` hops apart."""
     idx = torch.arange(num_nodes)
     return (idx[:, None] - idx[None, :]).abs().float()
+
+
+def chain_locations(num_nodes: int = 8):
+    """The chain graph of ``make_batch`` as ``Locations``, read by the module for the hop distances."""
+    x = torch.zeros(num_nodes, NUM_LOCATION_FEATURES)
+    return make_locations(x, chain_edge_index(num_nodes))
 
 
 def make_batch(num_graphs: int = 2, num_nodes: int = 8, seed: int = 0, start_user_id: int = 0) -> pyg.data.Batch:
@@ -98,7 +105,7 @@ def make_module(
         lr_scheduler=lr_scheduler,
         store_score_vectors=store_score_vectors,
         is_home_idx=IS_HOME_IDX,
-        home_hop_distance=chain_hop_distance(),
+        locations=chain_locations(),
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
@@ -270,7 +277,7 @@ class TestUseDemographics:
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
-            home_hop_distance=chain_hop_distance(),
+            locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
         )
@@ -309,7 +316,7 @@ class TestRwpe:
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
-            home_hop_distance=chain_hop_distance(),
+            locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
         )
@@ -346,7 +353,7 @@ class TestTrainRanking:
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
-            home_hop_distance=chain_hop_distance(),
+            locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
             **kwargs,
@@ -619,7 +626,7 @@ class TestCalibration:
             lr=1e-3,
             loss=BCELoss,
             is_home_idx=IS_HOME_IDX,
-            home_hop_distance=chain_hop_distance(),
+            locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
             calibration_bins=7,
@@ -637,7 +644,12 @@ class TestCheckpoint:
 
         assert hparams["lr"] == 1e-3
         assert hparams["lr_scheduler"] == LR_SCHEDULER
-        assert not {"model", "feature_encoder", "loss", "home_hop_distance"} & set(hparams)
+        assert not {"model", "feature_encoder", "locations", "loss"} & set(hparams)
+
+    def test_the_graph_stays_out_of_the_state_dict(self):
+        keys = make_module().state_dict().keys()
+
+        assert not [key for key in keys if key.startswith("locations")]
 
     def test_compiling_keeps_the_state_dict_keys(self):
         module = make_module()
@@ -667,7 +679,7 @@ class TestCheckpoint:
             model=model,
             feature_encoder=make_default_encoder(),
             loss=BCELoss,
-            home_hop_distance=chain_hop_distance(),
+            locations=chain_locations(),
         )
 
         assert reloaded.lr_scheduler == LR_SCHEDULER
@@ -706,7 +718,7 @@ def make_home_pe_module(home_hop_distance: torch.Tensor, is_home_idx: int, n_bin
         feature_encoder=encoder,
         lr=1e-3,
         loss=BCELoss,
-        home_hop_distance=home_hop_distance,
+        locations=chain_locations(home_hop_distance.shape[0]),
         is_home_idx=is_home_idx,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,

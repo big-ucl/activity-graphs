@@ -1,82 +1,34 @@
 """Common utilies for baseline models."""
 
-from dataclasses import dataclass
-
 import torch
-import torch_geometric as pyg
 from torch_geometric.utils import to_dense_batch
 
-from activitygraphs.datasets.batch import UserBatch
-from activitygraphs.datasets.dataset import is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, is_home_node_mask
+from activitygraphs.datasets.users import Users
 from activitygraphs.ml.popularity import POPULARITY_EPS
 
 
 class Baseline(torch.nn.Module):
     """A model scored from the batch itself, rather than from the model input built by the ``FeatureEncoder``."""
 
-    def forward(self, batch: UserBatch) -> torch.Tensor:
+    def forward(self, batch: GraphBatch) -> torch.Tensor:
         """Return the logit of each node of ``batch``, shape ``(num_nodes, 1)``."""
         raise NotImplementedError
 
 
-@dataclass(frozen=True)
-class PerUserTensors:
-    """Contains the per-user tensors of a dataset (in dense format, indexed by users).
-
-    Attributes:
-        labels: Binary visit labels, ``[n_users, n_nodes]``.
-        home_idx: Home node of each user, ``[n_users]``.
-        distances: Distance in metres from each user's home to every node, ``[n_users, n_nodes]``.
-    """
-
-    labels: torch.Tensor
-    home_idx: torch.Tensor
-    distances: torch.Tensor
-
-
-def extract_per_user_tensors(loader: pyg.loader.DataLoader, is_home_idx_user_node: int) -> PerUserTensors:
-    """Takes a dataloader and extracts the per-user information into dense CPU tensors.
-
-    Args:
-        loader: DataLoader over a dataset; every graph must have the same node count.
-        is_home_idx_user_node: Column index of ``is_home`` in ``batch.x_user_node``.
-
-    Returns:
-        The dataloader's ``SplitTensors``.
-
-    Raises:
-        ValueError: If a graph has no home node.
-    """
-    labels, homes, distances = [], [], []
-
-    for batch in loader:
-        batch = batch.to("cpu")
-        is_home, _ = to_dense_batch(
-            is_home_node_mask(batch.x_user_node, is_home_idx_user_node), batch.batch, fill_value=False
-        )
-        if not is_home.any(dim=1).all():
-            raise ValueError("No home node found.")
-
-        labels.append(to_dense_batch(batch.y.reshape(-1), batch.batch)[0])
-        homes.append(is_home.int().argmax(dim=1))
-        distances.append(to_dense_batch(batch.distances_m.reshape(-1), batch.batch)[0])
-
-    return PerUserTensors(labels=torch.cat(labels), home_idx=torch.cat(homes), distances=torch.cat(distances))
-
-
-def non_home_mask(per_user_tensors: PerUserTensors) -> torch.Tensor:
+def non_home_mask(users: Users) -> torch.Tensor:
     """Return the ``[n_users, n_nodes]`` mask of the (user, node) pairs where the node is not the user's home."""
-    mask = torch.ones_like(per_user_tensors.labels, dtype=torch.bool)
-    mask[torch.arange(len(mask)), per_user_tensors.home_idx] = False
+    mask = torch.ones_like(users.visited, dtype=torch.bool)
+    mask[torch.arange(len(mask)), users.home_node] = False
     return mask
 
 
-def graph_node_indices(batch: UserBatch) -> torch.Tensor:
+def graph_node_indices(batch: GraphBatch) -> torch.Tensor:
     """Return, for each node, its within-graph index, ``[num_nodes]``."""
     return torch.arange(batch.num_nodes, device=batch.batch.device) - batch.ptr[batch.batch]
 
 
-def graph_home_indices(batch: UserBatch, is_home_idx_user_node: int) -> torch.Tensor:
+def graph_home_indices(batch: GraphBatch, is_home_idx_user_node: int) -> torch.Tensor:
     """Return, for each node, the within-graph index of the corresponding home node, ``[num_nodes]``.
 
     Args:
@@ -118,7 +70,7 @@ def smoothed_rate(
 def fit_smoothing_strength(
     counts: torch.Tensor,
     users: torch.Tensor,
-    val: PerUserTensors,
+    val: Users,
     val_prior: torch.Tensor,
     grid: torch.Tensor = SMOOTHING_GRID,
 ) -> float:
@@ -134,11 +86,10 @@ def fit_smoothing_strength(
     Returns:
         The best strength in ``grid``.
     """
-    labels = val.labels.float()
-    val_counts = counts[val.home_idx]
-    val_users = users[val.home_idx]
-    not_home = torch.ones_like(labels, dtype=torch.bool)
-    not_home[torch.arange(len(labels)), val.home_idx] = False
+    labels = val.visited.float()
+    val_counts = counts[val.home_node]
+    val_users = users[val.home_node]
+    not_home = non_home_mask(val)
 
     log_likelihoods = []
     for strength in grid:

@@ -4,18 +4,16 @@ import lightning as L
 import polars as pl
 import pytest
 import torch
-import torch_geometric as pyg
-from test_input_snapshot import build_dataset
+from test_input_snapshot import cache_survey_tensors
 
 from activitygraphs.analysis import with_ranking_metrics
 from activitygraphs.config import LossConfig
-from activitygraphs.datasets import HouseholdSplit, UserBatch, UserGridBatch, UserGridDataModule, UserGridDataset
-from activitygraphs.datasets.datamodule import VisitDataModule
-from activitygraphs.datasets.dataset import VisitDataset
+from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, SurveyDataModule, UserBatch
 from activitygraphs.ml.baselines import VisitFrequencyBaseline
 from activitygraphs.ml.lightning_module import RankingModule
 from activitygraphs.ml.losses import BCELoss, GridBCELoss, build_grid_loss, build_loss
 from activitygraphs.ml.two_tower import NodeBias, TwoTowerModule
+from activitygraphs.tensors import tensors_path
 
 SPLIT = HouseholdSplit(val_size=0.2, test_size=0.2)
 SPLIT_SEED = 42
@@ -31,62 +29,42 @@ def bpr_config(neg_sampler: str) -> LossConfig:
 @pytest.fixture
 def cfg(tmp_path, compose_config):
     cfg = compose_config("data=cmap")
-    build_dataset("cmap", tmp_path / cfg.data.paths.tensors)
+    cache_survey_tensors("cmap", tensors_path(cfg.data, tmp_path))
     return cfg
 
 
-def make_datamodule(cfg, tmp_path) -> VisitDataModule:
-    datamodule = VisitDataModule(cfg, SPLIT, SPLIT_SEED, BATCH_SIZE, num_workers=0, project_root=tmp_path)
+def make_datamodule(cfg, tmp_path) -> SurveyDataModule:
+    datamodule = SurveyDataModule(cfg, SPLIT, SPLIT_SEED, BATCH_SIZE, num_workers=0, project_root=tmp_path)
     datamodule.prepare_data()
     datamodule.setup()
     return datamodule
 
 
-def test_a_grid_item_holds_the_rows_of_the_graph_item(cfg, tmp_path):
-    split = make_datamodule(cfg, tmp_path).test_dataset
-    item = UserGridDataset(split)[0]
-    graph_item = split[0]
+def test_the_loader_yields_whole_rows_of_users(cfg, tmp_path):
+    datamodule = make_datamodule(cfg, tmp_path)
+    rows = next(iter(datamodule.test_dataloader()))
+    batch = UserBatch.join(rows, datamodule.locations)
 
-    is_home_idx = split.schema.user_nodes.index_of("is_home")
-    graph_home = graph_item.x_user_node[:, is_home_idx].argmax()
-
-    assert item["user_id"] == graph_item.user_id
-    assert item["home_node"] == graph_home
-    torch.testing.assert_close(item["y"], graph_item.y.squeeze(-1))
-    torch.testing.assert_close(item["distances"], graph_item.distances.squeeze(-1))
-    torch.testing.assert_close(item["distances_m"], graph_item.distances_m.squeeze(-1))
-    torch.testing.assert_close(item["user_attr"], graph_item.user_attr.squeeze(0))
-    torch.testing.assert_close(item["user_attr_cat"], graph_item.user_attr_cat.squeeze(0))
+    assert batch.visited.shape == (batch.num_users, datamodule.locations.num_nodes)
+    assert batch.num_users == min(BATCH_SIZE, len(datamodule.test_dataset))
 
 
-def test_the_grid_loader_yields_whole_rows_of_users(cfg, tmp_path):
-    datamodule = UserGridDataModule(make_datamodule(cfg, tmp_path))
-    batch = UserGridBatch.from_dict(next(iter(datamodule.test_dataloader())))
+def same_users_both_ways(cfg, tmp_path) -> tuple[GraphBatch, UserBatch, Locations]:
+    datamodule = make_datamodule(cfg, tmp_path)
+    train_dataset = datamodule.train_dataset
+    locations = datamodule.locations
+    rows = next(iter(torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset))))
+    batch = UserBatch.join(rows, locations)
 
-    test_dataset = datamodule.visits.test_dataset
-
-    assert batch.y.shape == (batch.num_users, test_dataset.num_nodes)
-    assert batch.num_users == min(BATCH_SIZE, len(test_dataset))
-
-
-def same_users_both_ways(cfg, tmp_path) -> tuple[UserBatch, UserGridBatch, VisitDataset]:
-    split = make_datamodule(cfg, tmp_path).train_dataset
-    num_users = len(split)
-
-    graph_batch = UserBatch.from_pyg(next(iter(pyg.loader.DataLoader(split, batch_size=num_users))))
-    grid_items = next(iter(torch.utils.data.DataLoader(UserGridDataset(split), batch_size=num_users)))
-
-    return graph_batch, UserGridBatch.from_dict(grid_items), split
+    return GraphBatch.expand(batch, locations), batch, locations
 
 
 @pytest.mark.parametrize("neg_sampler", ["uniform", "hard"])
 def test_the_grid_bpr_loss_matches_the_graph_bpr_loss(cfg, tmp_path, neg_sampler):
-    graph_batch, grid_batch, split = same_users_both_ways(cfg, tmp_path)
-    hop_distance = torch.as_tensor(split.locations.hop_distance)
-    is_home_idx = split.schema.user_nodes.index_of("is_home")
+    graph_batch, grid_batch, locations = same_users_both_ways(cfg, tmp_path)
     loss_cfg = bpr_config(neg_sampler)
-    graph_loss_fn = build_loss(loss_cfg, hop_distance, is_home_idx, MAX_RECALL_K).loss_fn
-    grid_loss_fn = build_grid_loss(loss_cfg, hop_distance, MAX_RECALL_K).loss_fn
+    graph_loss_fn = build_loss(loss_cfg, locations.hop_distance, 0, MAX_RECALL_K).loss_fn
+    grid_loss_fn = build_grid_loss(loss_cfg, MAX_RECALL_K).loss_fn
 
     scores = torch.randn(grid_batch.num_users, grid_batch.num_nodes, generator=torch.Generator().manual_seed(0))
     flat_scores = scores.reshape(-1, 1)
@@ -103,38 +81,37 @@ def per_user_avg_recall(module: RankingModule | TwoTowerModule) -> pl.DataFrame:
 
 
 def test_the_bias_alone_reproduces_visit_frequency(cfg, tmp_path):
-    graph_datamodule = make_datamodule(cfg, tmp_path)
-    grid_datamodule = UserGridDataModule(graph_datamodule)
-    train_dataset = graph_datamodule.train_dataset
-    home_hop_distance = train_dataset.locations.hop_distance
-    is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
+    datamodule = make_datamodule(cfg, tmp_path)
+    train_users = datamodule.train_dataset.users
+    locations = datamodule.locations
+    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
 
-    baseline = VisitFrequencyBaseline(train_dataset.num_nodes, is_home_idx).fit(graph_datamodule.train_dataloader())
+    baseline = VisitFrequencyBaseline(locations.num_nodes).fit(train_users)
     graph_module = RankingModule(
         model=baseline,
         feature_encoder=None,
+        locations=locations,
         lr=0.0,
         loss=BCELoss,
         is_home_idx=is_home_idx,
-        home_hop_distance=home_hop_distance,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
 
-    bias = NodeBias.fit(train_dataset)
+    bias = NodeBias.fit(train_users)
     grid_module = TwoTowerModule(
         model=bias,
+        locations=locations,
         lr=0.0,
         loss=GridBCELoss,
-        home_hop_distance=home_hop_distance,
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
         weight_decay=0.0,
     )
 
     trainer = L.Trainer(logger=False, enable_progress_bar=False, enable_checkpointing=False, accelerator="cpu")
-    (graph_results,) = trainer.test(graph_module, datamodule=graph_datamodule, verbose=False)
-    (grid_results,) = trainer.test(grid_module, datamodule=grid_datamodule, verbose=False)
+    (graph_results,) = trainer.test(graph_module, datamodule=datamodule, verbose=False)
+    (grid_results,) = trainer.test(grid_module, datamodule=datamodule, verbose=False)
 
     graph_avg_recall = per_user_avg_recall(graph_module)
     grid_avg_recall = per_user_avg_recall(grid_module)

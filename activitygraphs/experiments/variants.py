@@ -6,7 +6,7 @@ import torch
 from omegaconf import OmegaConf
 
 from activitygraphs.config import HomePEConfig, ModelConfig
-from activitygraphs.datasets import VisitDataset
+from activitygraphs.datasets import Locations
 from activitygraphs.experiments.architectures import ModelSizes, architecture_builder
 from activitygraphs.ml.features import (
     Demographics,
@@ -18,6 +18,7 @@ from activitygraphs.ml.features import (
     RandomWalkPE,
     UserNodeFeatures,
 )
+from activitygraphs.schema import DatasetSchema
 
 
 @dataclass(frozen=True)
@@ -59,8 +60,10 @@ class Variant:
         return "-".join(parts)
 
 
-def build_feature_encoder(variant: Variant, dataset: VisitDataset, home_pe_cfg: HomePEConfig) -> FeatureEncoder:
-    """Instantiate the input ``FeatureEncoder`` for the associated ``variant`` and ``dataset``.
+def build_feature_encoder(
+    variant: Variant, locations: Locations, schema: DatasetSchema, home_pe_cfg: HomePEConfig
+) -> FeatureEncoder:
+    """Instantiate the input ``FeatureEncoder`` for the associated ``variant`` and the survey ``locations``.
 
     The column order goes:
       1. location features,
@@ -72,20 +75,20 @@ def build_feature_encoder(variant: Variant, dataset: VisitDataset, home_pe_cfg: 
 
     Args:
         variant: The variant whose input sources are encoded.
-        dataset: The dataset the model is trained on.
+        locations: The location graph the model is trained on.
+        schema: The column schema of each tensor group.
         home_pe_cfg: Settings of the home-anchored positional encoding, read when the variant uses it.
     """
-    schema = dataset.schema
     sources: list[FeatureSource] = [
         LocationFeatures(schema.locations),
         UserNodeFeatures(schema.user_nodes),
     ]
 
     if variant.use_rwpe:
-        sources.append(RandomWalkPE(dataset.locations.num_rwpe_features))
+        sources.append(RandomWalkPE(locations.num_rwpe_features))
     if variant.use_home_pe:
         is_home_idx = schema.user_nodes.index_of("is_home")
-        home_pe = HomeAnchoredPE(dataset.locations.hop_distance, is_home_idx, home_pe_cfg.bins, home_pe_cfg.max_hops)
+        home_pe = HomeAnchoredPE(locations.hop_distance, is_home_idx, home_pe_cfg.bins, home_pe_cfg.max_hops)
         sources.append(home_pe)
     if variant.use_demographics:
         sources.append(Demographics(schema.user_attributes))
@@ -95,18 +98,18 @@ def build_feature_encoder(variant: Variant, dataset: VisitDataset, home_pe_cfg: 
     return FeatureEncoder(sources)
 
 
-def build_model(variant: Variant, dataset: VisitDataset, in_channels: int) -> torch.nn.Module:
-    """Instantiate the model of ``variant``, sized for ``dataset`` and its input width.
+def build_model(variant: Variant, schema: DatasetSchema, in_channels: int) -> torch.nn.Module:
+    """Instantiate the model of ``variant``, sized for the tensors of ``schema`` and its input width.
 
     Args:
         variant: The variant to build.
-        dataset: The dataset the model is trained on.
+        schema: The column schema of each tensor group.
         in_channels: Width of each node's model input, the ``out_dim`` of the variant's ``FeatureEncoder``.
     """
     sizes = ModelSizes(
         in_channels=in_channels,
-        out_channels=dataset.num_classes - 1,
-        edge_dim=dataset.locations.edge_attr.size(-1),
+        out_channels=schema.targets.width,
+        edge_dim=schema.edges.width,
     )
 
     return architecture_builder(variant.model)(variant.model, sizes)

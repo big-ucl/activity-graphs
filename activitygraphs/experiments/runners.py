@@ -23,15 +23,16 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
     training stochasticity alone rather than split variance.
     """
     cfg = setup.cfg
-    dataset = setup.datamodule.train_dataset
+    locations = setup.datamodule.locations
+    schema = setup.datamodule.schema
     results = []
 
     for train_seed in setup.train_seeds:
         L.seed_everything(train_seed, workers=True)
 
         for variant in variants:
-            encoder = build_feature_encoder(variant, dataset, cfg.train.home_pe)
-            model = build_model(variant, dataset, encoder.out_dim)
+            encoder = build_feature_encoder(variant, locations, schema, cfg.train.home_pe)
+            model = build_model(variant, schema, encoder.out_dim)
             run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
 
             result_df = train_and_evaluate_model(

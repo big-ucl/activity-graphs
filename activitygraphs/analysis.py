@@ -8,7 +8,7 @@
   - Density of home zones
 
 Reads the parquet files written by ``experiments.py:save_results`` and reports the points above. All analyses use the
-parquet files generated to the run directory only, except the home-zone analysis, which reads the built ``VisitDataset``.
+parquet files generated to the run directory only, except the home-zone analysis, which reads the users' home nodes.
 """
 
 from collections.abc import Sequence
@@ -22,7 +22,6 @@ from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
-from activitygraphs.datasets.dataset import VisitDataset
 from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
 from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, latest_run, run_dir
@@ -1180,7 +1179,9 @@ def paired_comparison_by_k(
 # =========================================
 
 
-def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int] | None = None) -> pl.DataFrame:
+def home_zone_summary(
+    home_node: torch.Tensor, num_nodes: int, occupancy_thresholds: Sequence[int] | None = None
+) -> pl.DataFrame:
     """Density summary of a users-per-home-zone table (single row).
 
         - ``users_per_occupied_zone`` is the mean number of users per _occupied_ zone.
@@ -1188,17 +1189,20 @@ def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int]
         - ``p50/p90`` are the quantiles of the number of users per zone.
         - ``share_users_ge_{t}`` reports the proportion of all users that live in zones of at least ``t`` inhabitants.
 
+    Args:
+        home_node: Home node of each user, ``[num_users]``.
+        num_nodes: Number of nodes of the graph.
+        occupancy_thresholds: Zone sizes ``t`` of the ``share_users_ge_{t}`` columns. None takes the default ones.
+
     Returns:
         One-row frame of ``n_users, n_nodes, n_occupied_zones, users_per_occupied_zone,
         users_per_node, p50, p90, max, share_users_ge_10/25/60``.
     """
-    n_nodes = dataset.num_nodes
-    home_nodes = dataset.users.home_node
     occupancy_thresholds = (
         DEFAULT_ANALYSIS.occupancy_thresholds if occupancy_thresholds is None else occupancy_thresholds
     )
 
-    home_nodes_df = pl.DataFrame({"home_node": home_nodes.cpu().numpy()})
+    home_nodes_df = pl.DataFrame({"home_node": home_node.cpu().numpy()})
     users_per_home_zone = home_nodes_df.group_by("home_node").agg(n_users=pl.len())
 
     total_users = int(users_per_home_zone["n_users"].sum())
@@ -1211,10 +1215,10 @@ def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int]
 
     return users_per_home_zone.select(
         n_users=total_users,
-        n_nodes=n_nodes,
+        n_nodes=num_nodes,
         n_occupied_zones=num_occupied_zones,
         users_per_occupied_zone=total_users / num_occupied_zones,
-        users_per_node=total_users / n_nodes,
+        users_per_node=total_users / num_nodes,
         p50=pl.col("n_users").median(),
         p90=pl.col("n_users").quantile(0.9),
         max=pl.col("n_users").max().cast(pl.Int64),

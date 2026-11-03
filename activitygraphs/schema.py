@@ -145,7 +145,7 @@ class TensorSchema:
 
 @dataclass(frozen=True)
 class DatasetSchema:
-    """Schema of the tensors of a ``VisitDataset``, one schema per tensor group.
+    """Schema of the tensors of a survey, one schema per tensor group.
 
     Attributes:
         locations: Location node features.

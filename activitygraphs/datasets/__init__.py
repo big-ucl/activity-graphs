@@ -3,34 +3,32 @@
 It is split into the following modules:
   - ``locations``: ``Locations``, the shared location graph of a survey.
   - ``users``: ``Users``, the per-user tensors of a survey.
-  - ``dataset``: ``VisitDataset``, the PyG dataset combining the graph and the users.
+  - ``dataset``: ``UserDataset``, the users of one dataset split, and the split/transform cache fingerprints.
   - ``splits``: the split strategies assigning users to train, validation and test, and the split cache.
   - ``transforms``: ``FeatureTransforms``, fitted on the training split.
-  - ``datamodule``: ``prepare_splits``, ``read_splits`` and ``VisitDataModule``, the Lightning entry point.
-  - ``batch``: ``UserBatch`` and ``UserGridBatch``, the typed views of a collated batch.
-  - ``user_grid``: ``UserGridDataset`` and ``UserGridDataModule``, the per-user rows of a split, without the graph.
+  - ``datamodule``: ``prepare_splits``, ``read_splits`` and ``SurveyDataModule``, the Lightning entry point.
+  - ``batch``: ``UserRows``, the tensors of one user or of a collated batch of users, ``UserBatch``, a batch of
+    users joined with the location graph, and ``GraphBatch``, one copy of the graph per user.
 """
 
-from activitygraphs.datasets.batch import UserBatch, UserGridBatch
-from activitygraphs.datasets.datamodule import VisitDataModule, prepare_splits, read_splits
-from activitygraphs.datasets.dataset import VisitDataset, is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, UserBatch, UserRows, is_home_node_mask
+from activitygraphs.datasets.datamodule import SurveyDataModule, prepare_splits, read_splits
+from activitygraphs.datasets.dataset import UserDataset
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.splits import HouseholdSplit, SplitStrategy
 from activitygraphs.datasets.transforms import FeatureTransforms
-from activitygraphs.datasets.user_grid import UserGridDataModule, UserGridDataset
 from activitygraphs.datasets.users import Users
 
 __all__ = [
-    "VisitDataModule",
-    "VisitDataset",
     "FeatureTransforms",
-    "Locations",
+    "GraphBatch",
     "HouseholdSplit",
+    "Locations",
     "SplitStrategy",
+    "SurveyDataModule",
     "UserBatch",
-    "UserGridBatch",
-    "UserGridDataModule",
-    "UserGridDataset",
+    "UserDataset",
+    "UserRows",
     "Users",
     "is_home_node_mask",
     "prepare_splits",

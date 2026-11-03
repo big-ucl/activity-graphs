@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config
-from activitygraphs.datasets import VisitDataModule
+from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.ml.baselines import Baseline
 from activitygraphs.ml.callbacks import OverfitDebugCallback
@@ -24,7 +24,7 @@ from activitygraphs.ml.losses import Loss
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
 
 
-def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
+def home_distance_frame(datamodule: SurveyDataModule) -> pl.DataFrame:
     """Distance from home to every node for each test user, as ``stage="test_distances"`` rows.
 
     The ``distances`` column is a list of one distance in metres per node, in node-index order. One frame per run: the
@@ -32,12 +32,10 @@ def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
     """
     datamodule.setup()
     test_dataset = datamodule.test_dataset
-    user_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
-    home_nodes = test_dataset.users.home_node[user_idx]
-    distances = test_dataset.locations.distance_m[home_nodes]
+    distances = datamodule.locations.distance_m[test_dataset.users.home_node]
 
     return pl.DataFrame(
-        {"user_id": user_idx.tolist(), "distances": distances.tolist()},
+        {"user_id": test_dataset.user_idx.tolist(), "distances": distances.tolist()},
         schema_overrides={"distances": pl.List(pl.Float32)},
     ).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
@@ -121,7 +119,7 @@ class WandBParams:
 
 def evaluate_baseline(
     baseline: Baseline,
-    datamodule: VisitDataModule,
+    datamodule: SurveyDataModule,
     loss: Loss,
     name: str,
     cfg: Config,
@@ -136,7 +134,7 @@ def evaluate_baseline(
 
     Args:
         baseline: Fitted baseline module to evaluate.
-        datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
+        datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance, for the BCE and the monitored metric.
         name: Baseline name used for logging and in the returned frame.
         cfg: The config used by the experiment, read for the evaluation settings under ``train`` and the
@@ -145,17 +143,16 @@ def evaluate_baseline(
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
-    home_hop_distance = datamodule.train_dataset.locations.hop_distance
-    is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
+    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
 
     baseline_module = RankingModule(
         model=baseline,
         feature_encoder=None,
+        locations=datamodule.locations,
         lr=0.0,
         loss=loss,
         max_recall_k=cfg.train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
-        home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
         calibration_bins=cfg.train.calibration_bins,
         store_score_vectors=cfg.train.save_score_vectors,
@@ -247,7 +244,7 @@ def train_and_evaluate_model(
     model: torch.nn.Module,
     feature_encoder: FeatureEncoder,
     variant: Variant,
-    datamodule: VisitDataModule,
+    datamodule: SurveyDataModule,
     loss: Loss,
     cfg: Config,
     run_dir: Path | None,
@@ -261,7 +258,7 @@ def train_and_evaluate_model(
         model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
         feature_encoder: Builds the inputs ``x`` for ``model`` from each batch.
         variant: The variant ``model`` was built from, giving its name, optimiser settings and input features.
-        datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
+        datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
         cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, ``cfg.train`` the
             training and evaluation settings, and ``analysis.recall_curve_ks`` the ``recall@k`` cutoffs.
@@ -288,19 +285,18 @@ def train_and_evaluate_model(
     datamodule.setup()
 
     lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
-    home_hop_distance = datamodule.train_dataset.locations.hop_distance
-    is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
+    is_home_idx = datamodule.schema.user_nodes.index_of("is_home")
 
     lit_model = RankingModule(
         model=model,
         feature_encoder=feature_encoder,
+        locations=datamodule.locations,
         lr=variant.model.lr,
         loss=loss,
         max_recall_k=train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
         weight_decay=variant.model.weight_decay,
         lr_scheduler=lr_scheduler,
-        home_hop_distance=home_hop_distance,
         is_home_idx=is_home_idx,
         calibration_bins=train.calibration_bins,
         compile_model=train.compile,

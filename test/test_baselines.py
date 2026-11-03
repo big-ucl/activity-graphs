@@ -2,125 +2,79 @@
 
 import pytest
 import torch
-import torch_geometric as pyg
+from graphs import expand_users, make_locations, make_users
 
+from activitygraphs.datasets import Users
 from activitygraphs.ml.baselines import ConditionalVisitFrequencyBaseline, VisitFrequencyBaseline
-from activitygraphs.ml.baselines.common import (
-    PerUserTensors,
-    extract_per_user_tensors,
-    fit_smoothing_strength,
-    smoothed_rate,
-)
+from activitygraphs.ml.baselines.common import fit_smoothing_strength, smoothed_rate
 from activitygraphs.ml.popularity import home_excluded_visit_rate, home_visit_counts
 
 NUM_LOCATION_FEATURES = 2
 IS_HOME_IDX = 0
 
 
-def make_graph(x_loc: torch.Tensor, home: int, y: torch.Tensor, distances: torch.Tensor) -> pyg.data.Data:
-    """Return one user's graph, with ``is_home`` as the only per-user node feature."""
-    x_user_node = torch.zeros(x_loc.shape[0], 1)
-    x_user_node[home, IS_HOME_IDX] = 1.0
-    graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
-    graph.distances_m = distances
-    return graph
-
-
-def make_graphs(num_graphs: int, num_nodes: int, seed: int = 0) -> list[pyg.data.Data]:
-    """Return random graphs with one random home node per graph, and random home distances."""
+def random_users(num_users: int, num_nodes: int, seed: int = 0) -> Users:
+    """Return users with one random home node each and random visit labels."""
     rng = torch.Generator().manual_seed(seed)
-    graphs = []
-    for _ in range(num_graphs):
-        x_loc = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=rng)
-        home = int(torch.randint(0, num_nodes, (1,), generator=rng))
-        y = torch.randint(0, 2, (num_nodes, 1), generator=rng).float()
-        graphs.append(make_graph(x_loc, home, y, torch.rand(num_nodes, 1, generator=rng)))
-    return graphs
+    home_node = torch.randint(0, num_nodes, (num_users,), generator=rng)
+    visited = torch.randint(0, 2, (num_users, num_nodes), generator=rng).float()
+    return make_users(visited, home_node)
+
+
+def expand(users: Users):
+    """Return one copy of a graph of ``users``' node count per user, with random location features and no edges."""
+    num_nodes = users.visited.shape[1]
+    x = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=torch.Generator().manual_seed(1))
+    locations = make_locations(x, torch.zeros(2, 0, dtype=torch.long))
+    return expand_users(locations, users)
 
 
 @pytest.fixture
 def batch_uniform():
-    """Batched PyG data: 4 graphs, each with 5 nodes."""
-    graphs = make_graphs(num_graphs=4, num_nodes=5)
-    return pyg.data.Batch.from_data_list(graphs)
-
-
-class TestStackSplit:
-    def test_rows_follow_the_loader_order(self):
-        graphs = make_graphs(num_graphs=7, num_nodes=5)
-        split = extract_per_user_tensors(pyg.loader.DataLoader(graphs, batch_size=3), IS_HOME_IDX)
-
-        assert split.labels.shape == (7, 5)
-        assert split.labels.tolist() == [g.y.squeeze(-1).tolist() for g in graphs]
-        assert split.home_idx.tolist() == [int(g.x_user_node[:, IS_HOME_IDX].argmax()) for g in graphs]
-        assert split.distances.tolist() == [g.distances_m.squeeze(-1).tolist() for g in graphs]
-
-    def test_a_graph_without_a_home_raises(self):
-        graphs = make_graphs(num_graphs=2, num_nodes=5)
-        graphs[1].x_user_node[:, IS_HOME_IDX] = 0.0
-
-        with pytest.raises(ValueError, match="No home node"):
-            extract_per_user_tensors(pyg.loader.DataLoader(graphs, batch_size=2), IS_HOME_IDX)
+    """One copy of a 5-node graph for each of 4 users."""
+    return expand(random_users(num_users=4, num_nodes=5))
 
 
 class TestVisitFrequencyBaseline:
     def test_forward_shape(self, batch_uniform):
         num_nodes = 5
-        baseline = VisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx_user_node=IS_HOME_IDX)
-        loader = pyg.loader.DataLoader(make_graphs(8, num_nodes), batch_size=4)
-        baseline.fit(loader)
+        baseline = VisitFrequencyBaseline(num_nodes=num_nodes)
+        baseline.fit(random_users(8, num_nodes))
         out = baseline(batch_uniform)
         assert out.shape == (batch_uniform.num_nodes, 1)
 
     def test_forward_values_in_logit_range(self, batch_uniform):
         num_nodes = 5
-        baseline = VisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx_user_node=IS_HOME_IDX)
-        loader = pyg.loader.DataLoader(make_graphs(8, num_nodes), batch_size=4)
-        baseline.fit(loader)
+        baseline = VisitFrequencyBaseline(num_nodes=num_nodes)
+        baseline.fit(random_users(8, num_nodes))
         out = baseline(batch_uniform)
         assert torch.isfinite(out).all()
 
     def test_scores_are_the_home_excluded_visit_rate(self, batch_uniform):
-        graphs = make_graphs(8, 5)
-        baseline = VisitFrequencyBaseline(num_nodes=5, is_home_idx_user_node=IS_HOME_IDX)
-        baseline.fit(pyg.loader.DataLoader(graphs, batch_size=4))
+        users = random_users(8, 5)
+        baseline = VisitFrequencyBaseline(num_nodes=5)
+        baseline.fit(users)
 
-        split = extract_per_user_tensors(pyg.loader.DataLoader(graphs, batch_size=8), IS_HOME_IDX)
-        expected = torch.logit(home_excluded_visit_rate(split.labels, split.home_idx))
+        expected = torch.logit(home_excluded_visit_rate(users.visited, users.home_node))
         out = baseline(batch_uniform)
 
         torch.testing.assert_close(out.squeeze(-1), expected.repeat(batch_uniform.num_graphs))
 
 
 class TestConditionalVisitFrequencyBaseline:
-    def test_forward_shape(self, batch_uniform):
+    def test_forward_shape(self):
         num_nodes = 5
-        graphs = make_graphs(num_graphs=8, num_nodes=num_nodes)
-        loader = pyg.loader.DataLoader(graphs, batch_size=4)
-        batched = pyg.data.Batch.from_data_list(graphs[:4])
+        users = random_users(num_users=8, num_nodes=num_nodes)
+        batched = expand(users.subset(list(range(4))))
 
         baseline = ConditionalVisitFrequencyBaseline(num_nodes=num_nodes, is_home_idx_user_node=IS_HOME_IDX)
-        baseline.fit(loader, loader)
+        baseline.fit(users, users)
         out = baseline(batched)
         assert out.shape == (batched.num_nodes, 1)
 
 
-def split_of(labels: list[list[int]], homes: list[int]) -> PerUserTensors:
-    labels_tensor = torch.tensor(labels)
-    return PerUserTensors(
-        labels=labels_tensor, home_idx=torch.tensor(homes), distances=torch.zeros_like(labels_tensor, dtype=torch.float)
-    )
-
-
-def graphs_of(split: PerUserTensors) -> list[pyg.data.Data]:
-    """One graph per user of ``split``, with home and labels as given and zero distances."""
-    graphs = []
-    for labels, home in zip(split.labels, split.home_idx, strict=True):
-        x_loc = torch.zeros(len(labels), NUM_LOCATION_FEATURES)
-        y = labels.float().unsqueeze(-1)
-        distances = torch.zeros(len(labels), 1)
-        graphs.append(make_graph(x_loc, int(home), y, distances))
-    return graphs
+def split_of(labels: list[list[int]], homes: list[int]) -> Users:
+    return make_users(torch.tensor(labels).float(), torch.tensor(homes))
 
 
 class TestSmoothing:
@@ -154,7 +108,7 @@ class TestSmoothing:
         """Every resident of home 0 visits node 1 and no one else does, in training and validation alike."""
         train = split_of([[1, 1, 0]] * 5 + [[0, 0, 1]] * 5, [0] * 5 + [2] * 5)
         val = split_of([[1, 1, 0]] * 3 + [[0, 0, 1]] * 3, [0] * 3 + [2] * 3)
-        counts, users = home_visit_counts(train.labels, train.home_idx)
+        counts, users = home_visit_counts(train.visited, train.home_node)
 
         strength = fit_smoothing_strength(counts, users, val, torch.full((6, 3), 0.5))
 
@@ -164,7 +118,7 @@ class TestSmoothing:
         """Training residents of home 0 look home-specific, but validation residents visit at the prior rate."""
         train = split_of([[1, 1, 0], [1, 1, 1], [1, 0, 0], [1, 1, 0]], [0, 0, 0, 0])
         val = split_of([[1, 1, 1], [1, 0, 1], [1, 1, 0], [1, 0, 0]], [0, 0, 0, 0])
-        counts, users = home_visit_counts(train.labels, train.home_idx)
+        counts, users = home_visit_counts(train.visited, train.home_node)
 
         strength = fit_smoothing_strength(counts, users, val, torch.full((4, 3), 0.5))
 
@@ -175,23 +129,18 @@ class TestConditionalVisitFrequencySmoothing:
     def test_an_unseen_home_is_scored_with_the_visit_frequency(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])
         val = split_of([[1, 1, 0, 1], [0, 1, 0, 0]], [0, 1])
-        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4, is_home_idx_user_node=IS_HOME_IDX).fit(
-            pyg.loader.DataLoader(graphs_of(train), batch_size=2), pyg.loader.DataLoader(graphs_of(val), batch_size=2)
-        )
-        frequency = VisitFrequencyBaseline(num_nodes=4, is_home_idx_user_node=IS_HOME_IDX).fit(
-            pyg.loader.DataLoader(graphs_of(train), batch_size=2)
-        )
+        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4, is_home_idx_user_node=IS_HOME_IDX).fit(train, val)
+        frequency = VisitFrequencyBaseline(num_nodes=4).fit(train)
 
-        unseen = pyg.data.Batch.from_data_list(graphs_of(split_of([[0, 0, 0, 1]], [3])))
+        unseen = expand(split_of([[0, 0, 0, 1]], [3]))
 
         torch.testing.assert_close(conditional(unseen), frequency(unseen))
 
     def test_the_strength_is_fitted(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])
-        loader = pyg.loader.DataLoader(graphs_of(train), batch_size=2)
 
         conditional = ConditionalVisitFrequencyBaseline(num_nodes=4, is_home_idx_user_node=IS_HOME_IDX).fit(
-            loader, loader
+            train, train
         )
 
         assert conditional.strength is not None

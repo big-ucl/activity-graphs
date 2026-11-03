@@ -6,18 +6,17 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from activitygraphs.datasets.batch import UserBatch
-from activitygraphs.datasets.dataset import is_home_node_mask
+from activitygraphs.datasets.batch import GraphBatch, is_home_node_mask
 from activitygraphs.ml.schema_encoder import SchemaEncoder
 from activitygraphs.schema import TensorSchema
 
 
-def _compute_node_index_within_graph(batch: UserBatch, device: torch.device) -> torch.Tensor:
+def _compute_node_index_within_graph(batch: GraphBatch, device: torch.device) -> torch.Tensor:
     """Index of each node within the graph (0..N-1), aligned to the node row order of the batch."""
     return torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
 
 
-def compute_home_hops(batch: UserBatch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
+def compute_home_hops(batch: GraphBatch, home_hop_distance: torch.Tensor, is_home_idx: int) -> torch.Tensor:
     """Hop distance from each node to the user's home node in the graph, shape ``[num_nodes]``."""
     device = batch.x_user_node.device
     node_idx = _compute_node_index_within_graph(batch, device)
@@ -38,7 +37,7 @@ class FeatureSource(torch.nn.Module):
 
     out_dim: int
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return the columns of this source for every node of ``batch``, ``[num_nodes, out_dim]``."""
         raise NotImplementedError
 
@@ -51,7 +50,7 @@ class LocationFeatures(FeatureSource):
         self.schema = schema
         self.out_dim = schema.width
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return ``batch.x_loc``."""
         return batch.x_loc
 
@@ -64,7 +63,7 @@ class UserNodeFeatures(FeatureSource):
         self.schema = schema
         self.out_dim = schema.width
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return ``batch.x_user_node``."""
         return batch.x_user_node
 
@@ -77,7 +76,7 @@ class RandomWalkPE(FeatureSource):
         self.norm = torch.nn.BatchNorm1d(width)
         self.out_dim = width
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return the batch-normed encoding of each node, ``[num_nodes, out_dim]``."""
         return self.norm(batch.random_walk_pe)
 
@@ -104,7 +103,7 @@ class HomeAnchoredPE(FeatureSource):
         self.max_hops = max_hops
         self.out_dim = bins
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return the home-anchored encoding of each node, ``[num_nodes, bins]``."""
         hops = compute_home_hops(batch, self.home_hop_distance, self.is_home_idx).clamp(max=self.max_hops)
         centers = torch.linspace(0, self.max_hops, self.bins, device=batch.x_user_node.device)
@@ -121,7 +120,7 @@ class Demographics(FeatureSource):
         self.encoder = SchemaEncoder(schema)
         self.out_dim = self.encoder.out_dim
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return the encoded attributes of each node's user, ``[num_nodes, out_dim]``."""
         user_inputs = self.encoder(batch.user_attr, batch.user_attr_cat)
         return user_inputs[batch.batch]
@@ -135,7 +134,7 @@ class HomeDistance(FeatureSource):
         self.schema = schema
         self.out_dim = schema.width
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return ``batch.distances``."""
         return batch.distances
 
@@ -153,7 +152,7 @@ class FeatureEncoder(torch.nn.Module):
         self.sources = torch.nn.ModuleList(sources)
         self.out_dim = sum(source.out_dim for source in sources)
 
-    def forward(self, batch: UserBatch) -> Tensor:
+    def forward(self, batch: GraphBatch) -> Tensor:
         """Return the model input for a given ``batch``, shape ``[num_nodes, out_dim]``."""
         source_inputs = [source(batch) for source in self.sources]
         return torch.cat(source_inputs, dim=-1)

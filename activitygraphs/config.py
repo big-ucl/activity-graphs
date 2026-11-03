@@ -151,15 +151,13 @@ class CMAPPaths(SurveyPaths):
 
 @dataclass
 class DataPaths:
-    """Filesystem paths for a dataset (raw, processed, external, tensors)."""
+    """Filesystem paths for a dataset (raw, processed, external)."""
 
     processed: Path
     raw: Path
 
     external: Path
     gtfs: Path
-
-    tensors: Path
 
 
 # ===================================================
