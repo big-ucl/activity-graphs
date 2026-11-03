@@ -5,8 +5,8 @@ import torch
 from graphs import join_users, make_locations, make_users
 
 from activitygraphs.datasets import Users
-from activitygraphs.ml.baselines.factorization import HomeZoneMFBaseline
-from activitygraphs.ml.losses import dense_bpr_loss
+from activitygraphs.models.baselines.factorization import HomeZoneMFBaseline
+from activitygraphs.training.losses import dense_bpr_loss
 
 NUM_LOCATION_FEATURES = 1
 MAX_RECALL_K = 5

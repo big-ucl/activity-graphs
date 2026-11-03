@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from activitygraphs.ml.ranking import (
+from activitygraphs.training.ranking import (
     average_recall,
     expected_recall_at_k,
     positive_band_auc,

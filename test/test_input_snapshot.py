@@ -26,7 +26,7 @@ from activitygraphs.config import HomePEConfig, read_config
 from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, UserDataset, Users, datamodule
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.experiments.variants import Variant, build_feature_encoder
-from activitygraphs.ml.schema_encoder import default_emb_dim
+from activitygraphs.models.schema_encoder import default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
 from activitygraphs.surveys.cmap import CMAPSurvey
 from activitygraphs.surveys.demographics import (

@@ -6,8 +6,6 @@ It is split into the following modules:
   - ``setup``: ``setup_experiment``, the split, loss, baselines, architectures and training settings an experiment's
     models share.
   - ``variants``: ``Variant``, an architecture from ``cfg.models`` with its input features, and ``build_model``.
-  - ``architectures``: ``BUILDERS``, the registry mapping a model config's ``architecture`` key to the builder of
-    its model.
   - ``baselines``: fit and evaluate every baseline.
   - ``training``: train and evaluate one model or baseline through Lightning, returning its result frames.
   - ``results``: write an experiment's result frames to the numbered parquet files.

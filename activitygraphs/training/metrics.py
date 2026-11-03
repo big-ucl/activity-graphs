@@ -7,7 +7,7 @@ from torch_geometric.utils import to_dense_batch
 from torchmetrics import Metric
 from torchmetrics.utilities.data import dim_zero_cat
 
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
+from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
 HopBands = Collection[tuple[str, float, float]]

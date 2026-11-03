@@ -5,9 +5,9 @@ import torch
 from graphs import join_users, make_locations, make_users
 
 from activitygraphs.datasets import Locations, UserBatch, Users
-from activitygraphs.ml.baselines import ConditionalVisitFrequencyBaseline, VisitFrequencyBaseline
-from activitygraphs.ml.baselines.common import fit_smoothing_strength, smoothed_rate
-from activitygraphs.ml.popularity import home_excluded_visit_rate, home_visit_counts
+from activitygraphs.models.baselines import ConditionalVisitFrequencyBaseline, VisitFrequencyBaseline
+from activitygraphs.models.baselines.common import fit_smoothing_strength, smoothed_rate
+from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts
 
 NUM_LOCATION_FEATURES = 2
 

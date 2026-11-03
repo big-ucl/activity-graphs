@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.ml.baselines.common import Baseline, fit_smoothing_strength, non_home_mask, smoothed_rate
-from activitygraphs.ml.popularity import home_excluded_visit_rate, home_visit_counts
+from activitygraphs.models.baselines.common import Baseline, fit_smoothing_strength, non_home_mask, smoothed_rate
+from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts
 
 # A user's own home is at distance 0; clamping keeps its log-distance finite.
 MIN_DISTANCE_M = 1.0

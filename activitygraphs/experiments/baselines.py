@@ -7,7 +7,7 @@ import polars as pl
 from activitygraphs.config import Config
 from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.training import WandBParams, evaluate_baseline
-from activitygraphs.ml.baselines import (
+from activitygraphs.models.baselines import (
     Baseline,
     ConditionalGravityBaseline,
     ConditionalVisitFrequencyBaseline,
@@ -19,7 +19,7 @@ from activitygraphs.ml.baselines import (
     UniformBaseline,
     VisitFrequencyBaseline,
 )
-from activitygraphs.ml.losses import Loss
+from activitygraphs.training.losses import Loss
 
 
 @dataclass(frozen=True)

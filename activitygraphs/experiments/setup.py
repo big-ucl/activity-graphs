@@ -15,8 +15,8 @@ from activitygraphs.datasets import HouseholdSplit, SurveyDataModule
 from activitygraphs.experiments.baselines import measure_baselines
 from activitygraphs.experiments.results import create_output_dir, run_config, save_config
 from activitygraphs.experiments.training import WandBParams, home_distance_frame
-from activitygraphs.ml.losses import Loss, build_loss
 from activitygraphs.runs import TIMESTAMP_FORMAT
+from activitygraphs.training.losses import Loss, build_loss
 
 
 @dataclass(frozen=True)

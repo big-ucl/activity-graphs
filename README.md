@@ -96,7 +96,7 @@ uv run pytest test/ -m integration     # integration tests (skip when data is ab
 ```
 activitygraphs/
   main.py                  # Hydra entry points
-  experiments/             # experiment runners, variants, architecture builders, training and baselines
+  experiments/             # experiment runners, variants, training and baselines
   analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
   schema.py                # column kinds and the tensor schemas
   surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap) and registry
@@ -104,7 +104,8 @@ activitygraphs/
   tensors/                 # pytorch tensor building
   datasets/                # PyG dataset, splits, feature transforms, Lightning data module
   conf/                    # Hydra configs (root, per-dataset, per-model, per-experiment)
-  ml/                      # Feature encoder, Lightning module, models, losses, metrics, baselines
+  models/                  # scorers, networks, feature encoder, architecture builders, baselines
+  training/                # Lightning module, losses, metrics, callbacks, loggers
 test/                      # pytest suite
 reports/runs/              # one directory per run: config, result dataframes, checkpoints, logs
 ```

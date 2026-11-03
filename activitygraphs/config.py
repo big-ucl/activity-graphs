@@ -334,7 +334,7 @@ class ModelConfig:
     """Config for one architecture, from the ``model`` config group. Contains name, optimiser settings and model arch.
 
     Attributes:
-        architecture: Key of the builder in ``experiments.architectures.BUILDERS`` that constructs the model.
+        architecture: Key of the builder in ``models.architectures.BUILDERS`` that constructs the model.
         name: Name the architecture is reported under; a variant appends its flags to it.
         lr: Initial AdamW learning rate.
         weight_decay: AdamW weight decay.

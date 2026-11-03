@@ -14,13 +14,13 @@ from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTO
 from activitygraphs.config import Config
 from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
-from activitygraphs.ml.baselines import Baseline
-from activitygraphs.ml.callbacks import OverfitDebugCallback
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.loggers import MetricsLogger
-from activitygraphs.ml.losses import Loss
-from activitygraphs.ml.scorers import Scorer
+from activitygraphs.models.baselines import Baseline
+from activitygraphs.models.scorers import Scorer
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
+from activitygraphs.training.callbacks import OverfitDebugCallback
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.loggers import MetricsLogger
+from activitygraphs.training.losses import Loss
 
 
 def home_distance_frame(datamodule: SurveyDataModule) -> pl.DataFrame:

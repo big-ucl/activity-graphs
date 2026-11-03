@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from activitygraphs.ml.popularity import POPULARITY_EPS, home_excluded_visit_rate, popularity_logit
+from activitygraphs.models.baselines.popularity import POPULARITY_EPS, home_excluded_visit_rate, popularity_logit
 
 # Three users over three nodes. Users 0 and 1 live at node 0, user 2 at node 1; every home is labelled visited.
 LABELS = torch.tensor([

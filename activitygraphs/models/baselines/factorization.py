@@ -5,10 +5,10 @@ import torch
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.ml.baselines.common import Baseline, non_home_mask
-from activitygraphs.ml.losses import dense_bpr_loss
-from activitygraphs.ml.metrics import per_user_recall
-from activitygraphs.ml.popularity import home_visit_counts
+from activitygraphs.models.baselines.common import Baseline, non_home_mask
+from activitygraphs.training.losses import dense_bpr_loss
+from activitygraphs.training.metrics import per_user_recall
+from activitygraphs.models.baselines.popularity import home_visit_counts
 
 N_FACTORS = 429
 LEARNING_RATE = 1.91e-2

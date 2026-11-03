@@ -6,12 +6,12 @@ from encoders import make_encoder
 from graphs import join_users, make_locations, make_users
 
 from activitygraphs.datasets.locations import compute_hop_distance
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
-from activitygraphs.ml.models import NodeMLP
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
-from activitygraphs.ml.scorers import NodeScorer
+from activitygraphs.models.networks import NodeMLP
+from activitygraphs.models.scorers import NodeScorer
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
+from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Path graph 0-1-2-3-4 (both directions): hop distance from node 0 is [0, 1, 2, 3, 4].
 PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 3]])

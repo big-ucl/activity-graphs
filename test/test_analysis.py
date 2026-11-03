@@ -46,11 +46,11 @@ from activitygraphs.analysis import (
     within_band_auc_table,
 )
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.models import NodeMLP
-from activitygraphs.ml.scorers import NodeScorer
+from activitygraphs.models.networks import NodeMLP
+from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.runs import PER_USER_FILE, RESULTS_FILE, SCORES_FILE
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import BCELoss
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"

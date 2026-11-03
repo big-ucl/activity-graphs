@@ -6,9 +6,9 @@ from dataclasses import dataclass
 import torch
 
 from activitygraphs.config import GATConfig, GPSConfig, MLPConfig, ModelConfig
-from activitygraphs.ml.features import FeatureEncoder
-from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
-from activitygraphs.ml.scorers import GraphScorer, NodeScorer, Scorer
+from activitygraphs.models.features import FeatureEncoder
+from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
+from activitygraphs.models.scorers import GraphScorer, NodeScorer, Scorer
 
 
 @dataclass(frozen=True)

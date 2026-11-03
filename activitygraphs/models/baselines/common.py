@@ -3,8 +3,8 @@
 import torch
 
 from activitygraphs.datasets.users import Users
-from activitygraphs.ml.popularity import POPULARITY_EPS
-from activitygraphs.ml.scorers import Scorer
+from activitygraphs.models.baselines.popularity import POPULARITY_EPS
+from activitygraphs.models.scorers import Scorer
 
 
 class Baseline(Scorer):

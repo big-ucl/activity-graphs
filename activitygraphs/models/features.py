@@ -7,7 +7,7 @@ from torch import Tensor
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.ml.schema_encoder import SchemaEncoder
+from activitygraphs.models.schema_encoder import SchemaEncoder
 from activitygraphs.schema import TensorSchema
 
 

@@ -1,6 +1,12 @@
 """Pass-through feature encoders sized for the synthetic batches of the tests."""
 
-from activitygraphs.ml.features import Demographics, FeatureEncoder, FeatureSource, LocationFeatures, UserNodeFeatures
+from activitygraphs.models.features import (
+    Demographics,
+    FeatureEncoder,
+    FeatureSource,
+    LocationFeatures,
+    UserNodeFeatures,
+)
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.tensors import USER_NODE_SCHEMA
 

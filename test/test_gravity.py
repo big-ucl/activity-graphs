@@ -8,14 +8,14 @@ import torch
 from graphs import join_users, make_locations, make_users
 
 from activitygraphs.datasets import Locations, UserBatch, Users
-from activitygraphs.ml.baselines.gravity import (
+from activitygraphs.models.baselines.gravity import (
     MIN_DISTANCE_M,
     ConditionalGravityBaseline,
     DistanceDecayBaseline,
     GravityBaseline,
     GravityBinnedBaseline,
 )
-from activitygraphs.ml.popularity import home_excluded_visit_rate
+from activitygraphs.models.baselines.popularity import home_excluded_visit_rate
 
 NUM_LOCATION_FEATURES = 1
 

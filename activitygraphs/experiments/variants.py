@@ -7,8 +7,8 @@ from omegaconf import OmegaConf
 
 from activitygraphs.config import HomePEConfig, ModelConfig
 from activitygraphs.datasets import Locations
-from activitygraphs.experiments.architectures import ModelSizes, lookup_architecture
-from activitygraphs.ml.features import (
+from activitygraphs.models.architectures import ModelSizes, lookup_architecture
+from activitygraphs.models.features import (
     Demographics,
     FeatureEncoder,
     FeatureSource,
@@ -18,7 +18,7 @@ from activitygraphs.ml.features import (
     RandomWalkPE,
     UserNodeFeatures,
 )
-from activitygraphs.ml.scorers import Scorer
+from activitygraphs.models.scorers import Scorer
 from activitygraphs.schema import DatasetSchema
 
 

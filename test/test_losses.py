@@ -1,7 +1,7 @@
 import torch
 
 from activitygraphs.config import LossConfig
-from activitygraphs.ml.losses import bpr_loss, build_loss
+from activitygraphs.training.losses import bpr_loss, build_loss
 
 
 def test_bpr_zero_when_perfectly_ranked():

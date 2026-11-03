@@ -16,7 +16,6 @@ from omegaconf import OmegaConf
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, HomePEConfig, read_config
 from activitygraphs.experiments import runners
-from activitygraphs.experiments.architectures import BUILDERS, lookup_architecture
 from activitygraphs.experiments.results import (
     create_output_dir,
     drop_empty_columns,
@@ -35,12 +34,13 @@ from activitygraphs.experiments.variants import (
     variant_hyperparams,
 )
 from activitygraphs.main import EXPERIMENTS
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.models import GAT, GraphTransformer, NodeMLP
-from activitygraphs.ml.scorers import GraphScorer, NodeScorer
+from activitygraphs.models.architectures import BUILDERS, lookup_architecture
+from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
+from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
+from activitygraphs.training.losses import BCELoss
 from activitygraphs.utils import get_project_root
 
 STARTED = datetime(2026, 10, 26, 15, 30, 0)

@@ -5,7 +5,7 @@ from torch import Tensor
 
 from activitygraphs.datasets.batch import GraphBatch, UserBatch
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.ml.features import FeatureEncoder
+from activitygraphs.models.features import FeatureEncoder
 
 
 class Scorer(torch.nn.Module):

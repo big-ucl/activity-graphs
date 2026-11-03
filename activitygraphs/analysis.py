@@ -22,9 +22,9 @@ from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
-from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
 from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, latest_run, run_dir
+from activitygraphs.training.metrics import DEFAULT_HOP_BANDS
+from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_band_auc
 
 # Baseline model representing node popularity.
 POPULARITY_MODEL = "VisitFrequency"

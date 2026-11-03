@@ -10,11 +10,11 @@ from graphs import chain_edge_index, make_locations
 from torchmetrics import Metric
 
 from activitygraphs.datasets import Locations, UserBatch, UserRows
-from activitygraphs.ml.features import HomeAnchoredPE, RandomWalkPE
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.models import NodeMLP
-from activitygraphs.ml.scorers import NodeScorer
+from activitygraphs.models.features import HomeAnchoredPE, RandomWalkPE
+from activitygraphs.models.networks import NodeMLP
+from activitygraphs.models.scorers import NodeScorer
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import BCELoss
 
 MAX_RECALL_K = 50
 LR_SCHEDULER = {"factor": 0.5, "patience": 5}

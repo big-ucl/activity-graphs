@@ -6,7 +6,7 @@ import lightning as L
 import torch
 
 from activitygraphs.datasets.batch import UserBatch
-from activitygraphs.ml.lightning_module import RankingModule
+from activitygraphs.training.lightning_module import RankingModule
 
 log = logging.getLogger(__name__)
 

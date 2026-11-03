@@ -14,9 +14,9 @@ from torchmetrics.classification import BinaryCalibrationError
 
 from activitygraphs.datasets.batch import UserBatch, UserRows
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.ml.losses import Loss
-from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
-from activitygraphs.ml.scorers import Scorer
+from activitygraphs.models.scorers import Scorer
+from activitygraphs.training.losses import Loss
+from activitygraphs.training.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
 
 CALIBRATION_BINS = 15
 

@@ -8,12 +8,12 @@ from test_input_snapshot import cache_survey_tensors
 
 from activitygraphs.analysis import with_ranking_metrics
 from activitygraphs.datasets import HouseholdSplit, Locations, SurveyDataModule, UserBatch
-from activitygraphs.ml.baselines import VisitFrequencyBaseline
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.popularity import popularity_logit
-from activitygraphs.ml.scorers import Scorer
+from activitygraphs.models.baselines import VisitFrequencyBaseline
+from activitygraphs.models.baselines.popularity import popularity_logit
+from activitygraphs.models.scorers import Scorer
 from activitygraphs.tensors import tensors_path
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import BCELoss
 
 SPLIT = HouseholdSplit(val_size=0.2, test_size=0.2)
 SPLIT_SEED = 42

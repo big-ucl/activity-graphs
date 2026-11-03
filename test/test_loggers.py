@@ -8,11 +8,11 @@ from encoders import make_encoder
 from graphs import chain_edge_index, loader_of, make_locations, make_users
 
 from activitygraphs.experiments.training import aggregate_frame
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.loggers import MetricsLogger
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.models import NodeMLP
-from activitygraphs.ml.scorers import NodeScorer
+from activitygraphs.models.networks import NodeMLP
+from activitygraphs.models.scorers import NodeScorer
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.loggers import MetricsLogger
+from activitygraphs.training.losses import BCELoss
 
 NUM_NODES = 6
 NUM_FEATURES = 3
