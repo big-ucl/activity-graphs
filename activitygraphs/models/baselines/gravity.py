@@ -12,8 +12,8 @@ from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
 from activitygraphs.models.baselines.common import fit_smoothing_strength, non_home_mask, smoothed_rate
-from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts
+from activitygraphs.models.scorers import FittedScorer
 
 # A user's own home is at distance 0; clamping keeps its log-distance finite.
 MIN_DISTANCE_M = 1.0

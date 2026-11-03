@@ -6,12 +6,29 @@ from typing import cast
 
 import torch
 
-from activitygraphs.config import GATConfig, GPSConfig, HomePEConfig, HomeZoneMFConfig, MLPConfig, ModelConfig
+from activitygraphs.config import (
+    GATConfig,
+    GPSConfig,
+    HomePEConfig,
+    HomeZoneMFConfig,
+    MLPConfig,
+    ModelConfig,
+    TwoTowerConfig,
+)
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.models.baselines import HomeZoneMFBaseline
-from activitygraphs.models.features import FeatureEncoder, InputFeatures, build_feature_encoder
+from activitygraphs.models.features import (
+    FeatureEncoder,
+    FeatureSource,
+    HomeAnchoredPE,
+    HomeDistance,
+    InputFeatures,
+    build_feature_encoder,
+)
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
+from activitygraphs.models.schema_encoder import SchemaEncoder
 from activitygraphs.models.scorers import EncodedScorer, GraphScorer, NodeScorer, Scorer
+from activitygraphs.models.two_tower import LocationBias, NodeTower, TwoTowerScorer, UserTower
 from activitygraphs.schema import DatasetSchema
 
 type ScorerBuilder = Callable[[ModelConfig, InputFeatures, Locations, DatasetSchema, HomePEConfig], Scorer]
@@ -140,11 +157,60 @@ def build_home_zone_mf(
     return HomeZoneMFBaseline(locations.num_nodes, home_zone_mf.n_factors)
 
 
+def build_two_tower(
+    config: ModelConfig,
+    features: InputFeatures,
+    locations: Locations,
+    schema: DatasetSchema,
+    home_pe_cfg: HomePEConfig,
+) -> TwoTowerScorer:
+    """Instantiate a ``TwoTowerScorer`` for the input ``features``.
+
+    ``use_rwpe`` appends the random-walk PE to the node tower's input, ``use_demographics`` gives the user attributes
+    to the user tower, and ``use_home_pe`` and ``full_info`` give the home-anchored PE and the distance from home to
+    the pairwise block.
+    """
+    two_tower = cast(TwoTowerConfig, config)
+    embedding_dim = two_tower.embedding_dim
+    hidden_channels = two_tower.hidden_channels
+    dropout = two_tower.dropout
+
+    num_rwpe_features = locations.num_rwpe_features if features.use_rwpe else None
+    node_in_channels = schema.locations.width + (num_rwpe_features or 0)
+    node_sizes = NetworkSizes(
+        in_channels=node_in_channels,
+        out_channels=embedding_dim,
+        edge_dim=schema.edges.width,
+    )
+    node_network = build_gat(two_tower, node_sizes)
+    node_tower = NodeTower(node_network, num_rwpe_features)
+
+    attributes = SchemaEncoder(schema.user_attributes) if features.use_demographics else None
+    user_in_channels = embedding_dim + (0 if attributes is None else attributes.out_dim)
+    user_network = NodeMLP(two_tower.num_user_layers, user_in_channels, hidden_channels, embedding_dim, dropout)
+    user_tower = UserTower(user_network, attributes)
+
+    pair_sources: list[FeatureSource] = []
+    if features.use_home_pe:
+        pair_sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
+    if features.full_info:
+        pair_sources.append(HomeDistance(schema.distances))
+
+    pair_encoder = FeatureEncoder(pair_sources) if pair_sources else None
+    pair_in_channels = 2 * embedding_dim + (0 if pair_encoder is None else pair_encoder.out_dim)
+    pair_network = NodeMLP(two_tower.num_pair_layers, pair_in_channels, hidden_channels, 1, dropout)
+
+    location_bias = LocationBias(embedding_dim)
+
+    return TwoTowerScorer(node_tower, user_tower, pair_encoder, pair_network, location_bias)
+
+
 BUILDERS: dict[str, ScorerBuilder] = {
     "mlp": encoded_scorer(build_mlp, NodeScorer),
     "gat": encoded_scorer(build_gat, GraphScorer),
     "gps": encoded_scorer(build_gps, GraphScorer),
     "home_zone_mf": build_home_zone_mf,
+    "two_tower": build_two_tower,
 }
 
 

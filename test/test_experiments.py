@@ -33,6 +33,7 @@ from activitygraphs.models.baselines import HomeZoneMFBaseline
 from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
+from activitygraphs.models.two_tower import TwoTowerScorer
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
@@ -168,7 +169,7 @@ def scorer_of(model, features: InputFeatures = DEFAULT_FEATURES, schema: Dataset
 
 
 class TestBuildScorer:
-    @pytest.mark.parametrize("key", ["mlp", "gat", "gps", "home_zone_mf"])
+    @pytest.mark.parametrize("key", ["mlp", "gat", "gps", "home_zone_mf", "two_tower"])
     def test_every_architecture_builds(self, cfg, key):
         assert isinstance(scorer_of(cfg.models[key]), torch.nn.Module)
 
@@ -219,7 +220,13 @@ class TestBuildScorer:
 
     @pytest.mark.parametrize(
         ("key", "scorer_type"),
-        [("mlp", NodeScorer), ("gat", GraphScorer), ("gps", GraphScorer), ("home_zone_mf", HomeZoneMFBaseline)],
+        [
+            ("mlp", NodeScorer),
+            ("gat", GraphScorer),
+            ("gps", GraphScorer),
+            ("home_zone_mf", HomeZoneMFBaseline),
+            ("two_tower", TwoTowerScorer),
+        ],
     )
     def test_each_architecture_runs_in_its_scorer(self, cfg, key, scorer_type):
         assert isinstance(scorer_of(cfg.models[key]), scorer_type)

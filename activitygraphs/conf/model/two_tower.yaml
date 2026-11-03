@@ -1,0 +1,16 @@
+architecture: two_tower
+name: TwoTower-${.num_gcn_layers}
+lr: 1e-3
+weight_decay: 1e-4
+
+num_pre_layers: 1
+num_gcn_layers: 8
+num_post_layers: 3
+hidden_channels: 128
+dropout: 0.2
+residuals: true
+norm: layer_norm
+
+embedding_dim: 64
+num_user_layers: 2
+num_pair_layers: 2

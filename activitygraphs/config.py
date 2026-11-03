@@ -403,6 +403,21 @@ class GPSConfig(NetworkConfig):
 
 
 @dataclass
+class TwoTowerConfig(GATConfig):
+    """Config for the two-tower scorer (``TwoTowerScorer``), whose node tower is a ``GAT`` with the fields of ``GATConfig``.
+
+    Attributes:
+        embedding_dim: Width ``d`` of the node and user embeddings.
+        num_user_layers: Number of linear layers of the user tower.
+        num_pair_layers: Number of linear layers of the pairwise block.
+    """
+
+    embedding_dim: int
+    num_user_layers: int
+    num_pair_layers: int
+
+
+@dataclass
 class HomeZoneMFConfig(ModelConfig):
     """Config for the home-zone matrix factorisation (``HomeZoneMFBaseline``).
 

@@ -8,8 +8,8 @@ from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
 from activitygraphs.models.baselines.common import fit_smoothing_strength, smoothed_rate
-from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts, popularity_logit
+from activitygraphs.models.scorers import FittedScorer
 
 
 def inverse_sigmoid(prob):
