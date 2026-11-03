@@ -1,10 +1,13 @@
 """Scorers: the models that score every node for every user of a batch, ``scorer(locations, batch) -> [B, N]``."""
 
+from typing import Self
+
 import torch
 from torch import Tensor
 
 from activitygraphs.datasets.batch import GraphBatch, UserBatch
 from activitygraphs.datasets.locations import Locations
+from activitygraphs.datasets.users import Users
 from activitygraphs.models.features import FeatureEncoder
 
 
@@ -69,3 +72,20 @@ class GraphScorer(Scorer):
         logits = self.network(graphs.x, graphs.edge_index, graphs.edge_attr, graphs.batch)
 
         return logits.reshape(batch.num_users, batch.num_nodes)
+
+
+class FittedScorer(Scorer):
+    """A scorer fitted once on the training users, outside the training loop, and then only evaluated.
+
+    It is scored from the batch itself, rather than from the input built by a ``FeatureEncoder``.
+    """
+
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
+        """Fit the scorer and return it. A scorer with nothing to fit returns itself unchanged.
+
+        Args:
+            train: The training users.
+            val: The validation users.
+            locations: The location graph.
+        """
+        return self

@@ -323,9 +323,9 @@ class TestRwpe:
         pe = locations.random_walk_pe
         std = torch.sqrt(pe.var(dim=0, unbiased=False) + rwpe.norm.eps)
         normed = (pe - pe.mean(dim=0)) / std
-        x_loc = locations.x.expand(2, -1, -1)
+        location_x = locations.x.expand(2, -1, -1)
         is_home = batch.is_home.float().unsqueeze(-1)
-        torch.testing.assert_close(x, torch.cat([x_loc, is_home, normed.expand(2, -1, -1)], dim=-1))
+        torch.testing.assert_close(x, torch.cat([location_x, is_home, normed.expand(2, -1, -1)], dim=-1))
 
     def test_left_out_without_its_source(self):
         batch = make_batch(num_graphs=2, num_nodes=8)
@@ -406,7 +406,7 @@ class TestScoreVectors:
         module, _ = self._tested(monkeypatch, store_score_vectors=True)
 
         vectors = module.per_user_score_vectors
-        assert len(vectors) == len(module.per_user_columns["user_id"])
+        assert len(vectors) == len(module.per_user_columns["user_idx"])
         assert all(len(vector) == 8 for vector in vectors)
 
     def test_vectors_reproduce_the_reported_r_precision(self, monkeypatch):
@@ -417,8 +417,8 @@ class TestScoreVectors:
         """
         module, batch = self._tested(monkeypatch, store_score_vectors=True)
 
-        for row, user_id in enumerate(module.per_user_columns["user_id"]):
-            user = (batch.user_idx == user_id).nonzero(as_tuple=True)[0].item()
+        for row, user_idx in enumerate(module.per_user_columns["user_idx"]):
+            user = (batch.user_idx == user_idx).nonzero(as_tuple=True)[0].item()
             keep = torch.ones(batch.num_nodes, dtype=torch.bool)
             keep[HOME_NODE] = False
 
@@ -451,8 +451,8 @@ class TestPositiveHops:
         module, batch = self._tested(monkeypatch)
         columns = module.per_user_columns
 
-        for row, user_id in enumerate(columns["user_id"]):
-            user = (batch.user_idx == user_id).nonzero(as_tuple=True)[0].item()
+        for row, user_idx in enumerate(columns["user_idx"]):
+            user = (batch.user_idx == user_idx).nonzero(as_tuple=True)[0].item()
             positives = batch.visited[user].nonzero(as_tuple=True)[0].tolist()
             expected = [float(node) for node in positives if node != HOME_NODE]
 
@@ -485,8 +485,8 @@ class TestHomeExclusion:
     def test_the_home_node_is_dropped_from_the_realised_set(self, monkeypatch):
         module, batch, _ = self._tested(monkeypatch)
 
-        for row, user_id in enumerate(module.per_user_columns["user_id"]):
-            user = (batch.user_idx == user_id).nonzero(as_tuple=True)[0].item()
+        for row, user_idx in enumerate(module.per_user_columns["user_idx"]):
+            user = (batch.user_idx == user_idx).nonzero(as_tuple=True)[0].item()
             full = int(batch.visited[user].sum())
 
             assert module.per_user_columns["n_pos_home_incl"][row] == full

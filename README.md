@@ -102,7 +102,7 @@ activitygraphs/
   surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap) and registry
   graph/                   # Graph construction
   tensors/                 # pytorch tensor building
-  datasets/                # PyG dataset, splits, feature transforms, Lightning data module
+  datasets/                # locations, users, splits, feature transforms, Lightning data module
   conf/                    # Hydra configs (root, per-dataset, per-model, per-experiment)
   models/                  # scorers, networks, feature encoder, architecture builders, baselines
   training/                # Lightning module, losses, metrics, callbacks, loggers

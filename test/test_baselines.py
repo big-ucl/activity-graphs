@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from graphs import join_users, make_locations, make_users
+from graphs import edgeless_locations, join_users, make_locations, make_users
 
 from activitygraphs.datasets import Locations, UserBatch, Users
 from activitygraphs.models.baselines import ConditionalVisitFrequencyBaseline, VisitFrequencyBaseline
@@ -37,22 +37,27 @@ def batch_uniform():
 class TestVisitFrequencyBaseline:
     def test_forward_shape(self, batch_uniform):
         num_nodes = 5
+        users = random_users(8, num_nodes)
+        locations = edgeless_locations(num_nodes)
         baseline = VisitFrequencyBaseline(num_nodes=num_nodes)
-        baseline.fit(random_users(8, num_nodes))
+        baseline.fit(users, users, locations)
         out = baseline(*batch_uniform)
         assert out.shape == (4, num_nodes)
 
     def test_forward_values_in_logit_range(self, batch_uniform):
         num_nodes = 5
+        users = random_users(8, num_nodes)
+        locations = edgeless_locations(num_nodes)
         baseline = VisitFrequencyBaseline(num_nodes=num_nodes)
-        baseline.fit(random_users(8, num_nodes))
+        baseline.fit(users, users, locations)
         out = baseline(*batch_uniform)
         assert torch.isfinite(out).all()
 
     def test_scores_are_the_home_excluded_visit_rate(self, batch_uniform):
         users = random_users(8, 5)
+        locations = edgeless_locations(5)
         baseline = VisitFrequencyBaseline(num_nodes=5)
-        baseline.fit(users)
+        baseline.fit(users, users, locations)
 
         expected = torch.logit(home_excluded_visit_rate(users.visited, users.home_node))
         out = baseline(*batch_uniform)
@@ -66,8 +71,9 @@ class TestConditionalVisitFrequencyBaseline:
         users = random_users(num_users=8, num_nodes=num_nodes)
         batched = join(users.subset(list(range(4))))
 
+        locations = edgeless_locations(num_nodes)
         baseline = ConditionalVisitFrequencyBaseline(num_nodes=num_nodes)
-        baseline.fit(users, users)
+        baseline.fit(users, users, locations)
         out = baseline(*batched)
         assert out.shape == (4, num_nodes)
 
@@ -128,8 +134,9 @@ class TestConditionalVisitFrequencySmoothing:
     def test_an_unseen_home_is_scored_with_the_visit_frequency(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])
         val = split_of([[1, 1, 0, 1], [0, 1, 0, 0]], [0, 1])
-        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4).fit(train, val)
-        frequency = VisitFrequencyBaseline(num_nodes=4).fit(train)
+        locations = edgeless_locations(4)
+        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4).fit(train, val, locations)
+        frequency = VisitFrequencyBaseline(num_nodes=4).fit(train, val, locations)
 
         unseen = join(split_of([[0, 0, 0, 1]], [3]))
 
@@ -138,7 +145,8 @@ class TestConditionalVisitFrequencySmoothing:
     def test_the_strength_is_fitted(self):
         train = split_of([[1, 1, 0, 0], [1, 0, 1, 0], [0, 1, 1, 0]], [0, 0, 1])
 
-        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4).fit(train, train)
+        locations = edgeless_locations(4)
+        conditional = ConditionalVisitFrequencyBaseline(num_nodes=4).fit(train, train, locations)
 
         assert conditional.strength is not None
         assert conditional.logits.shape == (4, 4)

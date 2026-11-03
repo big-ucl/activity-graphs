@@ -14,8 +14,7 @@ from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTO
 from activitygraphs.config import Config
 from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
-from activitygraphs.models.baselines import Baseline
-from activitygraphs.models.scorers import Scorer
+from activitygraphs.models.scorers import FittedScorer, Scorer
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
 from activitygraphs.training.callbacks import OverfitDebugCallback
 from activitygraphs.training.lightning_module import RankingModule
@@ -34,7 +33,7 @@ def home_distance_frame(datamodule: SurveyDataModule) -> pl.DataFrame:
     distances = datamodule.locations.distance_m[test_dataset.users.home_node]
 
     return pl.DataFrame(
-        {"user_id": test_dataset.user_idx.tolist(), "distances": distances.tolist()},
+        {"user_idx": test_dataset.user_idx.tolist(), "distances": distances.tolist()},
         schema_overrides={"distances": pl.List(pl.Float32)},
     ).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
@@ -50,7 +49,7 @@ def score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:
 
     return pl.DataFrame(
         {
-            "user_id": module.per_user_columns["user_id"],
+            "user_idx": module.per_user_columns["user_idx"],
             "scores": module.per_user_score_vectors,
         },
         schema_overrides={"scores": pl.List(pl.Float32)},
@@ -86,7 +85,7 @@ def per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFr
         epoch=pl.lit(None, dtype=pl.Int64),
     )
 
-    return per_user_df.join(home_coverage_df, on="user_id", how="left")
+    return per_user_df.join(home_coverage_df, on="user_idx", how="left")
 
 
 @dataclass
@@ -117,7 +116,7 @@ class WandBParams:
 
 
 def evaluate_baseline(
-    baseline: Baseline,
+    baseline: FittedScorer,
     datamodule: SurveyDataModule,
     loss: Loss,
     name: str,
@@ -268,7 +267,7 @@ def train_and_evaluate_model(
         ``train_loss`` and the ``val_*`` metrics, plus (when a test run executed) one
         ``stage="test"`` row carrying the ``test_*`` metrics and one ``stage="test_user"`` row per
         test user carrying that user's ``r_precision``. Columns: ``name``, ``stage``,
-        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_id``, ``n_pos``, ``r_precision``;
+        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_idx``, ``n_pos``, ``r_precision``;
         cells absent for a row's stage are null. Empty on a ``fast_dev_run``.
     """
     name = variant.name

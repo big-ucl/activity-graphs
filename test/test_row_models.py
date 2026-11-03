@@ -65,7 +65,7 @@ def test_the_loader_yields_whole_rows_of_users(cfg, tmp_path):
 
 def per_user_avg_recall(module: RankingModule) -> pl.DataFrame:
     per_user = pl.DataFrame(module.per_user_columns)
-    return with_ranking_metrics(per_user, MAX_RECALL_K).select("user_id", "avg_recall").sort("user_id")
+    return with_ranking_metrics(per_user, MAX_RECALL_K).select("user_idx", "avg_recall").sort("user_idx")
 
 
 def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tmp_path):
@@ -73,7 +73,8 @@ def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tm
     train_users = datamodule.train_dataset.users
     locations = datamodule.locations
 
-    baseline = VisitFrequencyBaseline(locations.num_nodes).fit(train_users)
+    val_users = datamodule.val_dataset.users
+    baseline = VisitFrequencyBaseline(locations.num_nodes).fit(train_users, val_users, locations)
     graph_module = RankingModule(
         scorer=baseline,
         locations=locations,
@@ -101,6 +102,6 @@ def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tm
     grid_avg_recall = per_user_avg_recall(grid_module)
 
     assert grid_avg_recall.height > 0
-    assert grid_avg_recall["user_id"].to_list() == graph_avg_recall["user_id"].to_list()
+    assert grid_avg_recall["user_idx"].to_list() == graph_avg_recall["user_idx"].to_list()
     assert (grid_avg_recall["avg_recall"] - graph_avg_recall["avg_recall"]).abs().max() < 5e-5
     assert grid_results == pytest.approx(graph_results)

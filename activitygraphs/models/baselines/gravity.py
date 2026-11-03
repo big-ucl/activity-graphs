@@ -3,13 +3,16 @@
 Every baseline here reads each node's distance in metres from the user's home, ``batch.home_distance_m``.
 """
 
+from typing import Self
+
 import torch
 import torch.nn.functional as F
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.models.baselines.common import Baseline, fit_smoothing_strength, non_home_mask, smoothed_rate
+from activitygraphs.models.baselines.common import fit_smoothing_strength, non_home_mask, smoothed_rate
+from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts
 
 # A user's own home is at distance 0; clamping keeps its log-distance finite.
@@ -19,9 +22,9 @@ N_DISTANCE_BINS = 20
 BIN_PSEUDOCOUNT = 0.5
 
 
-def clamp_distances(distances_m: torch.Tensor) -> torch.Tensor:
-    """Return the distances in metres clamped below at ``MIN_DISTANCE_M``, shaped like ``distances_m``."""
-    return distances_m.float().clamp(min=MIN_DISTANCE_M)
+def clamp_distances(distance_m: torch.Tensor) -> torch.Tensor:
+    """Return the distances in metres clamped below at ``MIN_DISTANCE_M``, shaped like ``distance_m``."""
+    return distance_m.float().clamp(min=MIN_DISTANCE_M)
 
 
 def extract_home_distances(batch: UserBatch) -> torch.Tensor:
@@ -34,7 +37,7 @@ def expand_node_indices(batch: UserBatch) -> torch.Tensor:
     return torch.arange(batch.num_nodes, device=batch.visited.device).expand(batch.num_users, -1)
 
 
-class DistanceDecayBaseline(Baseline):
+class DistanceDecayBaseline(FittedScorer):
     """Nearest first: scores each node by ``-log(d)``, with ``d`` its distance from home in metres.
 
     The scores are not probabilities.
@@ -45,7 +48,7 @@ class DistanceDecayBaseline(Baseline):
         return -extract_home_distances(batch).log()
 
 
-class GravityBaseline(Baseline):
+class GravityBaseline(FittedScorer):
     """Gravity model with the home-excluded visit rate as mass and one Tanner deterrence for everyone.
 
     ``logit P(y = 1 | h, n) = alpha + logit(p_n) - beta_log * log(d / d0) - beta_lin * d / d0``, with ``d0`` the median
@@ -70,19 +73,17 @@ class GravityBaseline(Baseline):
         super().__init__()
         self.max_iter = max_iter
 
-    def fit(self, train: Users, distance_m: torch.Tensor):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Fit the intercept and the two decay parameters on the ``train`` users with full-batch LBFGS.
 
-        Args:
-            train: The training users.
-            distance_m: Distance in metres between every pair of nodes, ``[num_nodes, num_nodes]``.
+        The distances are read from ``locations.distance_m``.
         """
         self.popularity_logit = torch.logit(home_excluded_visit_rate(train.visited, train.home_node))
 
         pairs = non_home_mask(train)
         labels = train.visited[pairs].float()
         offset = self.popularity_logit.expand_as(train.visited)[pairs]
-        distance = clamp_distances(distance_m[train.home_node])[pairs]
+        distance = clamp_distances(locations.distance_m[train.home_node])[pairs]
 
         self.d0 = float(distance[labels > 0.5].median())
         relative = distance / self.d0
@@ -115,7 +116,7 @@ class GravityBaseline(Baseline):
         return self.pair_logits(expand_node_indices(batch), extract_home_distances(batch))
 
 
-class GravityBinnedBaseline(Baseline):
+class GravityBinnedBaseline(FittedScorer):
     """Gravity model with a step-shaped deterrence fitted by counting: scores ``log p_n + log g_b(d)``.
 
     ``g_b = O_b / E_b``, with ``O_b`` the visited training pairs in distance bin ``b`` (plus a pseudocount) and ``E_b``
@@ -136,12 +137,10 @@ class GravityBinnedBaseline(Baseline):
         super().__init__()
         self.n_bins = n_bins
 
-    def fit(self, train: Users, distance_m: torch.Tensor):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Count the observed and expected visits per distance bin over the ``train`` users.
 
-        Args:
-            train: The training users.
-            distance_m: Distance in metres between every pair of nodes, ``[num_nodes, num_nodes]``.
+        The distances are read from ``locations.distance_m``.
         """
         popularity = home_excluded_visit_rate(train.visited, train.home_node)
         self.log_popularity = popularity.log()
@@ -149,7 +148,7 @@ class GravityBinnedBaseline(Baseline):
         pairs = non_home_mask(train)
         visited = train.visited[pairs] > 0.5
         expected = popularity.expand_as(train.visited)[pairs]
-        distance = clamp_distances(distance_m[train.home_node])[pairs]
+        distance = clamp_distances(locations.distance_m[train.home_node])[pairs]
 
         quantiles = torch.linspace(0, 1, self.n_bins + 1)[1:-1]
         self.edges = torch.quantile(distance[visited], quantiles)
@@ -170,7 +169,7 @@ class GravityBinnedBaseline(Baseline):
         return popularity + self.log_deterrence.to(device)[bins]
 
 
-class ConditionalGravityBaseline(Baseline):
+class ConditionalGravityBaseline(FittedScorer):
     """Per-home visit frequency smoothed toward a fitted gravity model.
 
     ``p(n | h) = (c_hn + a * g_hn) / (u_h + a)``, with ``g_hn = sigmoid(Gravity logit)`` for the pair and the smoothing
@@ -190,18 +189,15 @@ class ConditionalGravityBaseline(Baseline):
         super().__init__()
         self.gravity = gravity
 
-    def fit(self, train: Users, val: Users, distance_m: torch.Tensor):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Count visits per home over the ``train`` users and pick the smoothing strength on the ``val`` users.
 
-        Args:
-            train: The training users.
-            val: The validation users.
-            distance_m: Distance in metres between every pair of nodes, ``[num_nodes, num_nodes]``.
+        The distances are read from ``locations.distance_m``.
         """
         self.counts, self.users = home_visit_counts(train.visited, train.home_node)
 
         node_idx = torch.arange(val.visited.shape[1]).expand_as(val.visited)
-        val_distance = clamp_distances(distance_m[val.home_node])
+        val_distance = clamp_distances(locations.distance_m[val.home_node])
         val_prior = self.gravity.pair_logits(node_idx, val_distance).sigmoid()
 
         self.strength = fit_smoothing_strength(self.counts, self.users, val, val_prior)

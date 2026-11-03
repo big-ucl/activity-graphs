@@ -25,9 +25,9 @@ class OverfitDebugCallback(L.Callback):
 
         if trainer.current_epoch == 0:
             locations = pl_module.locations
-            x_loc = locations.x.expand(batch.num_users, -1, -1)
+            location_x = locations.x.expand(batch.num_users, -1, -1)
             is_home = batch.is_home.to(locations.x.dtype).unsqueeze(-1)
-            x = torch.cat([x_loc, is_home], dim=-1)
+            x = torch.cat([location_x, is_home], dim=-1)
             b_min, b_max, b_mean = x.min().item(), x.max().item(), x.mean().item()
             num_pairs = batch.num_users * batch.num_nodes
             y = batch.visited

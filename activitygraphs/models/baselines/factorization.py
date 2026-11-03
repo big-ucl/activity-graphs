@@ -1,13 +1,16 @@
 """Matrix factorisation baseline: the MTF_BPR model of Phan et al. (2022), indexed by home node."""
 
+from typing import Self
+
 import torch
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.models.baselines.common import Baseline, non_home_mask
+from activitygraphs.models.baselines.common import non_home_mask
 from activitygraphs.training.losses import dense_bpr_loss
 from activitygraphs.training.metrics import per_user_recall
+from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.models.baselines.popularity import home_visit_counts
 
 N_FACTORS = 429
@@ -19,7 +22,7 @@ EVAL_EVERY = 10
 INIT_SCALE = 0.1
 
 
-class HomeZoneMFBaseline(Baseline):
+class HomeZoneMFBaseline(FittedScorer):
     """Factorisation of the home-zone-by-node visit matrix, fitted by Bayesian personalised ranking.
 
     ``s(h, n) = U_h . Z_n + b_n``, with ``h`` the user's home node. Phan's neighbourhood enrichment replaces each
@@ -73,7 +76,7 @@ class HomeZoneMFBaseline(Baseline):
         self.eval_every = eval_every
         self.seed = seed
 
-    def fit(self, train: Users, val: Users):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Fit the factors by BPR on the home-pooled visit counts of the ``train`` users, keeping the best epoch.
 
         The best epoch is the one whose ``avg_recall`` over the ``val`` users is highest.

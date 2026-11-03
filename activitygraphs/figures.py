@@ -197,13 +197,13 @@ def neighbours_of(edges: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame, index: int) 
     return sorted(position[value] for value in adjacent if value in position)
 
 
-def user_scores(score_vectors: pl.DataFrame, name: str, user_id: int, seed: int | None = None) -> np.ndarray:
+def user_scores(score_vectors: pl.DataFrame, name: str, user_idx: int, seed: int | None = None) -> np.ndarray:
     """One user's score vector for one model, as an array over nodes in PyG node order.
 
     Args:
         score_vectors: Score vectors from ``read_score_vectors``.
         name: Model name.
-        user_id: Test user to pull.
+        user_idx: Test user to pull.
         seed: Training seed; ``None`` selects the seedless baseline rows.
 
     Returns:
@@ -214,12 +214,12 @@ def user_scores(score_vectors: pl.DataFrame, name: str, user_id: int, seed: int 
     """
     rows = score_vectors.filter(
         pl.col("name") == name,
-        pl.col("user_id") == user_id,
+        pl.col("user_idx") == user_idx,
         pl.col("seed").is_null() if seed is None else pl.col("seed") == seed,
     )
 
     if rows.is_empty():
-        raise KeyError(f"no score vector for model {name!r}, user {user_id!r}, seed {seed!r}")
+        raise KeyError(f"no score vector for model {name!r}, user {user_idx!r}, seed {seed!r}")
 
     return np.asarray(rows["scores"].to_list()[0], dtype=np.float64)
 

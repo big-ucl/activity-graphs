@@ -111,7 +111,7 @@ def _compute_home_coverage(train_dataset: UserDataset, test_dataset: UserDataset
     train_home_idx = train_dataset.users.home_node.unique().tolist()
 
     return pl.DataFrame({
-        "user_id": test_dataset.user_idx.tolist(),
+        "user_idx": test_dataset.user_idx.tolist(),
         "survey_user_id": test_dataset.users.user_ids["user_id"],
         "home_node": test_dataset.users.home_node.tolist(),
     }).with_columns(home_seen_in_train=pl.col("home_node").is_in(train_home_idx))

@@ -65,7 +65,7 @@ class RankingModule(L.LightningModule):
     of shape ``[num_users, num_nodes]``.
 
     Args:
-        scorer: The model, a ``Scorer`` such as a ``NodeScorer``, a ``GraphScorer`` or a ``Baseline``, mapping the
+        scorer: The ``Scorer``, such as a ``NodeScorer``, a ``GraphScorer`` or a ``FittedScorer``, mapping the
             locations and the ``UserBatch`` to the logits.
         locations: The location graph joined with each batch of users, and passed to the scorer.
         lr: Initial learning rate for AdamW.

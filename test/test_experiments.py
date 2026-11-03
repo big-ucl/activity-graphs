@@ -29,7 +29,7 @@ from activitygraphs.experiments.training import WandBParams, build_callbacks
 from activitygraphs.experiments.variants import (
     Variant,
     build_feature_encoder,
-    build_model,
+    build_network,
     build_scorer,
     variant_hyperparams,
 )
@@ -105,7 +105,7 @@ def record_training(monkeypatch, frame=None) -> list[dict]:
 def make_score_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
     """Two score-vector rows, as ``score_vector_frame`` returns them."""
     return pl.DataFrame({
-        "user_id": [7, 9],
+        "user_idx": [7, 9],
         "scores": [[0.1, 0.9, 0.4], [0.7, 0.2, 0.5]],
     }).with_columns(
         name=pl.lit(name),
@@ -118,7 +118,7 @@ def make_score_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
 def make_home_distance_frame() -> pl.DataFrame:
     """Two rows of per-node distances from home, as ``home_distance_frame`` returns them."""
     return pl.DataFrame({
-        "user_id": [7, 9],
+        "user_idx": [7, 9],
         "distances": [[0.0, 900.0, 4000.0], [4000.0, 900.0, 0.0]],
     }).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
@@ -130,7 +130,7 @@ def make_model_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
         {"name": name, "stage": "test", "epoch": None, "test_r_precision": 0.48},
     ])
     per_user = pl.DataFrame({
-        "user_id": [7, 9],
+        "user_idx": [7, 9],
         "n_pos": [2, 3],
         "r_precision": [1.0, 0.5],
         "recall": [1.0, 0.33],
@@ -165,7 +165,7 @@ class TestVariant:
 class TestBuildModel:
     @pytest.mark.parametrize("key", ["mlp", "gat", "gps"])
     def test_every_architecture_builds(self, cfg, key):
-        model = build_model(Variant(cfg.models[key]), make_schema(), IN_CHANNELS)
+        model = build_network(Variant(cfg.models[key]), make_schema(), IN_CHANNELS)
 
         assert isinstance(model, torch.nn.Module)
 
@@ -192,22 +192,22 @@ class TestBuildModel:
         assert with_pe.out_dim - plain.out_dim == HOME_PE.bins
 
     def test_the_model_takes_the_given_input_width(self, cfg):
-        model = build_model(Variant(cfg.models.mlp), make_schema(), IN_CHANNELS)
+        model = build_network(Variant(cfg.models.mlp), make_schema(), IN_CHANNELS)
 
         assert isinstance(model, NodeMLP)
         assert model.lins[0].in_features == IN_CHANNELS
 
     def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
         schema = make_schema(num_edge_features=2)
-        gat = build_model(Variant(cfg.models.gat), schema, IN_CHANNELS)
-        gps = build_model(Variant(cfg.models.gps), schema, IN_CHANNELS)
+        gat = build_network(Variant(cfg.models.gat), schema, IN_CHANNELS)
+        gps = build_network(Variant(cfg.models.gps), schema, IN_CHANNELS)
 
         assert isinstance(gat, GAT) and isinstance(gps, GraphTransformer)
         assert gps.edge_proj.in_features == 2
 
     def test_gat_norm_follows_the_config(self, cfg):
-        normed = build_model(Variant(cfg.models.gat), make_schema(), IN_CHANNELS)
-        plain = build_model(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_schema(), IN_CHANNELS)
+        normed = build_network(Variant(cfg.models.gat), make_schema(), IN_CHANNELS)
+        plain = build_network(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_schema(), IN_CHANNELS)
 
         assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.convs.norms)  # type: ignore[union-attr]
         assert all(isinstance(norm, torch.nn.Identity) for norm in plain.convs.norms)  # type: ignore[union-attr]
@@ -220,7 +220,7 @@ class TestBuildModel:
 
     def test_unknown_gat_norm_raises(self, cfg):
         with pytest.raises(KeyError, match="normalisation"):
-            build_model(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_schema(), IN_CHANNELS)
+            build_network(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_schema(), IN_CHANNELS)
 
 
 class TestTrainerConfig:
@@ -494,16 +494,16 @@ class TestSaveResults:
     def test_per_user_columns_are_absent_from_the_aggregate_file(self, tmp_path):
         aggregate, per_user = self._saved(tmp_path, make_model_frame("MLP"))
 
-        assert "user_id" not in aggregate.columns
+        assert "user_idx" not in aggregate.columns
         assert "val_r_precision" not in per_user.columns
-        assert {"name", "seed", "user_id", "n_pos", "r_precision", "recall"}.issubset(per_user.columns)
+        assert {"name", "seed", "user_idx", "n_pos", "r_precision", "recall"}.issubset(per_user.columns)
 
     def test_seed_is_retained_for_pairing(self, tmp_path):
         frames = [make_model_frame("MLP", seed=1), make_model_frame("MLP", seed=2)]
         _, per_user = self._saved(tmp_path, *frames)
 
         assert per_user["seed"].to_list() == [1, 1, 2, 2]
-        assert per_user["user_id"].to_list() == [7, 9, 7, 9]
+        assert per_user["user_idx"].to_list() == [7, 9, 7, 9]
 
     def test_writes_only_the_aggregate_file_when_no_per_user_rows(self, tmp_path):
         aggregate_only = make_model_frame("MLP").filter(pl.col("stage") != PER_USER_STAGE)
@@ -535,7 +535,7 @@ class TestSaveResults:
         scores = pl.read_parquet(tmp_path / SCORES_FILE)
         assert scores["stage"].unique().to_list() == [SCORE_VECTOR_STAGE]
         assert scores["scores"].to_list() == [[0.1, 0.9, 0.4], [0.7, 0.2, 0.5]]
-        assert {"name", "seed", "user_id"}.issubset(scores.columns)
+        assert {"name", "seed", "user_idx"}.issubset(scores.columns)
 
     def test_score_rows_are_absent_from_the_other_two_files(self, tmp_path):
         combined = pl.concat([make_model_frame("MLP"), make_score_frame("MLP")], how="diagonal")

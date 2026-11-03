@@ -4,11 +4,6 @@ import torch
 
 from activitygraphs.datasets.users import Users
 from activitygraphs.models.baselines.popularity import POPULARITY_EPS
-from activitygraphs.models.scorers import Scorer
-
-
-class Baseline(Scorer):
-    """A model scored from the batch itself, rather than from the model input built by the ``FeatureEncoder``."""
 
 
 def non_home_mask(users: Users) -> torch.Tensor:

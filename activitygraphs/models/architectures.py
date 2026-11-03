@@ -12,8 +12,8 @@ from activitygraphs.models.scorers import GraphScorer, NodeScorer, Scorer
 
 
 @dataclass(frozen=True)
-class ModelSizes:
-    """Input and output sizes of a model, set by the dataset and the variant's input features.
+class NetworkSizes:
+    """Input and output sizes of a network, set by the dataset and the variant's input features.
 
     Attributes:
         in_channels: Width of each node's feature vector.
@@ -26,7 +26,7 @@ class ModelSizes:
     edge_dim: int
 
 
-def build_mlp(config: MLPConfig, sizes: ModelSizes) -> NodeMLP:
+def build_mlp(config: MLPConfig, sizes: NetworkSizes) -> NodeMLP:
     """Instantiate a ``NodeMLP`` from ``config``, sized by ``sizes``."""
     return NodeMLP(
         num_layers=config.num_layers,
@@ -43,7 +43,7 @@ NORMS: dict[str, Callable[[int], torch.nn.Module]] = {
 }
 
 
-def build_gat(config: GATConfig, sizes: ModelSizes) -> GAT:
+def build_gat(config: GATConfig, sizes: NetworkSizes) -> GAT:
     """Instantiate a ``GAT`` from ``config``, sized by ``sizes``.
 
     Raises:
@@ -66,7 +66,7 @@ def build_gat(config: GATConfig, sizes: ModelSizes) -> GAT:
     )
 
 
-def build_gps(config: GPSConfig, sizes: ModelSizes) -> GraphTransformer:
+def build_gps(config: GPSConfig, sizes: NetworkSizes) -> GraphTransformer:
     """Instantiate a ``GraphTransformer`` (GPS) from ``config``, sized by ``sizes``."""
     return GraphTransformer(
         in_channels=sizes.in_channels,
@@ -84,7 +84,7 @@ class Architecture:
     """A registered architecture.
 
     Attributes:
-        build: Builds the network from its config and its ``ModelSizes``.
+        build: Builds the network from its config and its ``NetworkSizes``.
         scorer: Wraps the ``FeatureEncoder`` and the network into the scorer that runs them.
     """
 

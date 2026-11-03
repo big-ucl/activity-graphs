@@ -169,7 +169,7 @@ class TestPerUserRanking:
         vectors = metric.score_vectors()
 
         assert vectors.shape == (2, 4)
-        assert metric.columns()["user_id"].tolist() == [0, 1]
+        assert metric.columns()["user_idx"].tolist() == [0, 1]
         assert vectors[0].tolist() == pytest.approx([0.9, 0.8, 0.2, 0.1])
         assert vectors[1].tolist() == pytest.approx([0.9, 0.2, 0.8, 0.1])
 
@@ -182,15 +182,15 @@ class TestPerUserRanking:
             preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4), hops=chain_hops(2, 2)
         )
 
-        assert metric.columns()["user_id"].tolist() == [0]
+        assert metric.columns()["user_idx"].tolist() == [0]
         assert metric.score_vectors().shape == (1, 2)
 
     def test_retains_one_row_per_user(self):
         columns = self._updated().columns()
 
-        assert set(columns) == {"user_id", "n_pos", "n_pos_home_incl", "r_precision"}
+        assert set(columns) == {"user_idx", "n_pos", "n_pos_home_incl", "r_precision"}
         assert all(len(column) == 2 for column in columns.values())
-        assert columns["user_id"].tolist() == [0, 1]
+        assert columns["user_idx"].tolist() == [0, 1]
         assert columns["n_pos"].tolist() == [2, 2]
 
     def test_scores_match_the_hand_computed_values(self):
@@ -233,7 +233,7 @@ class TestPerUserRanking:
             hops=chain_hops(2, 4),
         )
 
-        assert metric.columns()["user_id"].tolist() == [1]
+        assert metric.columns()["user_idx"].tolist() == [1]
 
     def test_the_retained_score_vector_still_covers_the_home_node(self):
         """The home-rank health check reads these vectors, so the excluded node's score must survive."""
@@ -253,7 +253,7 @@ class TestPerUserRanking:
             preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4), hops=chain_hops(2, 2)
         )
 
-        assert metric.columns()["user_id"].tolist() == [0]
+        assert metric.columns()["user_idx"].tolist() == [0]
 
     def test_accumulates_across_batches(self):
         metric = self._updated()
@@ -266,7 +266,7 @@ class TestPerUserRanking:
             hops=chain_hops(1, 2),
         )
 
-        assert metric.columns()["user_id"].tolist() == [0, 1, 2]
+        assert metric.columns()["user_idx"].tolist() == [0, 1, 2]
 
     def test_each_positive_keeps_its_hop_distance(self):
         metric = PerUserRanking()
@@ -406,7 +406,7 @@ class TestPerUserColumnsInModule:
 
         columns = module.per_user_columns
         assert set(columns) == {
-            "user_id",
+            "user_idx",
             "n_pos",
             "n_pos_home_incl",
             "r_precision",
@@ -416,7 +416,7 @@ class TestPerUserColumnsInModule:
             "pos_n_scored_higher",
             "pos_n_tied",
         }
-        assert columns["user_id"] == [0]
+        assert columns["user_idx"] == [0]
         assert columns["n_pos"] == [1]  # two positives, one of which is the excluded home node
         assert columns["n_pos_home_incl"] == [2]
         assert 0.0 <= columns["r_precision"][0] <= 1.0

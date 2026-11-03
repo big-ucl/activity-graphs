@@ -8,7 +8,6 @@ from activitygraphs.config import Config
 from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.training import WandBParams, evaluate_baseline
 from activitygraphs.models.baselines import (
-    Baseline,
     ConditionalGravityBaseline,
     ConditionalVisitFrequencyBaseline,
     DistanceDecayBaseline,
@@ -19,15 +18,39 @@ from activitygraphs.models.baselines import (
     UniformBaseline,
     VisitFrequencyBaseline,
 )
+from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.training.losses import Loss
 
 
 @dataclass(frozen=True)
 class BaselineSpec:
-    """A fitted baseline and associated reported name."""
+    """A baseline and associated reported name."""
 
     name: str
-    baseline: Baseline
+    baseline: FittedScorer
+
+
+def closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
+    """Return the specs of the baselines fitted once, rather than once per training seed.
+
+    The baselines are returned unfitted.
+
+    Returns:
+        The frequency baselines, then the distance-decay ones, in fitting order. ``ConditionalGravity`` reads the
+        ``Gravity`` fitted before it.
+    """
+    gravity = GravityBaseline()
+
+    return [
+        BaselineSpec("Uniform", UniformBaseline()),
+        BaselineSpec("GlobalMarginal", GlobalBaseline()),
+        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes)),
+        BaselineSpec("ConditionalVisitFrequency", ConditionalVisitFrequencyBaseline(num_nodes)),
+        BaselineSpec("DistanceDecay", DistanceDecayBaseline()),
+        BaselineSpec("Gravity", gravity),
+        BaselineSpec("GravityBinned", GravityBinnedBaseline()),
+        BaselineSpec("ConditionalGravity", ConditionalGravityBaseline(gravity)),
+    ]
 
 
 def measure_baselines(
@@ -51,34 +74,17 @@ def measure_baselines(
     train_seeds = list(cfg.train.train_seeds)
     train_users = datamodule.train_dataset.users
     val_users = datamodule.val_dataset.users
-    distance_m = datamodule.locations.distance_m
+    locations = datamodule.locations
+    results = []
 
-    gravity = GravityBaseline().fit(train_users, distance_m)
-    gravity_binned = GravityBinnedBaseline().fit(train_users, distance_m)
-    conditional_visit_frequency = ConditionalVisitFrequencyBaseline(num_nodes)
-    conditional_gravity = ConditionalGravityBaseline(gravity)
-
-    baselines = [
-        BaselineSpec("Uniform", UniformBaseline()),
-        BaselineSpec("GlobalMarginal", GlobalBaseline().fit(train_users)),
-        BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes).fit(train_users)),
-        BaselineSpec("ConditionalVisitFrequency", conditional_visit_frequency.fit(train_users, val_users)),
-        BaselineSpec("DistanceDecay", DistanceDecayBaseline()),
-        BaselineSpec("Gravity", gravity),
-        BaselineSpec("GravityBinned", gravity_binned),
-        BaselineSpec("ConditionalGravity", conditional_gravity.fit(train_users, val_users, distance_m)),
-    ]
-
-    results = [
-        evaluate_baseline(spec.baseline, datamodule, loss, spec.name, cfg, wandb_params).with_columns(
-            seed=pl.lit(None, dtype=pl.Int64)
-        )
-        for spec in baselines
-    ]
+    for spec in closed_form_baselines(num_nodes):
+        baseline = spec.baseline.fit(train_users, val_users, locations)
+        result = evaluate_baseline(baseline, datamodule, loss, spec.name, cfg, wandb_params)
+        results.append(result.with_columns(seed=pl.lit(None, dtype=pl.Int64)))
 
     for train_seed in train_seeds:
         home_zone_mf = HomeZoneMFBaseline(num_nodes, max_recall_k, seed=train_seed)
-        home_zone_mf_fitted = home_zone_mf.fit(train_users, val_users)
+        home_zone_mf_fitted = home_zone_mf.fit(train_users, val_users, locations)
         run_tag = f"seed{train_seed}" if len(train_seeds) > 1 else None
 
         home_zone_mf_results = evaluate_baseline(

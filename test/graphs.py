@@ -47,6 +47,11 @@ def make_locations(
     )
 
 
+def edgeless_locations(num_nodes: int, distance_m: torch.Tensor | None = None) -> Locations:
+    """Return ``num_nodes`` locations with no features and no edges, ``distance_m`` metres apart."""
+    return make_locations(torch.zeros(num_nodes, 0), torch.zeros(2, 0, dtype=torch.long), distance_m=distance_m)
+
+
 def make_users(
     visited: torch.Tensor,
     home_node: torch.Tensor,

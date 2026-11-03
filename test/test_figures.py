@@ -151,7 +151,7 @@ def test_user_scores_selects_the_model_seed_and_user():
     vectors = pl.DataFrame({
         "name": ["GAT", "GAT", "Gravity"],
         "seed": [0, 1, None],
-        "user_id": [1, 1, 1],
+        "user_idx": [1, 1, 1],
         "scores": [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
     })
 

@@ -1,11 +1,14 @@
 """Frequency-based (no learning) baselines for visit prediction."""
 
+from typing import Self
+
 import torch
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.models.baselines.common import Baseline, fit_smoothing_strength, smoothed_rate
+from activitygraphs.models.baselines.common import fit_smoothing_strength, smoothed_rate
+from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts, popularity_logit
 
 
@@ -14,7 +17,7 @@ def inverse_sigmoid(prob):
     return torch.log(prob / (1 - prob))
 
 
-class UniformBaseline(Baseline):
+class UniformBaseline(FittedScorer):
     """P(y_i = 1) = 0.5 for all nodes."""
 
     def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
@@ -22,7 +25,7 @@ class UniformBaseline(Baseline):
         return torch.zeros(batch.num_users, batch.num_nodes, device=batch.visited.device)
 
 
-class GlobalBaseline(Baseline):
+class GlobalBaseline(FittedScorer):
     """P(y_i = 1) = global visit rate across all training graphs."""
 
     logit: torch.Tensor
@@ -30,7 +33,7 @@ class GlobalBaseline(Baseline):
     def __init__(self):
         super().__init__()
 
-    def fit(self, train: Users):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Compute the global positive rate over the ``train`` users and store as a logit."""
         num_pos = train.visited.sum().item()
         num_total = train.visited.numel()
@@ -45,7 +48,7 @@ class GlobalBaseline(Baseline):
         return self.logit.expand(batch.num_users, batch.num_nodes).to(batch.visited.device)
 
 
-class VisitFrequencyBaseline(Baseline):
+class VisitFrequencyBaseline(FittedScorer):
     """P(y_i = 1) = per-node visit frequency across the training users who do not live at the node."""
 
     logits: torch.Tensor
@@ -54,7 +57,7 @@ class VisitFrequencyBaseline(Baseline):
         super().__init__()
         self.num_nodes = num_nodes
 
-    def fit(self, train: Users):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Compute the home-excluded per-node visit rates over the ``train`` users and store them as logits."""
         self.logits = popularity_logit(train.visited, train.home_node)
 
@@ -65,7 +68,7 @@ class VisitFrequencyBaseline(Baseline):
         return self.logits.to(batch.visited.device).expand(batch.num_users, -1)
 
 
-class ConditionalVisitFrequencyBaseline(Baseline):
+class ConditionalVisitFrequencyBaseline(FittedScorer):
     """P(y_i = 1 | home = h) = per-home visit frequency, smoothed towards VisitFrequency.
 
     The smoothing covers nodes never visited by users with home = h.
@@ -85,7 +88,7 @@ class ConditionalVisitFrequencyBaseline(Baseline):
         super().__init__()
         self.num_nodes = num_nodes
 
-    def fit(self, train: Users, val: Users):
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
         """Count visits per home over the ``train`` users and pick the smoothing strength on the ``val`` users."""
         prior = home_excluded_visit_rate(train.visited, train.home_node)
         counts, users = home_visit_counts(train.visited, train.home_node)

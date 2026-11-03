@@ -5,7 +5,7 @@ import dataclasses
 import numpy as np
 import pytest
 import torch
-from graphs import join_users, make_locations, make_users
+from graphs import edgeless_locations, join_users, make_locations, make_users
 
 from activitygraphs.datasets import Locations, UserBatch, Users
 from activitygraphs.models.baselines.gravity import (
@@ -72,7 +72,8 @@ class TestGravity:
         beta_log, rate_per_m = 0.8, 1e-4
         users, distance_m = simulate(n_users=3000, n_nodes=400, beta_log=beta_log, rate_per_m=rate_per_m)
 
-        gravity = GravityBaseline().fit(users, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        gravity = GravityBaseline().fit(users, users, locations)
 
         assert gravity.beta_log == pytest.approx(beta_log, abs=0.1)
         assert gravity.beta_lin == pytest.approx(rate_per_m * gravity.d0, abs=0.1)
@@ -80,7 +81,8 @@ class TestGravity:
     def test_d0_is_the_median_visited_non_home_distance(self):
         users, distance_m = simulate(n_users=200, n_nodes=10, beta_log=0.5, rate_per_m=0.0)
 
-        gravity = GravityBaseline(max_iter=1).fit(users, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        gravity = GravityBaseline(max_iter=1).fit(users, users, locations)
 
         labels = users.visited
         not_home = torch.ones_like(labels, dtype=torch.bool)
@@ -90,7 +92,8 @@ class TestGravity:
 
     def test_forward_is_the_pair_logit(self):
         users, distance_m = simulate(n_users=200, n_nodes=10, beta_log=0.5, rate_per_m=1e-4)
-        gravity = GravityBaseline().fit(users, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        gravity = GravityBaseline().fit(users, users, locations)
 
         locations, batch = join(users.subset([0, 1]), distance_m)
         out = gravity(locations, batch)[0]
@@ -110,7 +113,8 @@ class TestGravityBinned:
     def test_deterrence_is_observed_over_expected_per_bin(self):
         users, distance_m = simulate(n_users=300, n_nodes=12, beta_log=1.0, rate_per_m=0.0)
 
-        binned = GravityBinnedBaseline(n_bins=4).fit(users, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        binned = GravityBinnedBaseline(n_bins=4).fit(users, users, locations)
 
         labels = users.visited
         popularity = home_excluded_visit_rate(labels, users.home_node)
@@ -129,7 +133,8 @@ class TestGravityBinned:
     def test_one_finite_deterrence_per_bin(self):
         users, distance_m = simulate(n_users=300, n_nodes=12, beta_log=1.0, rate_per_m=0.0)
 
-        binned = GravityBinnedBaseline(n_bins=4).fit(users, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        binned = GravityBinnedBaseline(n_bins=4).fit(users, users, locations)
 
         assert binned.edges.shape == (3,)
         assert binned.log_deterrence.shape == (4,)
@@ -141,8 +146,9 @@ class TestConditionalGravity:
         users, distance_m = simulate(n_users=200, n_nodes=10, beta_log=0.5, rate_per_m=1e-4)
         users = dataclasses.replace(users, home_node=users.home_node % 9)
         train, val = users.subset(list(range(150))), users.subset(list(range(150, 200)))
-        gravity = GravityBaseline().fit(users, distance_m)
-        conditional = ConditionalGravityBaseline(gravity).fit(train, val, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        gravity = GravityBaseline().fit(users, users, locations)
+        conditional = ConditionalGravityBaseline(gravity).fit(train, val, locations)
 
         unseen = join(make_users(torch.zeros(1, 10), torch.tensor([9])), distance_m)
 
@@ -155,9 +161,10 @@ class TestConditionalGravity:
     def test_the_strength_is_fitted(self):
         users, distance_m = simulate(n_users=200, n_nodes=10, beta_log=0.5, rate_per_m=1e-4)
         train, val = users.subset(list(range(150))), users.subset(list(range(150, 200)))
-        gravity = GravityBaseline().fit(users, distance_m)
+        locations = edgeless_locations(len(distance_m), distance_m)
+        gravity = GravityBaseline().fit(users, users, locations)
 
-        conditional = ConditionalGravityBaseline(gravity).fit(train, val, distance_m)
+        conditional = ConditionalGravityBaseline(gravity).fit(train, val, locations)
 
         assert conditional.strength is not None
         assert conditional.counts.shape == (10, 10)

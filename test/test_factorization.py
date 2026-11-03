@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from graphs import join_users, make_locations, make_users
+from graphs import edgeless_locations, join_users, make_locations, make_users
 
 from activitygraphs.datasets import Users
 from activitygraphs.models.baselines.factorization import HomeZoneMFBaseline
@@ -70,7 +70,9 @@ def fitted(splits, **kwargs) -> HomeZoneMFBaseline:
         eval_every=20,
         **kwargs,
     )
-    return baseline.fit(*splits)
+    train, val = splits
+    locations = edgeless_locations(N_NODES)
+    return baseline.fit(train, val, locations)
 
 
 class TestDenseBPRLoss:

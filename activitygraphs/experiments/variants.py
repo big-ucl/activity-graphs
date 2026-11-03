@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from activitygraphs.config import HomePEConfig, ModelConfig
 from activitygraphs.datasets import Locations
-from activitygraphs.models.architectures import ModelSizes, lookup_architecture
+from activitygraphs.models.architectures import NetworkSizes, lookup_architecture
 from activitygraphs.models.features import (
     Demographics,
     FeatureEncoder,
@@ -97,15 +97,15 @@ def build_feature_encoder(
     return FeatureEncoder(sources)
 
 
-def build_model(variant: Variant, schema: DatasetSchema, in_channels: int) -> torch.nn.Module:
+def build_network(variant: Variant, schema: DatasetSchema, in_channels: int) -> torch.nn.Module:
     """Instantiate the network of ``variant``, sized for the tensors of ``schema`` and its input width.
 
     Args:
         variant: The variant to build.
         schema: The column schema of each tensor group.
-        in_channels: Width of each node's model input, the ``out_dim`` of the variant's ``FeatureEncoder``.
+        in_channels: Width of each node's network input, the ``out_dim`` of the variant's ``FeatureEncoder``.
     """
-    sizes = ModelSizes(
+    sizes = NetworkSizes(
         in_channels=in_channels,
         out_channels=schema.targets.width,
         edge_dim=schema.edges.width,
@@ -124,7 +124,7 @@ def build_scorer(variant: Variant, locations: Locations, schema: DatasetSchema, 
         home_pe_cfg: Settings of the home-anchored positional encoding, read when the variant uses it.
     """
     encoder = build_feature_encoder(variant, locations, schema, home_pe_cfg)
-    network = build_model(variant, schema, encoder.out_dim)
+    network = build_network(variant, schema, encoder.out_dim)
 
     return lookup_architecture(variant.model).scorer(encoder, network)
 
