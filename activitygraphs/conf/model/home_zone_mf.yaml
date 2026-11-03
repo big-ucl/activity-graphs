@@ -1,0 +1,6 @@
+architecture: home_zone_mf
+name: HomeZoneMF
+lr: 1.91e-2
+weight_decay: 1e-4
+
+n_factors: 429

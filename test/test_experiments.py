@@ -26,15 +26,11 @@ from activitygraphs.experiments.results import (
 from activitygraphs.experiments.runners import run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
 from activitygraphs.experiments.training import WandBParams, build_callbacks
-from activitygraphs.experiments.variants import (
-    Variant,
-    build_feature_encoder,
-    build_network,
-    build_scorer,
-    variant_hyperparams,
-)
+from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.main import EXPERIMENTS
-from activitygraphs.models.architectures import BUILDERS, lookup_architecture
+from activitygraphs.models.architectures import BUILDERS, build_scorer, lookup_architecture
+from activitygraphs.models.baselines import HomeZoneMFBaseline
+from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
@@ -46,7 +42,7 @@ from activitygraphs.utils import get_project_root
 STARTED = datetime(2026, 10, 26, 15, 30, 0)
 EXPERIMENT_CONFIGS = sorted((get_project_root() / "activitygraphs/conf/experiment").glob("*.yaml"))
 HOME_PE = HomePEConfig(bins=8, max_hops=40)
-IN_CHANNELS = 10
+DEFAULT_FEATURES = InputFeatures()
 
 
 @pytest.fixture(scope="module")
@@ -83,8 +79,8 @@ def make_schema(num_location_features: int = 5, num_attributes: int = 3, num_edg
 
 
 def make_locations() -> types.SimpleNamespace:
-    """Stand-in exposing only what ``build_feature_encoder`` reads off ``Locations``."""
-    return types.SimpleNamespace(num_rwpe_features=2)
+    """Stand-in exposing only what the scorer builders read off ``Locations``."""
+    return types.SimpleNamespace(num_rwpe_features=2, num_nodes=6)
 
 
 def record_training(monkeypatch, frame=None) -> list[dict]:
@@ -97,7 +93,9 @@ def record_training(monkeypatch, frame=None) -> list[dict]:
         return frame(name) if frame else pl.DataFrame({"name": [name], "stage": ["test"]})
 
     monkeypatch.setattr(runners, "train_and_evaluate_model", train_and_evaluate_model)
-    monkeypatch.setattr(runners, "build_scorer", lambda variant, locations, schema, home_pe_cfg: torch.nn.Linear(1, 1))
+    monkeypatch.setattr(
+        runners, "build_scorer", lambda config, features, locations, schema, home_pe_cfg: torch.nn.Linear(1, 1)
+    )
 
     return calls
 
@@ -145,15 +143,15 @@ class TestVariant:
         gat = cfg.models.gat
 
         assert Variant(gat).name == "GATv2-8"
-        assert Variant(gat, full_info=True).name == "GATv2-8-dist"
-        assert Variant(gat, use_home_pe=True).name == "GATv2-8-hpe"
-        assert Variant(gat, full_info=True, use_home_pe=True).name == "GATv2-8-hpe-dist"
+        assert Variant(gat, InputFeatures(full_info=True)).name == "GATv2-8-dist"
+        assert Variant(gat, InputFeatures(use_home_pe=True)).name == "GATv2-8-hpe"
+        assert Variant(gat, InputFeatures(full_info=True, use_home_pe=True)).name == "GATv2-8-hpe-dist"
 
     def test_suffix_comes_last(self, cfg):
-        assert Variant(cfg.models.mlp, full_info=True, suffix="nodemo").name == "MLP-dist-nodemo"
+        assert Variant(cfg.models.mlp, InputFeatures(full_info=True), suffix="nodemo").name == "MLP-dist-nodemo"
 
     def test_rwpe_free_variant_is_named_norwpe(self, cfg):
-        assert Variant(cfg.models.mlp, full_info=True, use_rwpe=False).name == "MLP-dist-norwpe"
+        assert Variant(cfg.models.mlp, InputFeatures(full_info=True, use_rwpe=False)).name == "MLP-dist-norwpe"
 
     def test_name_follows_an_overridden_depth(self, cfg):
         gat = with_overrides(cfg.models.gat, {"num_gcn_layers": 4})
@@ -162,65 +160,77 @@ class TestVariant:
         assert cfg.models.gat.name == "GATv2-8"
 
 
-class TestBuildModel:
-    @pytest.mark.parametrize("key", ["mlp", "gat", "gps"])
-    def test_every_architecture_builds(self, cfg, key):
-        model = build_network(Variant(cfg.models[key]), make_schema(), IN_CHANNELS)
+def scorer_of(model, features: InputFeatures = DEFAULT_FEATURES, schema: DatasetSchema | None = None):
+    """Build the scorer of ``model`` on the stand-in locations and ``schema``, by default ``make_schema()``."""
+    locations = make_locations()
+    schema = make_schema() if schema is None else schema
+    return build_scorer(model, features, locations, schema, HOME_PE)  # type: ignore[arg-type]
 
-        assert isinstance(model, torch.nn.Module)
+
+class TestBuildScorer:
+    @pytest.mark.parametrize("key", ["mlp", "gat", "gps", "home_zone_mf"])
+    def test_every_architecture_builds(self, cfg, key):
+        assert isinstance(scorer_of(cfg.models[key]), torch.nn.Module)
 
     def test_input_width_follows_the_variant_features(self, cfg):
         locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
-        plain = build_feature_encoder(Variant(cfg.models.mlp, use_demographics=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
-        dist = build_feature_encoder(Variant(cfg.models.mlp, full_info=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        plain = build_feature_encoder(InputFeatures(use_demographics=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        dist = build_feature_encoder(InputFeatures(full_info=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert plain.out_dim == 5 + 1 + 2
         assert dist.out_dim == 5 + 1 + 2 + 3 + 1
 
     def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
         locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
-        variant = Variant(cfg.models.mlp, full_info=True, use_rwpe=False)
-        encoder = build_feature_encoder(variant, locations, schema, HOME_PE)  # type: ignore[arg-type]
+        features = InputFeatures(full_info=True, use_rwpe=False)
+        encoder = build_feature_encoder(features, locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert encoder.out_dim == 5 + 1 + 3 + 1
 
     def test_home_pe_adds_its_bins(self, cfg):
         locations, schema = make_locations(), make_schema()
-        plain = build_feature_encoder(Variant(cfg.models.mlp), locations, schema, HOME_PE)  # type: ignore[arg-type]
-        with_pe = build_feature_encoder(Variant(cfg.models.mlp, use_home_pe=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        plain = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        with_pe = build_feature_encoder(InputFeatures(use_home_pe=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert with_pe.out_dim - plain.out_dim == HOME_PE.bins
 
-    def test_the_model_takes_the_given_input_width(self, cfg):
-        model = build_network(Variant(cfg.models.mlp), make_schema(), IN_CHANNELS)
+    def test_the_network_takes_the_encoder_width(self, cfg):
+        scorer = scorer_of(cfg.models.mlp)
 
-        assert isinstance(model, NodeMLP)
-        assert model.lins[0].in_features == IN_CHANNELS
+        assert isinstance(scorer, NodeScorer) and isinstance(scorer.network, NodeMLP)
+        assert scorer.network.lins[0].in_features == scorer.encoder.out_dim
 
     def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
         schema = make_schema(num_edge_features=2)
-        gat = build_network(Variant(cfg.models.gat), schema, IN_CHANNELS)
-        gps = build_network(Variant(cfg.models.gps), schema, IN_CHANNELS)
+        gat = scorer_of(cfg.models.gat, schema=schema)
+        gps = scorer_of(cfg.models.gps, schema=schema)
 
-        assert isinstance(gat, GAT) and isinstance(gps, GraphTransformer)
-        assert gps.edge_proj.in_features == 2
+        assert isinstance(gat, GraphScorer) and isinstance(gps, GraphScorer)
+        assert isinstance(gat.network, GAT) and isinstance(gps.network, GraphTransformer)
+        assert gps.network.edge_proj.in_features == 2
 
     def test_gat_norm_follows_the_config(self, cfg):
-        normed = build_network(Variant(cfg.models.gat), make_schema(), IN_CHANNELS)
-        plain = build_network(Variant(with_overrides(cfg.models.gat, {"norm": None})), make_schema(), IN_CHANNELS)
+        normed = scorer_of(cfg.models.gat)
+        plain = scorer_of(with_overrides(cfg.models.gat, {"norm": None}))
 
-        assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.convs.norms)  # type: ignore[union-attr]
-        assert all(isinstance(norm, torch.nn.Identity) for norm in plain.convs.norms)  # type: ignore[union-attr]
+        assert isinstance(normed, GraphScorer) and isinstance(plain, GraphScorer)
+        assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.network.convs.norms)  # type: ignore[union-attr]
+        assert all(isinstance(norm, torch.nn.Identity) for norm in plain.network.convs.norms)  # type: ignore[union-attr]
 
-    @pytest.mark.parametrize(("key", "scorer_type"), [("mlp", NodeScorer), ("gat", GraphScorer), ("gps", GraphScorer)])
+    @pytest.mark.parametrize(
+        ("key", "scorer_type"),
+        [("mlp", NodeScorer), ("gat", GraphScorer), ("gps", GraphScorer), ("home_zone_mf", HomeZoneMFBaseline)],
+    )
     def test_each_architecture_runs_in_its_scorer(self, cfg, key, scorer_type):
-        scorer = build_scorer(Variant(cfg.models[key]), make_locations(), make_schema(), HOME_PE)  # type: ignore[arg-type]
-
-        assert isinstance(scorer, scorer_type)
+        assert isinstance(scorer_of(cfg.models[key]), scorer_type)
 
     def test_unknown_gat_norm_raises(self, cfg):
         with pytest.raises(KeyError, match="normalisation"):
-            build_network(Variant(with_overrides(cfg.models.gat, {"norm": "nope"})), make_schema(), IN_CHANNELS)
+            scorer_of(with_overrides(cfg.models.gat, {"norm": "nope"}))
+
+    def test_home_zone_mf_rejects_input_features(self, cfg):
+        with pytest.raises(ValueError, match="HomeZoneMF"):
+            scorer_of(cfg.models.home_zone_mf, InputFeatures(full_info=True))
 
 
 class TestTrainerConfig:
@@ -271,7 +281,7 @@ class TestArchitectureRegistry:
 
 class TestRunVariants:
     def _variants(self, cfg) -> list[Variant]:
-        return [Variant(cfg.models.mlp), Variant(cfg.models.gat, full_info=True)]
+        return [Variant(cfg.models.mlp), Variant(cfg.models.gat, InputFeatures(full_info=True))]
 
     def test_trains_every_variant_once_per_seed(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
@@ -290,7 +300,7 @@ class TestRunVariants:
         record_training(monkeypatch)
         built: list[torch.nn.Module] = []
 
-        def build(variant, locations, schema, home_pe_cfg):
+        def build(config, features, locations, schema, home_pe_cfg):
             built.append(torch.nn.Linear(1, 1))
             return built[-1]
 
@@ -321,7 +331,7 @@ class TestRunVariants:
 
 class TestVariantHyperparams:
     def test_logs_the_architecture_and_flags(self, cfg):
-        hyperparams = variant_hyperparams(Variant(cfg.models.gat, full_info=True))
+        hyperparams = variant_hyperparams(Variant(cfg.models.gat, InputFeatures(full_info=True)))
 
         assert hyperparams["architecture"]["num_gcn_layers"] == cfg.models.gat.num_gcn_layers
         assert hyperparams["full_info"] is True
@@ -365,9 +375,9 @@ class TestDemographicsAblation:
     def test_the_arms_differ_only_in_use_demographics(self, cfg, monkeypatch):
         variants = {call["variant"].name: call["variant"] for call in self._recorded(cfg, monkeypatch)}
 
-        assert variants["MLP-dist-demo"].use_demographics is True
-        assert variants["MLP-dist-nodemo"].use_demographics is False
-        assert all(variant.full_info for variant in variants.values())
+        assert variants["MLP-dist-demo"].features.use_demographics is True
+        assert variants["MLP-dist-nodemo"].features.use_demographics is False
+        assert all(variant.features.full_info for variant in variants.values())
 
     def test_every_arm_runs_once_per_seed(self, cfg, monkeypatch):
         assert len(self._recorded(cfg, monkeypatch)) == 8  # 2 architectures x 2 arms x 2 seeds
@@ -398,10 +408,11 @@ class TestCore:
             "MLP-hpe-dist",
             "GATv2-8-hpe-dist",
             "GTransformer-2-res-hpe-dist",
+            "HomeZoneMF",
         }
 
     def test_every_variant_runs_once_per_seed(self, cfg, monkeypatch):
-        assert len(self._recorded(cfg, monkeypatch)) == 10  # 5 variants x 2 seeds
+        assert len(self._recorded(cfg, monkeypatch)) == 12  # 6 variants x 2 seeds
 
 
 class TestBuildCallbacks:

@@ -13,6 +13,7 @@ from activitygraphs.config import (
     ExperimentConfig,
     GATConfig,
     GPSConfig,
+    HomeZoneMFConfig,
     MLPConfig,
     THATSDataConfig,
     TPGDataConfig,
@@ -22,7 +23,7 @@ from activitygraphs.utils import get_project_root
 CONF_DIR = get_project_root() / "activitygraphs/conf"
 
 DATA_CONFIGS = {"tpg": TPGDataConfig, "cmap": CMAPDataConfig, "thats": THATSDataConfig}
-MODEL_CONFIGS = {"mlp": MLPConfig, "gat": GATConfig, "gps": GPSConfig}
+MODEL_CONFIGS = {"mlp": MLPConfig, "gat": GATConfig, "gps": GPSConfig, "home_zone_mf": HomeZoneMFConfig}
 EXPERIMENT_CONFIGS = {"depth_sweep": DepthSweepConfig}
 
 # Typed by the per-option dataclasses above rather than by the base classes ``Config`` declares.

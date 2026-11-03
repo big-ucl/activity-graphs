@@ -1,14 +1,33 @@
 """Front end for model inputs. Has one sub-encoder per input source, concatenated by ``FeatureEncoder``."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
+from activitygraphs.config import HomePEConfig
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.models.schema_encoder import SchemaEncoder
-from activitygraphs.schema import TensorSchema
+from activitygraphs.schema import DatasetSchema, TensorSchema
+
+
+@dataclass(frozen=True)
+class InputFeatures:
+    """The input features used by a variant.
+
+    Attributes:
+        full_info: Append each node's distance from home to its features.
+        use_home_pe: Append the home-anchored positional encoding to each node's features.
+        use_demographics: Concatenate the user attributes onto each node's features.
+        use_rwpe: Append the random-walk positional encoding to each node's features.
+    """
+
+    full_info: bool = False
+    use_home_pe: bool = False
+    use_demographics: bool = True
+    use_rwpe: bool = True
 
 
 class FeatureSource(torch.nn.Module):
@@ -138,3 +157,39 @@ class FeatureEncoder(torch.nn.Module):
         """Return the model input of every node for every user of ``batch``, ``[num_users, num_nodes, out_dim]``."""
         source_inputs = [source(locations, batch) for source in self.sources]
         return torch.cat(source_inputs, dim=-1)
+
+
+def build_feature_encoder(
+    features: InputFeatures, locations: Locations, schema: DatasetSchema, home_pe_cfg: HomePEConfig
+) -> FeatureEncoder:
+    """Instantiate the input ``FeatureEncoder`` for the associated ``features`` and the survey ``locations``.
+
+    The column order goes:
+      1. location features,
+      2. per-user node features,
+      3. random-walk PE,
+      4. home-anchored PE,
+      5. demographics, and
+      6. distance from home.
+
+    Args:
+        features: The input features to encode.
+        locations: The location graph the model is trained on.
+        schema: The column schema of each tensor group.
+        home_pe_cfg: Settings of the home-anchored positional encoding, read when ``features.use_home_pe`` is set.
+    """
+    sources: list[FeatureSource] = [
+        LocationFeatures(schema.locations),
+        UserNodeFeatures(schema.user_nodes),
+    ]
+
+    if features.use_rwpe:
+        sources.append(RandomWalkPE(locations.num_rwpe_features))
+    if features.use_home_pe:
+        sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
+    if features.use_demographics:
+        sources.append(Demographics(schema.user_attributes))
+    if features.full_info:
+        sources.append(HomeDistance(schema.distances))
+
+    return FeatureEncoder(sources)

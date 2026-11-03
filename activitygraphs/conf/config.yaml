@@ -4,6 +4,7 @@ defaults:
   - model@models.mlp: mlp
   - model@models.gat: gat
   - model@models.gps: gps
+  - model@models.home_zone_mf: home_zone_mf
   # The experiment to run, one of `conf/experiment/`: comparison, depth_sweep, demographics_ablation, overfit_health,
   # baselines.
   - experiment: comparison

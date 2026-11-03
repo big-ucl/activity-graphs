@@ -22,12 +22,12 @@ class Scorer(torch.nn.Module):
         """Compile the trained network of the scorer with ``torch.compile``. A scorer without one compiles nothing."""
 
 
-class NodeScorer(Scorer):
-    """Scores each (user, node) pair from its own model input alone, with a node-wise network such as ``NodeMLP``.
+class EncodedScorer(Scorer):
+    """A scorer that runs a network on the input built by a ``FeatureEncoder``.
 
     Args:
         encoder: Builds the model input of every (user, node) pair.
-        network: Maps the model input of each pair, ``[num_pairs, encoder.out_dim]``, to its logit, ``[num_pairs, 1]``.
+        network: Maps the model input to the logits. Each subclass documents the call signature of its network.
     """
 
     def __init__(self, encoder: FeatureEncoder, network: torch.nn.Module):
@@ -38,6 +38,15 @@ class NodeScorer(Scorer):
     def compile_network(self) -> None:
         """Compile ``network`` with ``torch.compile``, for inputs of any batch size."""
         self.network.compile(dynamic=True)
+
+
+class NodeScorer(EncodedScorer):
+    """Scores each (user, node) pair from the model input alone, with a node-wise network such as ``NodeMLP``.
+
+    Args:
+        encoder: Builds the model input of every (user, node) pair.
+        network: Maps the model input of each pair, ``[num_pairs, encoder.out_dim]``, to its logit, ``[num_pairs, 1]``.
+    """
 
     def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
         """Return the logit of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
@@ -48,22 +57,13 @@ class NodeScorer(Scorer):
         return logits.reshape(batch.num_users, batch.num_nodes)
 
 
-class GraphScorer(Scorer):
+class GraphScorer(EncodedScorer):
     """Scores each (user, node) pair by message passing over one copy of the location graph per user.
 
     Args:
         encoder: Builds the model input of every (user, node) pair.
         network: A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_pairs, 1]`` logits, such as ``GAT``.
     """
-
-    def __init__(self, encoder: FeatureEncoder, network: torch.nn.Module):
-        super().__init__()
-        self.encoder = encoder
-        self.network = network
-
-    def compile_network(self) -> None:
-        """Compile ``network`` with ``torch.compile``, for inputs of any batch size."""
-        self.network.compile(dynamic=True)
 
     def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
         """Return the logit of every node for every user of ``batch``, ``[num_users, num_nodes]``."""

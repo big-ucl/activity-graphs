@@ -1,7 +1,8 @@
+import pytest
 import torch
 
 from activitygraphs.config import LossConfig
-from activitygraphs.training.losses import bpr_loss, build_loss
+from activitygraphs.training.losses import bpr_loss, build_loss, dense_bpr_loss
 
 
 def test_bpr_zero_when_perfectly_ranked():
@@ -67,3 +68,41 @@ def test_bpr_selects_checkpoints_on_the_average_recall_at_the_budget():
 def test_bce_selects_checkpoints_on_the_validation_bce():
     loss = build_loss(LossConfig(type="bce"), max_recall_k=50)
     assert (loss.monitor, loss.monitor_mode) == ("val_bce", "min")
+
+
+class TestDenseBPRLoss:
+    def test_it_scores_the_sampled_pairs(self):
+        scores = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
+        pos_weight = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        neg_weight = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+
+        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
+        expected = -torch.nn.functional.logsigmoid(torch.tensor([2.0, 1.5])).mean()
+
+        assert loss == pytest.approx(float(expected), abs=1e-6)
+
+    def test_a_row_without_a_negative_is_dropped(self):
+        scores = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
+        pos_weight = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
+        neg_weight = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+
+        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
+        expected = -torch.nn.functional.logsigmoid(torch.tensor(1.5))
+
+        assert loss == pytest.approx(float(expected), abs=1e-6)
+
+    def test_no_row_with_both_gives_a_zero_attached_to_the_scores(self):
+        scores = torch.zeros(2, 2, requires_grad=True)
+        loss = dense_bpr_loss(scores, torch.zeros(2, 2), torch.ones(2, 2), n_pairs=4)
+
+        assert float(loss.detach()) == 0.0
+        assert loss.requires_grad
+
+    def test_a_zero_weight_candidate_is_never_drawn(self):
+        scores = torch.tensor([[0.0, 0.0, 100.0]])
+        pos_weight = torch.tensor([[1.0, 0.0, 0.0]])
+        neg_weight = torch.tensor([[0.0, 1.0, 0.0]])
+
+        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=64)
+
+        assert loss == pytest.approx(float(-torch.nn.functional.logsigmoid(torch.tensor(0.0))), abs=1e-6)

@@ -22,10 +22,10 @@ from graphs import join_users
 from shapely.geometry import box
 
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USER_SCHEMA, Mode, Purpose
-from activitygraphs.config import HomePEConfig, read_config
+from activitygraphs.config import HomePEConfig
 from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, UserDataset, Users, datamodule
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
-from activitygraphs.experiments.variants import Variant, build_feature_encoder
+from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.schema_encoder import default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
 from activitygraphs.surveys.cmap import CMAPSurvey
@@ -48,7 +48,7 @@ from activitygraphs.tensors import (
 from activitygraphs.tensors.build import build_location_tensors
 from activitygraphs.tensors.bundles import UserFile
 from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR
-from activitygraphs.utils import add_lon_lat_from_centroid, get_project_root
+from activitygraphs.utils import add_lon_lat_from_centroid
 
 SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "model_inputs.pt"
 
@@ -217,7 +217,6 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
     locations, users, schema, _ = build_scaled_survey(survey_name, root)
 
     batch = join_users(locations, users)
-    mlp = read_config(get_project_root(), verbose=False).models.mlp
 
     edge_attr = locations.edge_attr.repeat(batch.num_users, 1)
     y = batch.visited.reshape(-1, 1)
@@ -226,7 +225,7 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
         flags = dict(zip(FLAGS, active, strict=True))
         key = "+".join(name for name, on in flags.items() if on) or "none"
         torch.manual_seed(0)
-        encoder = build_feature_encoder(Variant(mlp, **flags), locations, schema, HOME_PE)
+        encoder = build_feature_encoder(InputFeatures(**flags), locations, schema, HOME_PE)
         with torch.no_grad():
             x = encoder(locations, batch)
         inputs[key] = x.reshape(-1, x.shape[-1])
@@ -289,9 +288,8 @@ def test_an_item_carries_the_rows_of_one_user(tmp_path):
 def test_each_graph_copy_carries_the_location_and_user_node_features_apart(tmp_path):
     locations, users, schema = build_survey("cmap", tmp_path)
     batch = join_users(locations, users)
-    mlp = read_config(get_project_root(), verbose=False).models.mlp
-    variant = Variant(mlp, use_demographics=False, use_rwpe=False)
-    encoder = build_feature_encoder(variant, locations, schema, HOME_PE)
+    features = InputFeatures(use_demographics=False, use_rwpe=False)
+    encoder = build_feature_encoder(features, locations, schema, HOME_PE)
     graphs = GraphBatch.expand(encoder(locations, batch), locations)
     num_nodes = locations.num_nodes
     third_copy = slice(3 * num_nodes, 4 * num_nodes)
@@ -352,9 +350,8 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     expected_codes = torch.tensor([0 if status is None else categories.index(status) + 1 for status in employment])
 
     batch = join_users(locations, users)
-    mlp = read_config(get_project_root(), verbose=False).models.mlp
-    plain = build_feature_encoder(Variant(mlp, use_demographics=False), locations, schema, HOME_PE)
-    encoder = build_feature_encoder(Variant(mlp), locations, schema, HOME_PE)
+    plain = build_feature_encoder(InputFeatures(use_demographics=False), locations, schema, HOME_PE)
+    encoder = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)
     embedded_width = 0
     for spec in categorical.columns:
         embedded_width += default_emb_dim(spec.cardinality)

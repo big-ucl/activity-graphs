@@ -1,4 +1,4 @@
-"""Baseline runner: fit every baseline on the training split and evaluate it on the validation and test splits."""
+"""Baseline runner: fit/train every baseline on the training split and evaluate it on the validation and test splits."""
 
 from dataclasses import dataclass
 
@@ -14,7 +14,6 @@ from activitygraphs.models.baselines import (
     GlobalBaseline,
     GravityBaseline,
     GravityBinnedBaseline,
-    HomeZoneMFBaseline,
     UniformBaseline,
     VisitFrequencyBaseline,
 )
@@ -54,43 +53,27 @@ def closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
 
 
 def measure_baselines(
-    num_nodes,
     datamodule: SurveyDataModule,
     loss: Loss,
     cfg: Config,
     wandb_params: WandBParams,
-):
-    """Fit and evaluate the baselines: the frequency baselines, then the distance-decay ones, then HomeZoneMF.
+) -> list[pl.DataFrame]:
+    """Fit and evaluate the closed-form baselines: the frequency baselines, then the distance-decay ones.
 
-    The closed-form baselines are fitted once and their frames carry a null ``seed``. ``HomeZoneMF`` is fitted by
-    stochastic optimisation, so it is refitted once per training seed in ``cfg.train.train_seeds`` and its frames
-    carry that seed.
+    Each baseline is fitted once, and its frames carry a null ``seed``.
 
     Returns:
-        One result frame per baseline, in order, then one per training seed for ``HomeZoneMF``.
+        One result frame per baseline, in order.
     """
     datamodule.setup()
-    max_recall_k = cfg.train.max_recall_k
-    train_seeds = list(cfg.train.train_seeds)
     train_users = datamodule.train_dataset.users
     val_users = datamodule.val_dataset.users
     locations = datamodule.locations
     results = []
 
-    for spec in closed_form_baselines(num_nodes):
+    for spec in closed_form_baselines(locations.num_nodes):
         baseline = spec.baseline.fit(train_users, val_users, locations)
         result = evaluate_baseline(baseline, datamodule, loss, spec.name, cfg, wandb_params)
         results.append(result.with_columns(seed=pl.lit(None, dtype=pl.Int64)))
-
-    for train_seed in train_seeds:
-        home_zone_mf = HomeZoneMFBaseline(num_nodes, max_recall_k, seed=train_seed)
-        home_zone_mf_fitted = home_zone_mf.fit(train_users, val_users, locations)
-        run_tag = f"seed{train_seed}" if len(train_seeds) > 1 else None
-
-        home_zone_mf_results = evaluate_baseline(
-            home_zone_mf_fitted, datamodule, loss, "HomeZoneMF", cfg, wandb_params, run_tag=run_tag
-        ).with_columns(seed=pl.lit(train_seed, dtype=pl.Int64))
-
-        results.append(home_zone_mf_results)
 
     return results

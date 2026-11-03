@@ -334,24 +334,33 @@ class ModelConfig:
     """Config for one architecture, from the ``model`` config group. Contains name, optimiser settings and model arch.
 
     Attributes:
-        architecture: Key of the builder in ``models.architectures.BUILDERS`` that constructs the model.
+        architecture: Key of the builder in ``models.architectures.BUILDERS`` that constructs the scorer.
         name: Name the architecture is reported under; a variant appends its flags to it.
         lr: Initial AdamW learning rate.
         weight_decay: AdamW weight decay.
-        hidden_channels: Width of the hidden layers.
-        dropout: Dropout probability.
     """
 
     architecture: str
     name: str
     lr: float
     weight_decay: float
+
+
+@dataclass
+class NetworkConfig(ModelConfig):
+    """Config for an neural network architecture.
+
+    Attributes:
+        hidden_channels: Width of the hidden layers.
+        dropout: Dropout probability.
+    """
+
     hidden_channels: int
     dropout: float
 
 
 @dataclass
-class MLPConfig(ModelConfig):
+class MLPConfig(NetworkConfig):
     """Config for the node-wise MLP (``NodeMLP``).
 
     Attributes:
@@ -362,7 +371,7 @@ class MLPConfig(ModelConfig):
 
 
 @dataclass
-class GATConfig(ModelConfig):
+class GATConfig(NetworkConfig):
     """Config for the GATv2 with skip connections (``GAT``).
 
     Attributes:
@@ -381,7 +390,7 @@ class GATConfig(ModelConfig):
 
 
 @dataclass
-class GPSConfig(ModelConfig):
+class GPSConfig(NetworkConfig):
     """Config for the GPS graph transformer (``GraphTransformer``).
 
     Attributes:
@@ -391,6 +400,17 @@ class GPSConfig(ModelConfig):
 
     num_layers: int
     num_heads: int
+
+
+@dataclass
+class HomeZoneMFConfig(ModelConfig):
+    """Config for the home-zone matrix factorisation (``HomeZoneMFBaseline``).
+
+    Attributes:
+        n_factors: Latent dimension of the home and node factors.
+    """
+
+    n_factors: int
 
 
 @dataclass
