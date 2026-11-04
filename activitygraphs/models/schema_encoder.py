@@ -8,7 +8,7 @@ from torch import Tensor
 from activitygraphs.schema import TensorSchema
 
 
-def default_emb_dim(cardinality: int) -> int:
+def _default_emb_dim(cardinality: int) -> int:
     """Return the embedding width of a categorical column with ``cardinality`` categories."""
     return min(16, (cardinality + 1) // 2)
 
@@ -23,7 +23,7 @@ class SchemaEncoder(torch.nn.Module):
         out_dim: Width of the output, the number of numeric columns plus the sum of the embedding widths.
     """
 
-    def __init__(self, schema: TensorSchema, emb_dim: Callable[[int], int] = default_emb_dim):
+    def __init__(self, schema: TensorSchema, emb_dim: Callable[[int], int] = _default_emb_dim):
         """Build one embedding per categorical column of ``schema``.
 
         Args:

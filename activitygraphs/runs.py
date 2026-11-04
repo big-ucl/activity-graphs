@@ -26,7 +26,7 @@ def create_run_dir(runs_path: Path, name: str, started: datetime) -> Path:
     Returns:
         The created directory, ``runs_path/{name}-{N}-{timestamp}``.
     """
-    taken = numbered_run_dirs(runs_path, name)
+    taken = _numbered_run_dirs(runs_path, name)
     run = max(taken, default=0) + 1
     path = runs_path / f"{name}-{run}-{started:{TIMESTAMP_FORMAT}}"
     path.mkdir(parents=True)
@@ -42,22 +42,6 @@ def create_overfit_dir(overfit_path: Path, name: str, started: datetime) -> Path
     return path
 
 
-def numbered_run_dirs(runs_path: Path, name: str) -> dict[int, list[Path]]:
-    """List every run directory of ``name`` under ``runs_path``, keyed by run number, with or without results."""
-    pattern = re.compile(rf"{re.escape(name)}-(\d+)-\d{{8}}-\d{{6}}")
-    runs: dict[int, list[Path]] = {}
-
-    if not runs_path.is_dir():
-        return runs
-
-    for path in runs_path.iterdir():
-        match = pattern.fullmatch(path.name)
-        if path.is_dir() and match:
-            runs.setdefault(int(match.group(1)), []).append(path)
-
-    return runs
-
-
 def latest_run(runs_path: Path, name: str) -> int:
     """Find the highest run number of ``name`` whose directory holds a results file.
 
@@ -66,7 +50,7 @@ def latest_run(runs_path: Path, name: str) -> int:
     """
     finished = [
         run
-        for run, paths in numbered_run_dirs(runs_path, name).items()
+        for run, paths in _numbered_run_dirs(runs_path, name).items()
         if any((path / RESULTS_FILE).exists() for path in paths)
     ]
 
@@ -84,7 +68,7 @@ def run_dir(runs_path: Path, name: str, run: int | None = None) -> Path:
         ValueError: Several directories have that run number.
     """
     run = latest_run(runs_path, name) if run is None else run
-    paths = numbered_run_dirs(runs_path, name).get(run, [])
+    paths = _numbered_run_dirs(runs_path, name).get(run, [])
 
     if not paths:
         raise FileNotFoundError(f"no {name} run {run} in {runs_path}")
@@ -107,3 +91,19 @@ def latest_overfit_dir(overfit_path: Path, name: str) -> Path:
         raise FileNotFoundError(f"no {name} overfit run in {overfit_path}")
 
     return paths[-1]
+
+
+def _numbered_run_dirs(runs_path: Path, name: str) -> dict[int, list[Path]]:
+    """List every run directory of ``name`` under ``runs_path``, keyed by run number, with or without results."""
+    pattern = re.compile(rf"{re.escape(name)}-(\d+)-\d{{8}}-\d{{6}}")
+    runs: dict[int, list[Path]] = {}
+
+    if not runs_path.is_dir():
+        return runs
+
+    for path in runs_path.iterdir():
+        match = pattern.fullmatch(path.name)
+        if path.is_dir() and match:
+            runs.setdefault(int(match.group(1)), []).append(path)
+
+    return runs

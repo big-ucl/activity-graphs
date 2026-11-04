@@ -12,11 +12,6 @@ from activitygraphs.models.baselines.popularity import home_excluded_visit_rate,
 from activitygraphs.models.scorers import FittedScorer
 
 
-def inverse_sigmoid(prob):
-    """Return logit(prob) = log(prob / (1 - prob))."""
-    return torch.log(prob / (1 - prob))
-
-
 class UniformBaseline(FittedScorer):
     """P(y_i = 1) = 0.5 for all nodes."""
 
@@ -39,7 +34,7 @@ class GlobalBaseline(FittedScorer):
         num_total = train.visited.numel()
 
         p = torch.tensor(num_pos / num_total).clamp(1e-6, 1 - 1e-6)
-        self.logit = inverse_sigmoid(p)
+        self.logit = _inverse_sigmoid(p)
 
         return self
 
@@ -102,3 +97,8 @@ class ConditionalVisitFrequencyBaseline(FittedScorer):
     def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
         """Return each user's home-conditioned visit-frequency logit of every node, ``[num_users, num_nodes]``."""
         return self.logits.to(batch.visited.device)[batch.home_node]
+
+
+def _inverse_sigmoid(prob):
+    """Return logit(prob) = log(prob / (1 - prob))."""
+    return torch.log(prob / (1 - prob))

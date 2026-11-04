@@ -52,7 +52,18 @@ class UserDataset(torch.utils.data.Dataset):
 # =========================================
 
 
-def dataset_fingerprint(cfg: Config, tensors_fp: Fingerprint) -> Fingerprint:
+def read_fingerprint(cfg: Config, project_root: Path) -> Fingerprint:
+    """Return the ``_dataset_fingerprint`` of the cached tensors of ``cfg``, without loading them.
+
+    Raises:
+        FileNotFoundError: Any of the tensor files is not cached.
+    """
+    tensors_fp = read_tensors_fingerprint(tensors_path(cfg.data, project_root))
+
+    return _dataset_fingerprint(cfg, tensors_fp)
+
+
+def _dataset_fingerprint(cfg: Config, tensors_fp: Fingerprint) -> Fingerprint:
     """Return the fingerprint the split and transform caches are checked against: ``tensors_fp`` and the data config.
 
     Only ``cfg.data`` is hashed, so training hyperparameters do not invalidate the caches.
@@ -60,14 +71,3 @@ def dataset_fingerprint(cfg: Config, tensors_fp: Fingerprint) -> Fingerprint:
     config_str = OmegaConf.to_yaml(cfg.data, resolve=True, sort_keys=True)
 
     return tensors_fp | {"data_config": hashlib.blake2b(config_str.encode(), digest_size=16).hexdigest()}
-
-
-def read_fingerprint(cfg: Config, project_root: Path) -> Fingerprint:
-    """Return the ``dataset_fingerprint`` of the cached tensors of ``cfg``, without loading them.
-
-    Raises:
-        FileNotFoundError: Any of the tensor files is not cached.
-    """
-    tensors_fp = read_tensors_fingerprint(tensors_path(cfg.data, project_root))
-
-    return dataset_fingerprint(cfg, tensors_fp)

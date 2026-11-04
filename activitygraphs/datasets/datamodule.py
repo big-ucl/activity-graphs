@@ -1,4 +1,4 @@
-"""SurveyDataModule: LightningDataModule wrapping the prepare_splits / read_splits pipeline."""
+"""SurveyDataModule: LightningDataModule wrapping the _prepare_splits / _read_splits pipeline."""
 
 from pathlib import Path
 
@@ -19,109 +19,11 @@ from activitygraphs.utils import get_project_root
 DATASETS_DIR = "Datasets"
 
 
-def split_cache_paths(cfg: Config, split: SplitStrategy, seed: int, project_root: Path) -> tuple[Path, Path]:
-    """Return the paths of the cached split indices (``splits_*.json``) and transforms (``transforms_*.pkl``).
-
-    Both caches are under ``cfg.data.paths.processed/Datasets/``.
-    """
-    datasets_dir = project_root / cfg.data.paths.processed / DATASETS_DIR
-
-    return datasets_dir / f"splits_{seed}_{split.key}.json", datasets_dir / f"transforms_{seed}_{split.key}.pkl"
-
-
-def prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None) -> None:
-    """Build and cache the dataset tensors, split indices and training-split transforms that are missing or stale."""
-    project_root = get_project_root(project_root)
-    splits_cache, transforms_cache = split_cache_paths(cfg, split, seed, project_root)
-
-    tensors = None
-    try:
-        fingerprint = read_fingerprint(cfg, project_root)
-    except FileNotFoundError:
-        tensors = load_tensors(cfg, project_root)
-        fingerprint = read_fingerprint(cfg, project_root)
-
-    if _caches_match(splits_cache, transforms_cache, fingerprint):
-        return
-
-    if tensors is None:
-        tensors = load_tensors(cfg, project_root)
-
-    locations, users, schema = tensors
-    train_idx, _, _ = load_split_indices(users, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
-
-    transforms = fit_transforms(locations, users, schema, train_idx, fingerprint=fingerprint)
-    transforms.save(transforms_cache)
-
-
-def _caches_match(splits_cache: Path, transforms_cache: Path, fingerprint: Fingerprint) -> bool:
-    """Return whether the split indices and the current transforms are both cached for the dataset ``fingerprint``."""
-    if not (splits_cache.exists() and transforms_cache.exists()):
-        return False
-
-    try:
-        read_split_indices(splits_cache, fingerprint)
-    except ValueError:
-        return False
-
-    return FeatureTransforms.read(transforms_cache).is_current(fingerprint)
-
-
-def read_splits(
-    cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None
-) -> tuple[Locations, DatasetSchema, UserDataset, UserDataset, UserDataset]:
-    """Read the tensors, split indices and transforms cached by ``prepare_splits``, and return the scaled splits.
-
-    Returns:
-        Tuple ``(locations, schema, train_dataset, val_dataset, test_dataset)``.
-
-    Raises:
-        FileNotFoundError: The dataset tensors, split indices or transforms are not cached.
-        ValueError: The cached split indices or transforms were built for another dataset, or the cached transforms
-            follow another transform policy.
-    """
-    project_root = get_project_root(project_root)
-    splits_cache, transforms_cache = split_cache_paths(cfg, split, seed, project_root)
-
-    location_tensors, user_tensors, schema = read_tensors(tensors_path(cfg.data, project_root))
-    fingerprint = read_fingerprint(cfg, project_root)
-
-    train_idx, val_idx, test_idx = read_split_indices(splits_cache, fingerprint)
-
-    transforms = FeatureTransforms.read(transforms_cache)
-    if not transforms.is_current(fingerprint):
-        raise ValueError(
-            f"Cached transforms at `{transforms_cache.name}` do not match the dataset fingerprint or the transform policy."
-        )
-
-    locations = Locations.from_tensors(location_tensors, transforms)
-    users = Users.from_tensors(user_tensors, transforms)
-
-    return (
-        locations,
-        schema,
-        UserDataset(users, train_idx),
-        UserDataset(users, val_idx),
-        UserDataset(users, test_idx),
-    )
-
-
-def _compute_home_coverage(train_dataset: UserDataset, test_dataset: UserDataset) -> pl.DataFrame:
-    """Compute each _test_ user's survey ``user_id``, home node and whether any training user also has a home there."""
-    train_home_idx = train_dataset.users.home_node.unique().tolist()
-
-    return pl.DataFrame({
-        "user_idx": test_dataset.user_idx.tolist(),
-        "survey_user_id": test_dataset.users.user_ids["user_id"],
-        "home_node": test_dataset.users.home_node.tolist(),
-    }).with_columns(home_seen_in_train=pl.col("home_node").is_in(train_home_idx))
-
-
 class SurveyDataModule(L.LightningDataModule):
     """LightningDataModule of one survey: location graph and the users of each split.
 
-    ``prepare_data()`` builds the missing caches with ``prepare_splits``. ``setup()`` reads them once with
-    ``read_splits`` and exposes the home coverage of the test users. Each loader yields the rows of the users of a
+    ``prepare_data()`` builds the missing caches with ``_prepare_splits``. ``setup()`` reads them once with
+    ``_read_splits`` and exposes the home coverage of the test users. Each loader yields the rows of the users of a
     split, one ``UserDataset`` item per user. Joining the batches with the location graph is not done here, but
     by ``RankingModule``.
 
@@ -160,14 +62,14 @@ class SurveyDataModule(L.LightningDataModule):
 
     def prepare_data(self) -> None:
         """Build and cache the dataset tensors, split indices and transforms that are missing or stale."""
-        prepare_splits(self.cfg, self.split, self.seed, self.project_root)
+        _prepare_splits(self.cfg, self.split, self.seed, self.project_root)
 
     def setup(self, stage: str | None = None) -> None:
         """Read the splits and transforms cached by ``prepare_data`` and compute the home coverage, once."""
         if self._train_dataset is not None:
             return
 
-        self._locations, self._schema, self._train_dataset, self._val_dataset, self._test_dataset = read_splits(
+        self._locations, self._schema, self._train_dataset, self._val_dataset, self._test_dataset = _read_splits(
             self.cfg, self.split, self.seed, self.project_root
         )
         self._home_coverage = _compute_home_coverage(self._train_dataset, self._test_dataset)
@@ -225,3 +127,101 @@ class SurveyDataModule(L.LightningDataModule):
         if self._home_coverage is None:
             raise RuntimeError("Call setup() before accessing home_coverage.")
         return self._home_coverage
+
+
+def _split_cache_paths(cfg: Config, split: SplitStrategy, seed: int, project_root: Path) -> tuple[Path, Path]:
+    """Return the paths of the cached split indices (``splits_*.json``) and transforms (``transforms_*.pkl``).
+
+    Both caches are under ``cfg.data.paths.processed/Datasets/``.
+    """
+    datasets_dir = project_root / cfg.data.paths.processed / DATASETS_DIR
+
+    return datasets_dir / f"splits_{seed}_{split.key}.json", datasets_dir / f"transforms_{seed}_{split.key}.pkl"
+
+
+def _prepare_splits(cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None) -> None:
+    """Build and cache the dataset tensors, split indices and training-split transforms that are missing or stale."""
+    project_root = get_project_root(project_root)
+    splits_cache, transforms_cache = _split_cache_paths(cfg, split, seed, project_root)
+
+    tensors = None
+    try:
+        fingerprint = read_fingerprint(cfg, project_root)
+    except FileNotFoundError:
+        tensors = load_tensors(cfg, project_root)
+        fingerprint = read_fingerprint(cfg, project_root)
+
+    if _caches_match(splits_cache, transforms_cache, fingerprint):
+        return
+
+    if tensors is None:
+        tensors = load_tensors(cfg, project_root)
+
+    locations, users, schema = tensors
+    train_idx, _, _ = load_split_indices(users, split, seed, cache_path=splits_cache, fingerprint=fingerprint)
+
+    transforms = fit_transforms(locations, users, schema, train_idx, fingerprint=fingerprint)
+    transforms.save(transforms_cache)
+
+
+def _caches_match(splits_cache: Path, transforms_cache: Path, fingerprint: Fingerprint) -> bool:
+    """Return whether the split indices and the current transforms are both cached for the dataset ``fingerprint``."""
+    if not (splits_cache.exists() and transforms_cache.exists()):
+        return False
+
+    try:
+        read_split_indices(splits_cache, fingerprint)
+    except ValueError:
+        return False
+
+    return FeatureTransforms.read(transforms_cache).is_current(fingerprint)
+
+
+def _read_splits(
+    cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None
+) -> tuple[Locations, DatasetSchema, UserDataset, UserDataset, UserDataset]:
+    """Read the tensors, split indices and transforms cached by ``_prepare_splits``, and return the scaled splits.
+
+    Returns:
+        Tuple ``(locations, schema, train_dataset, val_dataset, test_dataset)``.
+
+    Raises:
+        FileNotFoundError: The dataset tensors, split indices or transforms are not cached.
+        ValueError: The cached split indices or transforms were built for another dataset, or the cached transforms
+            follow another transform policy.
+    """
+    project_root = get_project_root(project_root)
+    splits_cache, transforms_cache = _split_cache_paths(cfg, split, seed, project_root)
+
+    location_tensors, user_tensors, schema = read_tensors(tensors_path(cfg.data, project_root))
+    fingerprint = read_fingerprint(cfg, project_root)
+
+    train_idx, val_idx, test_idx = read_split_indices(splits_cache, fingerprint)
+
+    transforms = FeatureTransforms.read(transforms_cache)
+    if not transforms.is_current(fingerprint):
+        raise ValueError(
+            f"Cached transforms at `{transforms_cache.name}` do not match the dataset fingerprint or the transform policy."
+        )
+
+    locations = Locations.from_tensors(location_tensors, transforms)
+    users = Users.from_tensors(user_tensors, transforms)
+
+    return (
+        locations,
+        schema,
+        UserDataset(users, train_idx),
+        UserDataset(users, val_idx),
+        UserDataset(users, test_idx),
+    )
+
+
+def _compute_home_coverage(train_dataset: UserDataset, test_dataset: UserDataset) -> pl.DataFrame:
+    """Compute each _test_ user's survey ``user_id``, home node and whether any training user also has a home there."""
+    train_home_idx = train_dataset.users.home_node.unique().tolist()
+
+    return pl.DataFrame({
+        "user_idx": test_dataset.user_idx.tolist(),
+        "survey_user_id": test_dataset.users.user_ids["user_id"],
+        "home_node": test_dataset.users.home_node.tolist(),
+    }).with_columns(home_seen_in_train=pl.col("home_node").is_in(train_home_idx))

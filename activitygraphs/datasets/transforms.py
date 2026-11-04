@@ -107,20 +107,6 @@ class GroupTransform:
         return flat.reshape(values.shape)
 
 
-def _scaled_column_indices(transforms: tuple[Transform, ...]) -> list[int]:
-    """Return the indices of the columns that are z-scored."""
-    return [idx for idx, transform in enumerate(transforms) if transform != Transform.PASSTHROUGH]
-
-
-def _log1p(values: torch.Tensor, transforms: tuple[Transform, ...]) -> torch.Tensor:
-    """Return a float32 copy of ``values`` flattened to ``[-1, num_columns]``, with log1p applied to its log columns."""
-    flat = values.float().flatten(end_dim=-2).clone()
-    log_columns = [idx for idx, transform in enumerate(transforms) if transform == Transform.LOG1P_ZSCORE]
-    flat[:, log_columns] = torch.log1p(flat[:, log_columns])
-
-    return flat
-
-
 @dataclass
 class FeatureTransforms:
     """The transforms of every feature group, fitted on the training split.
@@ -199,3 +185,17 @@ def fit_transforms(
         groups[group_schema.group] = GroupTransform.fit(numeric, transforms, values[group_schema.group])
 
     return FeatureTransforms(groups=groups, policy=policy, fingerprint=fingerprint)
+
+
+def _scaled_column_indices(transforms: tuple[Transform, ...]) -> list[int]:
+    """Return the indices of the columns that are z-scored."""
+    return [idx for idx, transform in enumerate(transforms) if transform != Transform.PASSTHROUGH]
+
+
+def _log1p(values: torch.Tensor, transforms: tuple[Transform, ...]) -> torch.Tensor:
+    """Return a float32 copy of ``values`` flattened to ``[-1, num_columns]``, with log1p applied to its log columns."""
+    flat = values.float().flatten(end_dim=-2).clone()
+    log_columns = [idx for idx, transform in enumerate(transforms) if transform == Transform.LOG1P_ZSCORE]
+    flat[:, log_columns] = torch.log1p(flat[:, log_columns])
+
+    return flat

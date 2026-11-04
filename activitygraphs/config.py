@@ -423,20 +423,6 @@ class TwoTowerConfig(GATConfig):
     node_embedding: bool
 
 
-def two_tower_name_suffix(bias: str, node_embedding: bool) -> str:
-    """Return the part of a two-tower name that records its in-city diagnostics, empty for the transferable model."""
-    suffix = ""
-    if bias == "node":
-        suffix += "-nodebias"
-    if node_embedding:
-        suffix += "-nodeemb"
-
-    return suffix
-
-
-OmegaConf.register_new_resolver("two_tower_suffix", two_tower_name_suffix)
-
-
 @dataclass
 class HomeZoneMFConfig(ModelConfig):
     """Config for the home-zone matrix factorisation (``HomeZoneMFBaseline``).
@@ -497,3 +483,17 @@ def read_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -
         print(f"Loaded config file \n{OmegaConf.to_yaml(cfg)}")
 
     return cast(Config, cfg)
+
+
+def _two_tower_name_suffix(bias: str, node_embedding: bool) -> str:
+    """Return the part of a two-tower name that records its in-city diagnostics, empty for the transferable model."""
+    suffix = ""
+    if bias == "node":
+        suffix += "-nodebias"
+    if node_embedding:
+        suffix += "-nodeemb"
+
+    return suffix
+
+
+OmegaConf.register_new_resolver("two_tower_suffix", _two_tower_name_suffix)

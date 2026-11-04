@@ -29,21 +29,13 @@ def tensors_path(cfg: DataConfig, project_root: Path) -> Path:
     return project_root / cfg.paths.processed / TENSORS_DIR
 
 
-def tensor_cache_files(root: Path) -> list[Path]:
-    """Return the path of every file of the tensor cache under ``root``."""
-    location_files = [root / LOCATIONS_DIR / file for file in LocationFile]
-    user_files = [root / USERS_DIR / file for file in UserFile]
-
-    return [*location_files, *user_files, root / SCHEMA_FILE, root / FINGERPRINT_FILE]
-
-
 def save_tensors(root: Path, locations: LocationTensors, users: UserTensors, schema: DatasetSchema) -> None:
     """Write the bundles, the schema and the fingerprint of the tensors to the cache under ``root``."""
     locations.save(root / LOCATIONS_DIR)
     users.save(root / USERS_DIR)
     schema.save(root / SCHEMA_FILE)
 
-    fingerprint = tensors_fingerprint(locations, users, schema)
+    fingerprint = _tensors_fingerprint(locations, users, schema)
     (root / FINGERPRINT_FILE).write_text(json.dumps(fingerprint, indent=2))
 
 
@@ -75,18 +67,26 @@ def read_tensors_fingerprint(root: Path) -> Fingerprint:
     return json.loads((root / FINGERPRINT_FILE).read_text())
 
 
+def _tensor_cache_files(root: Path) -> list[Path]:
+    """Return the path of every file of the tensor cache under ``root``."""
+    location_files = [root / LOCATIONS_DIR / file for file in LocationFile]
+    user_files = [root / USERS_DIR / file for file in UserFile]
+
+    return [*location_files, *user_files, root / SCHEMA_FILE, root / FINGERPRINT_FILE]
+
+
 def _require_cached(root: Path) -> None:
     """Raise unless every file of the tensor cache under ``root`` exists.
 
     Raises:
         FileNotFoundError: Any file of the cache is missing.
     """
-    missing = [str(path.relative_to(root)) for path in tensor_cache_files(root) if not path.exists()]
+    missing = [str(path.relative_to(root)) for path in _tensor_cache_files(root) if not path.exists()]
     if missing:
         raise FileNotFoundError(f"The tensor cache at `{root}` is missing {missing}.")
 
 
-def tensors_fingerprint(locations: LocationTensors, users: UserTensors, schema: DatasetSchema) -> Fingerprint:
+def _tensors_fingerprint(locations: LocationTensors, users: UserTensors, schema: DatasetSchema) -> Fingerprint:
     """Return the identity of the tensors stored beside the cache: their shapes and hashes of the ids and the schema."""
     ids = users.user_ids.write_csv() + locations.node_ids.write_csv()
     schema_str = json.dumps(schema.to_dict(), sort_keys=True)

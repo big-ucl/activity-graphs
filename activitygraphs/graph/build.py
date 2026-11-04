@@ -45,7 +45,7 @@ def load_graph(
     overture = Overture.load(zones_gdf, cfg.inputs.overture, root)
     statistics = loader.read_statistics(cfg, root)
 
-    nodes_gdf, edges_gdf = build_graph(zones_gdf, overture, statistics, loader)
+    nodes_gdf, edges_gdf = _build_graph(zones_gdf, overture, statistics, loader)
 
     graph_path.mkdir(parents=True, exist_ok=True)
     nodes_gdf.to_parquet(nodes_path)
@@ -54,7 +54,7 @@ def load_graph(
     return nodes_gdf, edges_gdf
 
 
-def build_graph[S](
+def _build_graph[S](
     zones_gdf: gpd.GeoDataFrame,
     overture: Overture,
     statistics: S,

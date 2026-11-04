@@ -75,19 +75,19 @@ def save_results(run_dir: Path, *results: pl.DataFrame):
     home_distances = combined.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
     aggregate = combined.filter(~pl.col("stage").is_in([PER_USER_STAGE, SCORE_VECTOR_STAGE, HOME_DISTANCE_STAGE]))
 
-    drop_empty_columns(aggregate).write_parquet(run_dir / RESULTS_FILE)
+    _drop_empty_columns(aggregate).write_parquet(run_dir / RESULTS_FILE)
 
     if not per_user.is_empty():
-        drop_empty_columns(per_user).write_parquet(run_dir / PER_USER_FILE)
+        _drop_empty_columns(per_user).write_parquet(run_dir / PER_USER_FILE)
 
     if not score_vectors.is_empty():
-        drop_empty_columns(score_vectors).write_parquet(run_dir / SCORES_FILE)
+        _drop_empty_columns(score_vectors).write_parquet(run_dir / SCORES_FILE)
 
     if not home_distances.is_empty():
-        drop_empty_columns(home_distances).write_parquet(run_dir / DISTANCES_FILE)
+        _drop_empty_columns(home_distances).write_parquet(run_dir / DISTANCES_FILE)
 
 
-def drop_empty_columns(df: pl.DataFrame) -> pl.DataFrame:
+def _drop_empty_columns(df: pl.DataFrame) -> pl.DataFrame:
     """Drop columns that are null for every row (an artefact of the diagonal concat)."""
     if df.is_empty():
         return df

@@ -9,13 +9,13 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from activitygraphs.datasets.dataset import dataset_fingerprint, read_fingerprint
+from activitygraphs.datasets.dataset import _dataset_fingerprint, read_fingerprint
 from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
-from activitygraphs.tensors import Fingerprint, LocationTensors, UserTensors, tensors_fingerprint, tensors_path
+from activitygraphs.tensors import Fingerprint, LocationTensors, UserTensors, tensors_path
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.tensors.bundles import UserFile
-from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR, tensor_cache_files
+from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR, _tensor_cache_files, _tensors_fingerprint
 
 
 @dataclass
@@ -80,7 +80,7 @@ def make_dataset(
 
 
 def fingerprint_of(cfg, dataset: FakeTensors) -> Fingerprint:
-    return dataset_fingerprint(cfg, tensors_fingerprint(dataset.locations, dataset.users, dataset.schema))
+    return _dataset_fingerprint(cfg, _tensors_fingerprint(dataset.locations, dataset.users, dataset.schema))
 
 
 def make_cfg(name: str = "TPG", epochs: int = 50):
@@ -137,10 +137,10 @@ class TestDatasetFingerprint:
         )
 
     def write_cache(self, root: Path, dataset: FakeTensors) -> None:
-        for path in tensor_cache_files(root):
+        for path in _tensor_cache_files(root):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
-        fingerprint = tensors_fingerprint(dataset.locations, dataset.users, dataset.schema)
+        fingerprint = _tensors_fingerprint(dataset.locations, dataset.users, dataset.schema)
         (root / FINGERPRINT_FILE).write_text(json.dumps(fingerprint))
 
     def test_is_read_back_from_the_file_beside_the_tensors(self, tmp_path, cfg):

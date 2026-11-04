@@ -15,35 +15,35 @@ from activitygraphs.analysis import (
     REALISED_SIZE_COLUMN,
     SCORED_USERS_COLUMN,
     _average_metric_over_seeds,
+    _band_contributions,
+    _check_home_node_rank,
+    _check_popularity_correlation,
+    _check_user_invariance,
     _diff_sd_per_seed,
-    _num_scored_dropped_users,
-    _restrict_to_realised_size,
+    _paired_distance_band_recall,
+    _paired_within_band_auc,
+    _with_ranking_metrics,
+    _within_band_auc,
+    _within_band_auc_table,
     aggregate_metrics,
-    band_contributions,
     band_decomposition,
-    check_home_node_rank,
     check_model_health,
     check_overfit_health,
-    check_popularity_correlation,
-    check_user_invariance,
     distance_band_recall,
     distance_band_recall_table,
     home_zone_summary,
     lift_over_reference,
+    num_scored_dropped_users,
     paired_comparison,
     paired_comparison_by_band,
     paired_comparison_by_k,
-    paired_distance_band_recall,
-    paired_within_band_auc,
     per_user_metric_summary,
     read_run,
     read_score_vectors,
     realised_size_summary,
     recall_at_ks,
     recall_curve,
-    with_ranking_metrics,
-    within_band_auc,
-    within_band_auc_table,
+    restrict_to_realised_size,
 )
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.models.networks import NodeMLP
@@ -130,34 +130,34 @@ class TestUserInvariance:
         """The THATS collapse: every user ranked identically, so the median pairwise Spearman is 1."""
         scores = np.tile(np.array([0.1, 0.9, 0.4, 0.7]), (5, 1))
 
-        assert check_user_invariance(scores) == pytest.approx(1.0)
+        assert _check_user_invariance(scores) == pytest.approx(1.0)
 
     def test_opposed_rankings_score_minus_one(self):
         scores = np.array([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]])
 
-        assert check_user_invariance(scores) == pytest.approx(-1.0)
+        assert _check_user_invariance(scores) == pytest.approx(-1.0)
 
     def test_a_shifted_ranking_still_counts_as_invariant(self):
         """Spearman is rank-based, so a per-user offset or scale must not register as user variation."""
         base = np.array([0.1, 0.9, 0.4, 0.7])
         scores = np.stack([base, base + 5.0, base * 3.0])
 
-        assert check_user_invariance(scores) == pytest.approx(1.0)
+        assert _check_user_invariance(scores) == pytest.approx(1.0)
 
     def test_independent_users_score_near_zero(self):
         scores = np.random.default_rng(0).random((60, 200))
 
-        assert abs(check_user_invariance(scores)) < 0.1
+        assert abs(_check_user_invariance(scores)) < 0.1
 
     def test_subsamples_large_user_sets_deterministically(self):
         scores = np.random.default_rng(0).random((500, 50))
 
-        repeated = check_user_invariance(scores, max_users=50, seed=1)
+        repeated = _check_user_invariance(scores, max_users=50, seed=1)
 
-        assert check_user_invariance(scores, max_users=50, seed=1) == repeated
+        assert _check_user_invariance(scores, max_users=50, seed=1) == repeated
 
     def test_a_single_user_has_no_pairs(self):
-        assert math.isnan(check_user_invariance(np.array([[0.1, 0.2]])))
+        assert math.isnan(_check_user_invariance(np.array([[0.1, 0.2]])))
 
 
 class TestPopularityCorrelation:
@@ -165,39 +165,39 @@ class TestPopularityCorrelation:
         popularity = np.array([0.05, 0.6, 0.2, 0.9])
         scores = np.stack([popularity, popularity])
 
-        assert check_popularity_correlation(scores, popularity) == pytest.approx(1.0)
+        assert _check_popularity_correlation(scores, popularity) == pytest.approx(1.0)
 
     def test_monotone_transforms_of_popularity_also_score_one(self):
         """The reference is used as an ordering, so logit(p_n) and p_n must be interchangeable."""
         popularity = np.array([0.05, 0.6, 0.2, 0.9])
         logits = np.log(popularity / (1 - popularity))
 
-        assert check_popularity_correlation(np.stack([popularity]), logits) == pytest.approx(1.0)
+        assert _check_popularity_correlation(np.stack([popularity]), logits) == pytest.approx(1.0)
 
     def test_a_user_specific_model_averages_away_from_popularity(self):
         popularity = np.array([0.9, 0.6, 0.3, 0.1])
         scores = np.array([[0.1, 0.2, 0.3, 0.9], [0.2, 0.1, 0.9, 0.3]])
 
-        assert check_popularity_correlation(scores, popularity) < 0.0
+        assert _check_popularity_correlation(scores, popularity) < 0.0
 
 
 class TestHomeNodeRank:
     def test_home_at_the_top_for_everyone(self):
         scores = np.array([[0.9, 0.1, 0.2], [0.1, 0.8, 0.3]])
 
-        assert check_home_node_rank(scores, np.array([0, 1])) == (1.0, 1.0)
+        assert _check_home_node_rank(scores, np.array([0, 1])) == (1.0, 1.0)
 
     def test_home_at_the_bottom(self):
         scores = np.array([[0.1, 0.5, 0.9], [0.1, 0.5, 0.9]])
 
-        is_top1, median_rank = check_home_node_rank(scores, np.array([0, 0]))
+        is_top1, median_rank = _check_home_node_rank(scores, np.array([0, 0]))
         assert (is_top1, median_rank) == (0.0, 3.0)
 
     def test_ranks_count_strictly_higher_scores(self):
         """A flat field ranks home first; the user-invariance check is what catches that case, not this one."""
         scores = np.ones((2, 4))
 
-        assert check_home_node_rank(scores, np.array([2, 3])) == (1.0, 1.0)
+        assert _check_home_node_rank(scores, np.array([2, 3])) == (1.0, 1.0)
 
 
 class TestOverfitHealth:
@@ -319,7 +319,7 @@ class TestRealisedSizeRestriction:
     """With home out of ``RG_i``, a user below ``|RG_i| >= 3`` keeps at most one non-home node."""
 
     def test_users_below_the_threshold_are_dropped(self):
-        restricted = _restrict_to_realised_size(make_per_user(), min_size=3)
+        restricted = restrict_to_realised_size(make_per_user(), min_size=3)
 
         assert sorted(restricted["user_idx"].unique().to_list()) == [2, 3]
 
@@ -331,7 +331,7 @@ class TestRealisedSizeRestriction:
             **{REALISED_SIZE_COLUMN: pl.lit(None, dtype=pl.Int64)},
         )
 
-        restricted = _restrict_to_realised_size(pl.concat([per_user, other]), min_size=3)
+        restricted = restrict_to_realised_size(pl.concat([per_user, other]), min_size=3)
 
         assert restricted.filter(pl.col("stage") == SCORE_VECTOR_STAGE).height == 1
 
@@ -374,14 +374,14 @@ class TestUserPopulation:
         })
 
     def test_reads_both_counts(self):
-        assert _num_scored_dropped_users(self._aggregate()) == (90, 10)
+        assert num_scored_dropped_users(self._aggregate()) == (90, 10)
 
     def test_the_restriction_changes_the_paired_comparison(self):
         per_user = make_per_user()
 
         full = paired_comparison(per_user, "Baseline", PER_USER_METRIC, n_bootstrap=200).to_dicts()[0]
         restricted = paired_comparison(
-            _restrict_to_realised_size(per_user, min_size=3), "Baseline", PER_USER_METRIC, n_bootstrap=200
+            restrict_to_realised_size(per_user, min_size=3), "Baseline", PER_USER_METRIC, n_bootstrap=200
         ).to_dicts()[0]
 
         assert full["n_users"] == 3
@@ -528,7 +528,7 @@ def make_positive_per_user() -> pl.DataFrame:
 
 class TestBandDecomposition:
     def test_every_user_gets_a_row_in_every_band(self):
-        contributions = band_contributions(make_positive_per_user(), PER_USER_METRIC)
+        contributions = _band_contributions(make_positive_per_user(), PER_USER_METRIC)
 
         assert contributions.height == 6 * 3
         user_2_far = contributions.filter((pl.col("user_idx") == 2) & (pl.col("band") == "13+"))
@@ -537,7 +537,7 @@ class TestBandDecomposition:
     def test_contributions_sum_to_the_per_user_metric(self):
         per_user = make_positive_per_user().with_columns(pl.col("seed").fill_null(-1))
         summed = (
-            band_contributions(per_user, PER_USER_METRIC)
+            _band_contributions(per_user, PER_USER_METRIC)
             .group_by("name", "seed", "user_idx")
             .agg(pl.col("contribution").sum())
             .join(per_user.select("name", "seed", "user_idx", "r_precision"), on=["name", "seed", "user_idx"])
@@ -574,12 +574,12 @@ class TestBandDecomposition:
 
     def test_a_metric_without_a_per_positive_value_raises(self):
         with pytest.raises(KeyError, match="decomposable metrics"):
-            band_contributions(make_positive_per_user(), "ndcg")
+            _band_contributions(make_positive_per_user(), "ndcg")
 
     def test_average_recall_contributions_sum_to_the_derived_per_user_value(self):
-        per_user = with_ranking_metrics(make_positive_per_user(), BUDGET).with_columns(pl.col("seed").fill_null(-1))
+        per_user = _with_ranking_metrics(make_positive_per_user(), BUDGET).with_columns(pl.col("seed").fill_null(-1))
         summed = (
-            band_contributions(per_user, "avg_recall")
+            _band_contributions(per_user, "avg_recall")
             .group_by("name", "seed", "user_idx")
             .agg(pl.col("contribution").sum())
             .join(per_user.select("name", "seed", "user_idx", "avg_recall"), on=["name", "seed", "user_idx"])
@@ -590,8 +590,8 @@ class TestBandDecomposition:
 
     def test_average_recall_band_split_is_hand_computed(self):
         """Baseline user 1: the hop-1 positive at rank 1 gives 1/2, the unreachable one at rank 11 gives 0.8 / 2."""
-        per_user = with_ranking_metrics(make_positive_per_user(), BUDGET)
-        contributions = band_contributions(per_user, "avg_recall").filter(
+        per_user = _with_ranking_metrics(make_positive_per_user(), BUDGET)
+        contributions = _band_contributions(per_user, "avg_recall").filter(
             (pl.col("name") == "Baseline") & (pl.col("user_idx") == 1)
         )
 
@@ -654,7 +654,7 @@ def make_band_home_distances() -> pl.DataFrame:
 
 
 def band_auc_frame(bands: list[float] | None = None) -> pl.DataFrame:
-    return within_band_auc(
+    return _within_band_auc(
         make_band_per_user(), make_band_score_vectors(), make_band_home_distances(), bands or BAND_EDGES
     )
 
@@ -686,14 +686,14 @@ class TestWithinBandAUC:
         assert dict(zip(wide["user_idx"], wide["auc"], strict=True)) == pytest.approx({1: 1.0, 2: 1 / 3})
 
     def test_table_averages_users_then_seeds(self):
-        table = within_band_auc_table(band_auc_frame()).filter(pl.col("name") == "MLP")
+        table = _within_band_auc_table(band_auc_frame()).filter(pl.col("name") == "MLP")
 
         assert table["band"].to_list() == ["0-1", "1-5"]
         assert dict(zip(table["band"], table["mean"], strict=True)) == pytest.approx({"0-1": 1.0, "1-5": 0.5})
         assert table["n_seeds"].to_list() == [2, 2]
 
     def test_paired_comparison_keeps_only_the_users_scored_in_the_band(self):
-        by_band = paired_within_band_auc(band_auc_frame(), "Baseline", n_bootstrap=200)
+        by_band = _paired_within_band_auc(band_auc_frame(), "Baseline", n_bootstrap=200)
 
         assert by_band["band"].to_list() == ["0-1", "1-5"]
         assert by_band["mean_diff"].to_list() == pytest.approx([0.5, 0.0])
@@ -736,7 +736,7 @@ class TestDistanceBandRecall:
         assert table["share_of_pos"].to_list() == pytest.approx([0.25, 0.5, 0.25])
 
     def test_paired_comparison_keeps_only_the_users_with_a_positive_in_the_band(self):
-        by_band = paired_distance_band_recall(by_distance_frame(), "Baseline", n_bootstrap=200)
+        by_band = _paired_distance_band_recall(by_distance_frame(), "Baseline", n_bootstrap=200)
 
         assert by_band["band"].to_list() == ["0-1", "1-5", "5+"]
         assert by_band["mean_diff"].to_list() == pytest.approx([0.4, 0.2, 0.0])
@@ -827,7 +827,7 @@ class TestRecallCurve:
 class TestWithRankingMetrics:
     def test_derives_the_per_user_mean_of_the_positive_contributions(self):
         """User 1 at seed 42 has positives at ranks 1 and 4: (50/50 + 47/50) / 2."""
-        per_user = with_ranking_metrics(make_ranked_per_user(), BUDGET)
+        per_user = _with_ranking_metrics(make_ranked_per_user(), BUDGET)
         row = per_user.filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_idx") == 1))
 
         assert row["avg_recall"].to_list() == pytest.approx([(1.0 + 0.94) / 2])
@@ -836,13 +836,13 @@ class TestWithRankingMetrics:
     def test_keeps_the_rows_in_order(self):
         per_user = make_ranked_per_user()
 
-        derived = with_ranking_metrics(per_user, BUDGET)
+        derived = _with_ranking_metrics(per_user, BUDGET)
 
         assert derived.drop("avg_recall", "pos_avg_recall").equals(per_user)
 
     def test_a_fully_tied_user_gets_the_mean_over_its_tied_ranks(self):
         """Ten tied candidates and K = 50: the positive is surely in the top k for k >= 10."""
-        per_user = with_ranking_metrics(make_ranked_per_user(), BUDGET).filter(pl.col("name") == "Uniform")
+        per_user = _with_ranking_metrics(make_ranked_per_user(), BUDGET).filter(pl.col("name") == "Uniform")
 
         expected = (sum(k / 10 for k in range(1, 10)) + 41) / 50
         assert per_user["avg_recall"].to_list() == pytest.approx([expected, expected])
@@ -889,7 +889,7 @@ class TestPostHocMatchesLogged:
         """The coarse scores tie, so this also checks that both paths resolve ties the same way."""
         logged, per_user = synthetic_test_run(budget=10)
 
-        derived = with_ranking_metrics(per_user, 10)
+        derived = _with_ranking_metrics(per_user, 10)
 
         assert (per_user["pos_n_tied"].list.max() > 0).any()
         assert derived["avg_recall"].mean() == pytest.approx(logged["test_avg_recall@10"], abs=1e-6)

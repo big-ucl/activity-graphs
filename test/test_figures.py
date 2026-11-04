@@ -15,22 +15,22 @@ from activitygraphs.figures import (
     DEFAULT_MODELS,
     ROC_MODELS,
     ModelStyle,
+    _band_axis_labels,
+    _rank_percentile,
+    _score_panels,
+    _with_labels,
     add_transit_line,
-    band_axis_labels,
     band_recall_chart,
     edges_within,
     map_figure,
     neighbours_of,
     node_gdf,
-    rank_percentile,
     rank_prominence,
     recall_auc_table,
     recall_chart,
     roc_chart,
-    score_panels,
     top_k_nodes,
     user_scores,
-    with_labels,
     zone_figsize,
     zone_map,
 )
@@ -93,13 +93,13 @@ def test_model_scheme_is_consistent():
 
 def test_with_labels_renames_and_filters(curve):
     specs = (ModelStyle("Gravity", "Gravity", "#000000", learned=False),)
-    labelled = with_labels(curve, specs)
+    labelled = _with_labels(curve, specs)
 
     assert labelled["model"].unique().to_list() == ["Gravity"]
     assert labelled.height == 3
 
     with pytest.raises(KeyError, match="not in the frame"):
-        with_labels(curve, (ModelStyle("Nope", "Nope", "#000000", learned=False),))
+        _with_labels(curve, (ModelStyle("Nope", "Nope", "#000000", learned=False),))
 
 
 def test_node_gdf_is_in_sorted_loc_id_order(nodes_gdf):
@@ -124,7 +124,7 @@ def test_edges_within_keeps_only_interior_edges(nodes_gdf, level_names):
 
 
 def test_rank_percentile_puts_the_top_score_at_one():
-    percentile = rank_percentile(np.array([0.1, 5.0, -2.0, 0.5]))
+    percentile = _rank_percentile(np.array([0.1, 5.0, -2.0, 0.5]))
 
     assert percentile[1] == pytest.approx(1.0)
     assert percentile[2] == pytest.approx(0.0)
@@ -264,7 +264,7 @@ def test_score_panels_shares_the_colour_scale(nodes_gdf):
     nodes = node_gdf(nodes_gdf)
     scores = {"GNN": np.array([0.0, 0.5, 1.0]), "MTF-BPR": np.array([0.2, 0.2, 0.4])}
 
-    fig = score_panels(nodes, scores, basemap=False)
+    fig = _score_panels(nodes, scores, basemap=False)
 
     limits = [ax.collections[0].get_clim() for ax in fig.axes[:2]]
     assert limits[0] == limits[1] == (0.0, 1.0)
@@ -292,7 +292,7 @@ def test_recall_auc_is_half_for_the_diagonal():
 
 
 def test_band_recall_chart_writes_each_band_distance_and_its_positives(band_table):
-    rows = band_axis_labels(band_table).unique(subset=["band"], maintain_order=True)
+    rows = _band_axis_labels(band_table).unique(subset=["band"], maintain_order=True)
 
     assert rows["band_label"].to_list() == ["0-2 km", "2-5 km"]
     assert rows["band_positives"].to_list() == ["100 visits (25%)", "300 visits (75%)"]

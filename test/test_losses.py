@@ -2,20 +2,20 @@ import pytest
 import torch
 
 from activitygraphs.config import LossConfig
-from activitygraphs.training.losses import bpr_loss, build_loss, dense_bpr_loss
+from activitygraphs.training.losses import _bpr_loss, _dense_bpr_loss, build_loss
 
 
 def test_bpr_zero_when_perfectly_ranked():
     # one user, positives all score far above negatives -> loss ~ 0
     scores = torch.tensor([[10.0, 10.0, -10.0, -10.0]])
     y = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
-    assert bpr_loss(scores, y, n_pairs=64).item() < 1e-3
+    assert _bpr_loss(scores, y, n_pairs=64).item() < 1e-3
 
 
 def test_bpr_large_when_inverted():
     scores = torch.tensor([[-10.0, -10.0, 10.0, 10.0]])
     y = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
-    assert bpr_loss(scores, y, n_pairs=64).item() > 5.0
+    assert _bpr_loss(scores, y, n_pairs=64).item() > 5.0
 
 
 def test_bpr_invariant_to_per_user_constant():
@@ -27,8 +27,8 @@ def test_bpr_invariant_to_per_user_constant():
     y[0, 1] = 0
     g1 = torch.Generator().manual_seed(0)
     g2 = torch.Generator().manual_seed(0)
-    a = bpr_loss(scores, y, n_pairs=32, generator=g1)
-    b = bpr_loss(scores + 3.7, y, n_pairs=32, generator=g2)
+    a = _bpr_loss(scores, y, n_pairs=32, generator=g1)
+    b = _bpr_loss(scores + 3.7, y, n_pairs=32, generator=g2)
     torch.testing.assert_close(a, b)
 
 
@@ -36,7 +36,7 @@ def test_bpr_skips_users_without_positives():
     # user 1 has no positives -> contributes nothing, no crash
     scores = torch.randn(2, 4)
     y = torch.tensor([[1.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0]])
-    assert bpr_loss(scores, y, n_pairs=16).isfinite()
+    assert _bpr_loss(scores, y, n_pairs=16).isfinite()
 
 
 def test_hard_negatives_are_drawn_near_home_only():
@@ -45,8 +45,8 @@ def test_hard_negatives_are_drawn_near_home_only():
     y = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
     near_home = torch.tensor([[True, True, False, False]])
 
-    assert bpr_loss(scores, y, n_pairs=64, neg_restrict=near_home).item() < 0.01
-    assert bpr_loss(scores, y, n_pairs=64).item() > 1.0
+    assert _bpr_loss(scores, y, n_pairs=64, neg_restrict=near_home).item() < 0.01
+    assert _bpr_loss(scores, y, n_pairs=64).item() > 1.0
 
 
 def test_hard_negatives_fall_back_to_every_unvisited_node_when_none_is_near():
@@ -54,8 +54,8 @@ def test_hard_negatives_fall_back_to_every_unvisited_node_when_none_is_near():
     y = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
     nowhere = torch.zeros(1, 4, dtype=torch.bool)
 
-    restricted = bpr_loss(scores, y, n_pairs=64, neg_restrict=nowhere, generator=torch.Generator().manual_seed(0))
-    unrestricted = bpr_loss(scores, y, n_pairs=64, generator=torch.Generator().manual_seed(0))
+    restricted = _bpr_loss(scores, y, n_pairs=64, neg_restrict=nowhere, generator=torch.Generator().manual_seed(0))
+    unrestricted = _bpr_loss(scores, y, n_pairs=64, generator=torch.Generator().manual_seed(0))
 
     torch.testing.assert_close(restricted, unrestricted)
 
@@ -76,7 +76,7 @@ class TestDenseBPRLoss:
         pos_weight = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         neg_weight = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
 
-        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
+        loss = _dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
         expected = -torch.nn.functional.logsigmoid(torch.tensor([2.0, 1.5])).mean()
 
         assert loss == pytest.approx(float(expected), abs=1e-6)
@@ -86,14 +86,14 @@ class TestDenseBPRLoss:
         pos_weight = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
         neg_weight = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
 
-        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
+        loss = _dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
         expected = -torch.nn.functional.logsigmoid(torch.tensor(1.5))
 
         assert loss == pytest.approx(float(expected), abs=1e-6)
 
     def test_no_row_with_both_gives_a_zero_attached_to_the_scores(self):
         scores = torch.zeros(2, 2, requires_grad=True)
-        loss = dense_bpr_loss(scores, torch.zeros(2, 2), torch.ones(2, 2), n_pairs=4)
+        loss = _dense_bpr_loss(scores, torch.zeros(2, 2), torch.ones(2, 2), n_pairs=4)
 
         assert float(loss.detach()) == 0.0
         assert loss.requires_grad
@@ -103,6 +103,6 @@ class TestDenseBPRLoss:
         pos_weight = torch.tensor([[1.0, 0.0, 0.0]])
         neg_weight = torch.tensor([[0.0, 1.0, 0.0]])
 
-        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=64)
+        loss = _dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=64)
 
         assert loss == pytest.approx(float(-torch.nn.functional.logsigmoid(torch.tensor(0.0))), abs=1e-6)

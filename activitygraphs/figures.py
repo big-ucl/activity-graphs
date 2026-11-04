@@ -70,17 +70,17 @@ RANDOM_MODEL = ModelStyle("Uniform", "Random", "#c9ced4", learned=False)
 ROC_MODELS: tuple[ModelStyle, ...] = (*DEFAULT_MODELS, RANDOM_MODEL)
 
 
-def model_labels(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> list[str]:
+def _model_labels(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> list[str]:
     """The display labels of ``specs``, in their scheme order."""
     return [spec.label for spec in specs]
 
 
-def colour_scale(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.Scale:
+def _colour_scale(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.Scale:
     """An Altair colour scale mapping each spec's label to its colour."""
-    return alt.Scale(domain=model_labels(specs), range=[spec.colour for spec in specs])
+    return alt.Scale(domain=_model_labels(specs), range=[spec.colour for spec in specs])
 
 
-def model_colour(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.Color:
+def _model_colour(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.Color:
     """The shared colour encoding: each spec's label in its colour, with an opaque legend swatch.
 
     The swatch is drawn as a stroke at full opacity because a layered chart otherwise takes the
@@ -88,27 +88,27 @@ def model_colour(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.Color:
     """
     return alt.Color(
         "model:N",
-        scale=colour_scale(specs),
-        sort=model_labels(specs),
+        scale=_colour_scale(specs),
+        sort=_model_labels(specs),
         legend=alt.Legend(title="Model", symbolType="stroke", symbolStrokeWidth=3, symbolOpacity=1.0),
     )
 
 
-def model_dash(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.StrokeDash:
+def _model_dash(specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> alt.StrokeDash:
     """The shared stroke encoding: each spec's label in its dash pattern.
 
-    It carries the same field and title as ``model_colour``, so Vega-Lite merges the two into one
+    It carries the same field and title as ``_model_colour``, so Vega-Lite merges the two into one
     legend whose swatches show both the colour and the dash.
     """
     return alt.StrokeDash(
         "model:N",
-        scale=alt.Scale(domain=model_labels(specs), range=[list(spec.dash) for spec in specs]),
-        sort=model_labels(specs),
+        scale=alt.Scale(domain=_model_labels(specs), range=[list(spec.dash) for spec in specs]),
+        sort=_model_labels(specs),
         legend=alt.Legend(title="Model"),
     )
 
 
-def with_labels(frame: pl.DataFrame, specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> pl.DataFrame:
+def _with_labels(frame: pl.DataFrame, specs: Sequence[ModelStyle] = DEFAULT_MODELS) -> pl.DataFrame:
     """Restrict a results frame to ``specs`` and add the ``model`` label column they are shown under.
 
     Args:
@@ -224,16 +224,6 @@ def user_scores(score_vectors: pl.DataFrame, name: str, user_idx: int, seed: int
     return np.asarray(rows["scores"].to_list()[0], dtype=np.float64)
 
 
-def rank_percentile(scores: np.ndarray) -> np.ndarray:
-    """Scores mapped to their rank percentile, 1.0 being the top-ranked node.
-
-    Models on different score scales become comparable on a shared colour bar.
-    """
-    order = np.argsort(np.argsort(scores))
-
-    return order / (len(scores) - 1)
-
-
 def rank_prominence(scores: np.ndarray) -> np.ndarray:
     """Scores mapped to ``1 - log(rank) / log(n)``, 1.0 being the top-ranked node.
 
@@ -246,7 +236,22 @@ def rank_prominence(scores: np.ndarray) -> np.ndarray:
     return 1.0 - np.log(ranks) / np.log(len(scores))
 
 
-def prominence_of_rank(rank: int, n_nodes: int) -> float:
+def top_k_nodes(scores: np.ndarray, k: int) -> np.ndarray:
+    """Node indices of the ``k`` highest-scoring nodes."""
+    return np.argsort(-scores, kind="stable")[:k]
+
+
+def _rank_percentile(scores: np.ndarray) -> np.ndarray:
+    """Scores mapped to their rank percentile, 1.0 being the top-ranked node.
+
+    Models on different score scales become comparable on a shared colour bar.
+    """
+    order = np.argsort(np.argsort(scores))
+
+    return order / (len(scores) - 1)
+
+
+def _prominence_of_rank(rank: int, n_nodes: int) -> float:
     """The ``rank_prominence`` value a zone of this rank takes, the inverse of that mapping.
 
     Args:
@@ -257,11 +262,6 @@ def prominence_of_rank(rank: int, n_nodes: int) -> float:
         The prominence of that rank, 1.0 at rank 1.
     """
     return 1.0 - np.log(rank) / np.log(n_nodes)
-
-
-def top_k_nodes(scores: np.ndarray, k: int) -> np.ndarray:
-    """Node indices of the ``k`` highest-scoring nodes."""
-    return np.argsort(-scores, kind="stable")[:k]
 
 
 # =========================================
@@ -306,9 +306,9 @@ def rank_limits(n_nodes: int, floor: int = MAP_RANK_FLOOR) -> dict[str, float]:
         floor: Worst rank the ramp still colours; everything below it takes ``MAP_BELOW_FLOOR``.
 
     Returns:
-        A mapping to splat into ``zone_map`` or ``score_panels``.
+        A mapping to splat into ``zone_map`` or ``_score_panels``.
     """
-    return {"vmin": prominence_of_rank(floor, n_nodes), "vmax": 1.0}
+    return {"vmin": _prominence_of_rank(floor, n_nodes), "vmax": 1.0}
 
 
 def rank_colour_bar(
@@ -343,9 +343,9 @@ def rank_colour_bar(
     settings.update(kwargs)
 
     bar = fig.colorbar(
-        ScalarMappable(norm=Normalize(prominence_of_rank(floor, n_nodes), 1.0), cmap=MAP_CMAP), ax=axes, **settings
+        ScalarMappable(norm=Normalize(_prominence_of_rank(floor, n_nodes), 1.0), cmap=MAP_CMAP), ax=axes, **settings
     )
-    bar.set_ticks([prominence_of_rank(rank, n_nodes) for rank in ticks])
+    bar.set_ticks([_prominence_of_rank(rank, n_nodes) for rank in ticks])
     bar.set_ticklabels([str(rank) for rank in ticks])
     bar.set_label(label or f"rank of zone in the model's ranking (white: outside the top {floor})", fontsize=10)
     bar.ax.tick_params(labelsize=9)
@@ -506,41 +506,6 @@ def zone_figsize(nodes: gpd.GeoDataFrame, width: float = 7.0, max_aspect: float 
     return width, width * (aspect if max_aspect is None else min(aspect, max_aspect))
 
 
-def _ground_aspect(nodes: gpd.GeoDataFrame) -> float:
-    """The height over width of the zones' bounding box, measured in a projected CRS."""
-    min_x, min_y, max_x, max_y = nodes.to_crs(nodes.estimate_utm_crs()).total_bounds
-
-    return (max_y - min_y) / (max_x - min_x)
-
-
-def _flatten(
-    limits: tuple[float, float], aspect: float, max_aspect: float | None, anchor: float | None
-) -> tuple[float, float]:
-    """``limits`` narrowed until the view is at most ``max_aspect`` tall, around ``anchor`` or its own centre.
-
-    A window taken around an anchor near one end is slid back inside ``limits``, so the view never runs
-    past the zones it was cropped to.
-
-    Args:
-        limits: The view's ``(low, high)`` on the value axis.
-        aspect: Ground height over width the view has at ``limits``.
-        max_aspect: Largest ground aspect to keep; ``limits`` is returned untouched when None or already met.
-        anchor: Value the kept window is centred on; the middle of ``limits`` when None.
-
-    Returns:
-        The narrowed ``(low, high)``.
-    """
-    low, high = limits
-
-    if max_aspect is None or aspect <= max_aspect:
-        return low, high
-
-    span = (high - low) * max_aspect / aspect
-    centre = (low + high) / 2 if anchor is None else min(max(anchor, low + span / 2), high - span / 2)
-
-    return centre - span / 2, centre + span / 2
-
-
 def map_figure(
     view: gpd.GeoDataFrame,
     width: float = 7.0,
@@ -576,11 +541,6 @@ def map_figure(
     cax = fig.add_axes((0.15 * map_width / fig_width, 2.2 * bar_height, 0.7 * map_width / fig_width, bar_height))
 
     return fig, ax, cax
-
-
-def _centroids(nodes: gpd.GeoDataFrame) -> gpd.GeoSeries:
-    """Zone centroids in ``CRS``, computed in a projected CRS so they land inside their zone."""
-    return nodes.geometry.to_crs(nodes.estimate_utm_crs()).centroid.to_crs(CRS)
 
 
 def add_transit_line(
@@ -645,7 +605,47 @@ def add_transit_line(
     return ax
 
 
-def score_panels(
+def _ground_aspect(nodes: gpd.GeoDataFrame) -> float:
+    """The height over width of the zones' bounding box, measured in a projected CRS."""
+    min_x, min_y, max_x, max_y = nodes.to_crs(nodes.estimate_utm_crs()).total_bounds
+
+    return (max_y - min_y) / (max_x - min_x)
+
+
+def _flatten(
+    limits: tuple[float, float], aspect: float, max_aspect: float | None, anchor: float | None
+) -> tuple[float, float]:
+    """``limits`` narrowed until the view is at most ``max_aspect`` tall, around ``anchor`` or its own centre.
+
+    A window taken around an anchor near one end is slid back inside ``limits``, so the view never runs
+    past the zones it was cropped to.
+
+    Args:
+        limits: The view's ``(low, high)`` on the value axis.
+        aspect: Ground height over width the view has at ``limits``.
+        max_aspect: Largest ground aspect to keep; ``limits`` is returned untouched when None or already met.
+        anchor: Value the kept window is centred on; the middle of ``limits`` when None.
+
+    Returns:
+        The narrowed ``(low, high)``.
+    """
+    low, high = limits
+
+    if max_aspect is None or aspect <= max_aspect:
+        return low, high
+
+    span = (high - low) * max_aspect / aspect
+    centre = (low + high) / 2 if anchor is None else min(max(anchor, low + span / 2), high - span / 2)
+
+    return centre - span / 2, centre + span / 2
+
+
+def _centroids(nodes: gpd.GeoDataFrame) -> gpd.GeoSeries:
+    """Zone centroids in ``CRS``, computed in a projected CRS so they land inside their zone."""
+    return nodes.geometry.to_crs(nodes.estimate_utm_crs()).centroid.to_crs(CRS)
+
+
+def _score_panels(
     nodes: gpd.GeoDataFrame,
     scores_by_model: dict[str, np.ndarray],
     figsize: tuple[float, float] = (14, 7),
@@ -699,11 +699,6 @@ def chart_style(chart: alt.TopLevelMixin) -> alt.TopLevelMixin:
     )
 
 
-def _stylable(style: bool):
-    """``chart_style`` when the chart is the outermost one, and the identity when it is a panel."""
-    return chart_style if style else (lambda chart: chart)
-
-
 def recall_chart(
     curve: pl.DataFrame,
     specs: Sequence[ModelStyle] = DEFAULT_MODELS,
@@ -734,7 +729,7 @@ def recall_chart(
     Returns:
         The layered chart.
     """
-    data = with_labels(curve, specs).with_columns(
+    data = _with_labels(curve, specs).with_columns(
         lo=pl.col("mean") - pl.col("sd").fill_null(0.0), hi=pl.col("mean") + pl.col("sd").fill_null(0.0)
     )
     ks = sorted(data["k"].unique().to_list())
@@ -750,7 +745,7 @@ def recall_chart(
             grid=True,
         ),
     )
-    colour = model_colour(specs)
+    colour = _model_colour(specs)
 
     band = (
         alt
@@ -762,7 +757,7 @@ def recall_chart(
         alt
         .Chart(data)
         .mark_line(point=points, strokeWidth=2)
-        .encode(x=axis, y=alt.Y("mean:Q", title="recall@k"), color=colour, strokeDash=model_dash(specs))
+        .encode(x=axis, y=alt.Y("mean:Q", title="recall@k"), color=colour, strokeDash=_model_dash(specs))
     )
     properties: dict[str, Any] = {"width": size[0], "height": size[1]}
 
@@ -791,7 +786,7 @@ def roc_chart(
     Returns:
         The layered chart, with the random-ranking diagonal underneath.
     """
-    data = with_labels(curve, specs).with_columns(share=pl.col("k") / n_nodes)
+    data = _with_labels(curve, specs).with_columns(share=pl.col("k") / n_nodes)
 
     diagonal = (
         alt
@@ -806,7 +801,7 @@ def roc_chart(
         .encode(
             x=alt.X("share:Q", title="share of the region selected (k / n)", scale=alt.Scale(domain=[0, 1])),
             y=alt.Y("mean:Q", title="recall@k", scale=alt.Scale(domain=[0, 1])),
-            color=model_colour(specs),
+            color=_model_colour(specs),
         )
     )
 
@@ -817,26 +812,6 @@ BAND_COUNT_COLOUR = "#8c959f"
 BAND_COUNT_OFFSET = 26
 """How far under the plot area the band's positives are written. The axis title is pushed down by as much,
 since a text mark is not part of the axis and does not move it."""
-
-
-def band_axis_labels(band_table: pl.DataFrame) -> pl.DataFrame:
-    """Add each band's axis label, its range in km, and the count of positives written under it.
-
-    Args:
-        band_table: ``analysis.distance_band_recall_table`` output.
-
-    Returns:
-        ``band_table`` with ``band_label`` and ``band_positives`` columns.
-    """
-    return band_table.with_columns(
-        band_label=pl.col("band") + pl.lit(" km"),
-        band_positives=(
-            pl.col("n_pos").round(0).cast(pl.Int64).cast(pl.String)
-            + pl.lit(" visits (")
-            + (100 * pl.col("share_of_pos")).round(0).cast(pl.Int64).cast(pl.String)
-            + pl.lit("%)")
-        ),
-    )
 
 
 def band_recall_chart(
@@ -863,7 +838,7 @@ def band_recall_chart(
     Returns:
         The layered chart.
     """
-    data = with_labels(band_axis_labels(band_table), specs)
+    data = _with_labels(_band_axis_labels(band_table), specs)
     axis = alt.X(
         "band_label:N",
         title="straight-line distance from home",
@@ -881,8 +856,8 @@ def band_recall_chart(
                 title=f"avg_recall@{budget} of the visits in the band",
                 scale=alt.Scale(domain=[0, 1]),
             ),
-            color=model_colour(specs),
-            strokeDash=model_dash(specs),
+            color=_model_colour(specs),
+            strokeDash=_model_dash(specs),
         )
     )
     positives = (
@@ -897,6 +872,31 @@ def band_recall_chart(
         properties["title"] = title
 
     return cast(alt.LayerChart, _stylable(style)(alt.layer(line, positives).properties(**properties)))
+
+
+def _stylable(style: bool):
+    """``chart_style`` when the chart is the outermost one, and the identity when it is a panel."""
+    return chart_style if style else (lambda chart: chart)
+
+
+def _band_axis_labels(band_table: pl.DataFrame) -> pl.DataFrame:
+    """Add each band's axis label, its range in km, and the count of positives written under it.
+
+    Args:
+        band_table: ``analysis.distance_band_recall_table`` output.
+
+    Returns:
+        ``band_table`` with ``band_label`` and ``band_positives`` columns.
+    """
+    return band_table.with_columns(
+        band_label=pl.col("band") + pl.lit(" km"),
+        band_positives=(
+            pl.col("n_pos").round(0).cast(pl.Int64).cast(pl.String)
+            + pl.lit(" visits (")
+            + (100 * pl.col("share_of_pos")).round(0).cast(pl.Int64).cast(pl.String)
+            + pl.lit("%)")
+        ),
+    )
 
 
 # =========================================
@@ -918,7 +918,7 @@ def recall_auc_table(curve: pl.DataFrame, n_nodes: int, specs: Sequence[ModelSty
     Returns:
         Frame of ``model, auc``, ordered by ``auc`` descending.
     """
-    data = with_labels(curve, specs).with_columns(share=pl.col("k") / n_nodes).sort("share")
+    data = _with_labels(curve, specs).with_columns(share=pl.col("k") / n_nodes).sort("share")
 
     rows = [
         {
@@ -954,7 +954,7 @@ def avg_recall_table(
     summary = per_user_metric_summary(per_user_results, AVG_RECALL_COLUMN)
 
     return (
-        with_labels(summary, specs)
+        _with_labels(summary, specs)
         .select("model", "n_users", "n_seeds", "mean", "sd")
         .rename({"mean": f"avg_recall@{budget}"})
         .sort(f"avg_recall@{budget}", descending=True)

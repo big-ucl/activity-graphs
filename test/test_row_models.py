@@ -6,7 +6,7 @@ import pytest
 import torch
 from test_input_snapshot import cache_survey_tensors
 
-from activitygraphs.analysis import with_ranking_metrics
+from activitygraphs.analysis import _with_ranking_metrics
 from activitygraphs.datasets import HouseholdSplit, Locations, SurveyDataModule, UserBatch
 from activitygraphs.models.baselines import VisitFrequencyBaseline
 from activitygraphs.models.baselines.popularity import popularity_logit
@@ -65,7 +65,7 @@ def test_the_loader_yields_whole_rows_of_users(cfg, tmp_path):
 
 def per_user_avg_recall(module: RankingModule) -> pl.DataFrame:
     per_user = pl.DataFrame(module.per_user_columns)
-    return with_ranking_metrics(per_user, MAX_RECALL_K).select("user_idx", "avg_recall").sort("user_idx")
+    return _with_ranking_metrics(per_user, MAX_RECALL_K).select("user_idx", "avg_recall").sort("user_idx")
 
 
 def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tmp_path):

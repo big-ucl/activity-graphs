@@ -18,40 +18,6 @@ from activitygraphs.models.features import InputFeatures
 log = logging.getLogger(__name__)
 
 
-def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.DataFrame]:
-    """Train every variant once per training seed and return the seed-tagged result frames.
-
-    Only training is reseeded, so the seed spread across repeated runs of one variant measures
-    training stochasticity alone rather than split variance.
-    """
-    cfg = setup.cfg
-    locations = setup.datamodule.locations
-    schema = setup.datamodule.schema
-    results = []
-
-    for train_seed in setup.train_seeds:
-        L.seed_everything(train_seed, workers=True)
-
-        for variant in variants:
-            scorer = build_scorer(variant.model, variant.features, locations, schema, cfg.train.home_pe)
-            run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
-
-            result_df = train_and_evaluate_model(
-                scorer=scorer,
-                variant=variant,
-                datamodule=setup.datamodule,
-                loss=setup.loss,
-                cfg=cfg,
-                run_dir=setup.run_dir,
-                wandb_params=setup.wandb_params,
-                debug=setup.debug,
-                run_tag=run_tag,
-            )
-            results.append(result_df.with_columns(seed=pl.lit(train_seed, dtype=pl.Int64)))
-
-    return results
-
-
 def comparison_experiment(cfg: Config):
     """Compare the prediction performance of MLP, GAT, and GPS variants plus baselines.
 
@@ -77,7 +43,7 @@ def comparison_experiment(cfg: Config):
         Variant(setup.models["home_zone_mf"]),
     ]
 
-    model_results = run_variants(setup, variants)
+    model_results = _run_variants(setup, variants)
 
     if setup.run_dir is None:
         return
@@ -100,7 +66,7 @@ def depth_sweep_experiment(cfg: Config):
         gat_at_depth = with_overrides(gat, {"num_gcn_layers": depth})
         variants.append(Variant(gat_at_depth, features, extra_hyperparams={"depth": depth}))
 
-    model_results = run_variants(setup, variants)
+    model_results = _run_variants(setup, variants)
 
     if setup.run_dir is None:
         return
@@ -126,7 +92,7 @@ def demographics_ablation_experiment(cfg: Config):
         for use_demographics in [True, False]
     ]
 
-    model_results = run_variants(setup, variants)
+    model_results = _run_variants(setup, variants)
 
     if setup.run_dir is None:
         return
@@ -154,7 +120,7 @@ def core_experiment(cfg: Config):
         Variant(mf),
     ]
 
-    model_results = run_variants(setup, variants)
+    model_results = _run_variants(setup, variants)
 
     if setup.run_dir is None:
         return
@@ -192,7 +158,7 @@ def two_tower_ablation_experiment(cfg: Config):
         Variant(node_embedding, both),
     ]
 
-    model_results = run_variants(setup, variants)
+    model_results = _run_variants(setup, variants)
 
     if setup.run_dir is None:
         return
@@ -221,7 +187,7 @@ def overfit_health_experiment(cfg: Config):
         Variant(setup.models["gat"], InputFeatures(full_info=True)),
     ]
 
-    model_results = run_variants(setup, variants)
+    model_results = _run_variants(setup, variants)
 
     if setup.run_dir is None:
         return
@@ -242,9 +208,43 @@ def baselines_experiment(cfg: Config):
     """
     setup = setup_experiment(cfg)
 
-    model_results = run_variants(setup, [Variant(setup.models["home_zone_mf"])])
+    model_results = _run_variants(setup, [Variant(setup.models["home_zone_mf"])])
 
     if setup.run_dir is None:
         return
 
     save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
+
+
+def _run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.DataFrame]:
+    """Train every variant once per training seed and return the seed-tagged result frames.
+
+    Only training is reseeded, so the seed spread across repeated runs of one variant measures
+    training stochasticity alone rather than split variance.
+    """
+    cfg = setup.cfg
+    locations = setup.datamodule.locations
+    schema = setup.datamodule.schema
+    results = []
+
+    for train_seed in setup.train_seeds:
+        L.seed_everything(train_seed, workers=True)
+
+        for variant in variants:
+            scorer = build_scorer(variant.model, variant.features, locations, schema, cfg.train.home_pe)
+            run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
+
+            result_df = train_and_evaluate_model(
+                scorer=scorer,
+                variant=variant,
+                datamodule=setup.datamodule,
+                loss=setup.loss,
+                cfg=cfg,
+                run_dir=setup.run_dir,
+                wandb_params=setup.wandb_params,
+                debug=setup.debug,
+                run_tag=run_tag,
+            )
+            results.append(result_df.with_columns(seed=pl.lit(train_seed, dtype=pl.Int64)))
+
+    return results

@@ -5,7 +5,7 @@ import torch
 from encoders import make_encoder
 from graphs import join_users, make_locations, make_users
 
-from activitygraphs.datasets.locations import compute_hop_distance
+from activitygraphs.datasets.locations import _compute_hop_distance
 from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import RankingModule
@@ -19,13 +19,13 @@ PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 
 
 class TestHomeHopDistance:
     def test_path_graph(self):
-        hop = compute_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
+        hop = _compute_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
         assert hop[0].tolist() == [0, 1, 2, 3, 4]
         assert hop[2].tolist() == [2, 1, 0, 1, 2]
 
     def test_disconnected_is_inf(self):
         edge_index = torch.tensor([[0], [1]])  # only 0-1 connected; node 2 isolated
-        hop = compute_hop_distance(edge_index, num_nodes=3)
+        hop = _compute_hop_distance(edge_index, num_nodes=3)
         assert hop[0, 2] == float("inf")
 
 

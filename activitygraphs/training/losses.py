@@ -29,18 +29,6 @@ class Loss:
     monitor_mode: Literal["min", "max"]
 
 
-def bce_loss(
-    logits: torch.Tensor,
-    batch: UserBatch,
-    generator: torch.Generator | None = None,
-) -> torch.Tensor:
-    """Standard BCE loss with logits, over the ``[num_users, num_nodes]`` grid of scores."""
-    return F.binary_cross_entropy_with_logits(logits, batch.visited.float())
-
-
-BCELoss = Loss(name="bce", loss_fn=bce_loss, monitor="val_bce", monitor_mode="min")
-
-
 def build_loss(cfg: LossConfig, max_recall_k: int) -> Loss:
     """Build the loss selected by ``cfg.type``, over the ``[num_users, num_nodes]`` grid of a ``UserBatch``."""
     if cfg.type == "bce":
@@ -51,23 +39,32 @@ def build_loss(cfg: LossConfig, max_recall_k: int) -> Loss:
     raise ValueError(f"Unknown loss type {cfg.type}")
 
 
+def _bce_loss(
+    logits: torch.Tensor,
+    batch: UserBatch,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Standard BCE loss with logits, over the ``[num_users, num_nodes]`` grid of scores."""
+    return F.binary_cross_entropy_with_logits(logits, batch.visited.float())
+
+
 def _build_bpr_loss(cfg: LossConfig, max_recall_k: int) -> Loss:
     def _uniform_bpr_loss(
         logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
-        return bpr_loss(logits, batch.visited, cfg.n_pairs, generator=generator)
+        return _bpr_loss(logits, batch.visited, cfg.n_pairs, generator=generator)
 
     def _hard_neg_bpr_loss(
         logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
         near_home = batch.home_hops <= cfg.is_near_threshold
-        return bpr_loss(logits, batch.visited, cfg.n_pairs, near_home, generator)
+        return _bpr_loss(logits, batch.visited, cfg.n_pairs, near_home, generator)
 
-    _bpr_loss = _hard_neg_bpr_loss if cfg.neg_sampler == "hard" else _uniform_bpr_loss
-    return Loss(name="bpr", loss_fn=_bpr_loss, monitor=f"val_avg_recall@{max_recall_k}", monitor_mode="max")
+    loss_fn = _hard_neg_bpr_loss if cfg.neg_sampler == "hard" else _uniform_bpr_loss
+    return Loss(name="bpr", loss_fn=loss_fn, monitor=f"val_avg_recall@{max_recall_k}", monitor_mode="max")
 
 
-def bpr_loss(
+def _bpr_loss(
     scores: torch.Tensor,
     y: torch.Tensor,
     n_pairs: int,
@@ -92,7 +89,7 @@ def bpr_loss(
     if neg_restrict is not None:
         neg_mask = _restrict_negatives(neg_mask, neg_restrict)
 
-    return dense_bpr_loss(scores, pos_mask.float(), neg_mask.float(), n_pairs, generator)
+    return _dense_bpr_loss(scores, pos_mask.float(), neg_mask.float(), n_pairs, generator)
 
 
 def _restrict_negatives(neg_mask: torch.Tensor, neg_restrict: torch.Tensor) -> torch.Tensor:
@@ -106,7 +103,7 @@ def _restrict_negatives(neg_mask: torch.Tensor, neg_restrict: torch.Tensor) -> t
     return torch.where(empty, neg_mask, restricted)
 
 
-def dense_bpr_loss(
+def _dense_bpr_loss(
     scores: torch.Tensor,
     pos_weight: torch.Tensor,
     neg_weight: torch.Tensor,
@@ -137,3 +134,6 @@ def dense_bpr_loss(
 
     diff = row_scores.gather(1, pos_idx) - row_scores.gather(1, neg_idx)  # [n_rows_with_pairs, n_pairs]
     return -F.logsigmoid(diff).mean()
+
+
+BCELoss = Loss(name="bce", loss_fn=_bce_loss, monitor="val_bce", monitor_mode="min")

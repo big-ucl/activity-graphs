@@ -7,7 +7,7 @@ import torch
 from encoders import make_encoder
 from graphs import chain_edge_index, loader_of, make_locations, make_users
 
-from activitygraphs.experiments.training import aggregate_frame
+from activitygraphs.experiments.training import _aggregate_frame
 from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import RankingModule
@@ -113,13 +113,13 @@ class TestAggregateFrame:
 
     @pytest.mark.parametrize("num_epochs", [50, 500])
     def test_test_metrics_survive_however_many_fit_rows_precede_them(self, num_epochs: int):
-        frame = aggregate_frame(self._rows(num_epochs), "MLP")
+        frame = _aggregate_frame(self._rows(num_epochs), "MLP")
 
         assert "test_r_precision" in frame.columns
         test_row = frame.filter(pl.col("stage") == "test")
         assert test_row["test_r_precision"].item() == pytest.approx(0.5)
 
     def test_every_row_carries_the_model_name(self):
-        frame = aggregate_frame(self._rows(3), "MLP")
+        frame = _aggregate_frame(self._rows(3), "MLP")
 
         assert frame["name"].to_list() == ["MLP"] * 4

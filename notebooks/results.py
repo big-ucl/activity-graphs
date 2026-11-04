@@ -381,9 +381,9 @@ def _(mo):
 
 @app.cell
 def _(aggregate_results, per_user_results):
-    from activitygraphs.analysis import _num_scored_dropped_users, realised_size_summary
+    from activitygraphs.analysis import num_scored_dropped_users, realised_size_summary
 
-    _, _n_dropped = _num_scored_dropped_users(aggregate_results)
+    _, _n_dropped = num_scored_dropped_users(aggregate_results)
 
     realised_sizes = realised_size_summary(per_user_results, _n_dropped)
     realised_sizes
@@ -432,9 +432,9 @@ def _(analysis, mo):
 
 @app.cell
 def _(analysis, paired_comparison, per_user_metric_summary, per_user_results):
-    from activitygraphs.analysis import _restrict_to_realised_size
+    from activitygraphs.analysis import restrict_to_realised_size
 
-    _restricted = _restrict_to_realised_size(per_user_results, analysis.min_realised_size)
+    _restricted = restrict_to_realised_size(per_user_results, analysis.min_realised_size)
     paired_metrics_restricted = paired_comparison(_restricted, analysis.reference_model, analysis.per_user_metric)
 
     per_user_metric_summary(_restricted, analysis.per_user_metric)

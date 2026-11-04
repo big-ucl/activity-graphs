@@ -1,8 +1,8 @@
 """Chicago CMAP MyDailyTravel survey: raw tables -> ``CMAPSurvey``, and the census statistics for the graph nodes.
 
-Survey: ``CMAPSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``build_cmap_survey``,
+Survey: ``CMAPSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``_build_cmap_survey``,
 which builds the locations, journeys and users in turn.
-Statistics: ``read_cmap_statistics`` and ``add_cmap_population_job_statistics`` add census population and jobs to
+Statistics: ``_read_cmap_statistics`` and ``_add_cmap_population_job_statistics`` add census population and jobs to
 the zones. ``LOADER`` bundles these steps for the survey registry.
 """
 
@@ -192,7 +192,7 @@ class CMAPSurvey(SurveyData, DataFrameStore):
 
             return cls(locations_gdf, user_journeys_df, users_df)
 
-        survey = build_cmap_survey(read_tables(cfg, project_root))
+        survey = _build_cmap_survey(read_tables(cfg, project_root))
         survey.save(cfg, project_root, name)
 
         return survey
@@ -222,11 +222,11 @@ def read_tables(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPTa
     return CMAPTables(raw_journeys_df, raw_persons_df, raw_household_df, boundaries_ct)
 
 
-def build_cmap_survey(inputs: CMAPTables) -> CMAPSurvey:
+def _build_cmap_survey(inputs: CMAPTables) -> CMAPSurvey:
     """Parse raw CMAP inputs into a standardised ``CMAPSurvey`` instance."""
-    locations_gdf = build_cmap_locations(inputs)
-    user_journeys_df = build_cmap_journeys(inputs, locations_gdf)
-    users_df = build_cmap_users(inputs, locations_gdf, user_journeys_df)
+    locations_gdf = _build_cmap_locations(inputs)
+    user_journeys_df = _build_cmap_journeys(inputs, locations_gdf)
+    users_df = _build_cmap_users(inputs, locations_gdf, user_journeys_df)
 
     # Filter out journeys from excluded users
     user_journeys_df = user_journeys_df.join(users_df.select("user_id"), on="user_id", how="inner")
@@ -247,7 +247,7 @@ class CMAPStatistics:
     jobs_df: pl.DataFrame
 
 
-def read_cmap_statistics(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPStatistics:
+def _read_cmap_statistics(cfg: CMAPDataConfig, project_root: Path | None = None) -> CMAPStatistics:
     """Read the ACS population and LODES workplace-area CSVs."""
     stats_cfg = cfg.inputs.statistics
     stats_dir = get_project_root(project_root) / stats_cfg.directory
@@ -258,14 +258,14 @@ def read_cmap_statistics(cfg: CMAPDataConfig, project_root: Path | None = None) 
     return CMAPStatistics(population_df, jobs_df)
 
 
-def add_cmap_population_job_statistics(
+def _add_cmap_population_job_statistics(
     locations_gdf: gpd.GeoDataFrame, statistics: CMAPStatistics, normalise: bool = True
 ) -> gpd.GeoDataFrame:
     """Add census population and job counts to Chicago CMAP MyDailyTravel locations (census tracts).
 
     Args:
         locations_gdf: CMAP locations (must have a ``loc_id`` matching ``GEO_ID``).
-        statistics: Census tables from ``read_cmap_statistics``.
+        statistics: Census tables from ``_read_cmap_statistics``.
         normalise: If True, divide counts by area to obtain densities.
     """
     utm_crs = locations_gdf.estimate_utm_crs()
@@ -293,8 +293,8 @@ def add_cmap_population_job_statistics(
 
 LOADER = SurveyLoader(
     load=CMAPSurvey.load,
-    read_statistics=read_cmap_statistics,
-    add_statistics=add_cmap_population_job_statistics,
+    read_statistics=_read_cmap_statistics,
+    add_statistics=_add_cmap_population_job_statistics,
 )
 
 
@@ -303,7 +303,7 @@ LOADER = SurveyLoader(
 # =========================================
 
 
-def build_cmap_locations(inputs: CMAPTables) -> gpd.GeoDataFrame:
+def _build_cmap_locations(inputs: CMAPTables) -> gpd.GeoDataFrame:
     """Build the CMAP locations GeoDataFrame (census tracts and NA)."""
     zone_locations = inputs.boundaries_ct[inputs.boundaries_ct["COUNTYFP"].isin(CMAP_COUNTY_FP_CODES)]
     zone_locations = zone_locations.rename(columns={"GEOID": "loc_id", "NAME": "loc_name"}).to_crs(CRS)
@@ -334,7 +334,7 @@ def _census_tract_to_loc_id(census_tract_col: str, locations_gdf: gpd.GeoDataFra
 # =========================================
 
 
-def build_cmap_journeys(inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+def _build_cmap_journeys(inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
     """Build the standardised journey table from the raw linked trips, one leg per trip."""
     user_journeys_df = inputs.raw_journeys_df.select(
         user_id=pl.col("person_id").cast(pl.String),
@@ -365,7 +365,7 @@ def build_cmap_journeys(inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame) -> 
 # =========================================
 
 
-def build_cmap_users(
+def _build_cmap_users(
     inputs: CMAPTables, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
 ) -> pl.DataFrame:
     """Build one row per user with home tract, household id and demographics, single-day diaries only.

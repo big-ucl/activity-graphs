@@ -45,7 +45,7 @@ TARGET_SCHEMA = TensorSchema("targets", (ColumnSpec("is_visited", ColumnKind.BIN
 # =========================================
 
 
-def build_home_nodes(survey: SurveyData) -> torch.Tensor:
+def _build_home_nodes(survey: SurveyData) -> torch.Tensor:
     """Build the home node of each user, the position of the user's home location in the node order.
 
     Returns:
@@ -60,7 +60,7 @@ def build_home_nodes(survey: SurveyData) -> torch.Tensor:
     return torch.tensor(home_nodes.to_numpy(), dtype=torch.long)
 
 
-def build_visit_labels(survey: SurveyData, purposes: Collection[Purpose]) -> torch.Tensor:
+def _build_visit_labels(survey: SurveyData, purposes: Collection[Purpose]) -> torch.Tensor:
     """Build each user's visit labels over all graph nodes, from the visits made for one of ``purposes``.
 
     Args:
@@ -72,10 +72,10 @@ def build_visit_labels(survey: SurveyData, purposes: Collection[Purpose]) -> tor
     """
     visits = survey.location_visits.filter(pl.col("purpose").cast(pl.String).is_in([str(p) for p in purposes]))
 
-    return build_user_node_indicator(survey, visits, "is_visited")
+    return _build_user_node_indicator(survey, visits, "is_visited")
 
 
-def build_user_node_indicator(survey: SurveyData, indicator_df: pl.DataFrame, col_name: str) -> torch.Tensor:
+def _build_user_node_indicator(survey: SurveyData, indicator_df: pl.DataFrame, col_name: str) -> torch.Tensor:
     """Build a per-user indicator over all graph nodes, one where ``[user_id, loc_id]`` appears in ``indicator_df``.
 
     Returns:
@@ -87,7 +87,7 @@ def build_user_node_indicator(survey: SurveyData, indicator_df: pl.DataFrame, co
         .to_frame()
         .join(locations, how="cross")
         .lazy()
-        .pipe(add_indicator_column, indicator_df, col_name)
+        .pipe(_add_indicator_column, indicator_df, col_name)
         .sort("user_id", "loc_order")
         .collect()
     )
@@ -97,7 +97,7 @@ def build_user_node_indicator(survey: SurveyData, indicator_df: pl.DataFrame, co
     )
 
 
-def build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
+def _build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
     """Build the distance between every pair of graph nodes.
 
     Uses Euclidean distance between centroids. Row ``i`` holds the distances from node ``i`` to every node.
@@ -117,7 +117,7 @@ def build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
     return torch.from_numpy(distances)
 
 
-def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, col_name: str):
+def _add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, col_name: str):
     """Add an indicator column with name ``col_name`` to ``feature_df`` which is ``True`` if ``[loc_id, user_id]`` appears in ``indicator_df`` and ``False`` otherwise."""
     true_indicators = indicator_df.select("user_id", "loc_id", pl.lit(True).alias(col_name)).unique().lazy()
 
@@ -131,7 +131,7 @@ def add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, c
 # =========================================
 
 
-def build_user_attributes(survey: SurveyData) -> tuple[torch.Tensor, torch.Tensor]:
+def _build_user_attributes(survey: SurveyData) -> tuple[torch.Tensor, torch.Tensor]:
     """Create the user attribute tensors from SurveyData, split into numeric columns and categorical codes.
 
     Columns follow ``survey.demographics_schema``. If the survey has none (e.g. TPG), both tensors have zero columns.
@@ -152,13 +152,13 @@ def build_user_attributes(survey: SurveyData) -> tuple[torch.Tensor, torch.Tenso
 
     categorical_tensor = torch.empty((n_users, 0), dtype=torch.long)
     for spec in demo_schema.categorical.columns:
-        column_codes = encode_categories(survey.users_df[spec.name], spec)
+        column_codes = _encode_categories(survey.users_df[spec.name], spec)
         categorical_tensor = torch.cat([categorical_tensor, column_codes.unsqueeze(1)], dim=1)
 
     return numeric_tensor, categorical_tensor
 
 
-def encode_categories(values: pl.Series, spec: ColumnSpec) -> torch.Tensor:
+def _encode_categories(values: pl.Series, spec: ColumnSpec) -> torch.Tensor:
     """Encode the values of a categorical column as codes, following the categories of ``spec``.
 
     The values are compared to the categories as strings. ``spec.categories[i]`` gets code ``i + 1``. A missing value
@@ -174,7 +174,7 @@ def encode_categories(values: pl.Series, spec: ColumnSpec) -> torch.Tensor:
     return torch.tensor(encoded.to_numpy(), dtype=torch.long)
 
 
-def build_group_ids(survey: SurveyData) -> torch.Tensor:
+def _build_group_ids(survey: SurveyData) -> torch.Tensor:
     """Create a tensor of numeric ``group_id``s matching the ``hh_id`` household IDs, shape ``[n_users]``."""
     group_ids = survey.users_df.select("hh_id").unique(maintain_order=True).with_row_index(name="group_id")
     user_groups = survey.users_df.select("user_id", "hh_id").join(group_ids, on="hh_id", how="left")
@@ -186,71 +186,6 @@ def build_group_ids(survey: SurveyData) -> torch.Tensor:
 # =========================================
 # PyG / Torch creation
 # =========================================
-
-
-def build_user_ids(survey: SurveyData) -> pl.DataFrame:
-    """Return the survey ``user_id`` and ``hh_id`` of each user, in tensor row order."""
-    user_ids = survey.users_df.select("user_id", "hh_id")
-    assert user_ids["user_id"].equals(survey.user_ids)
-
-    return user_ids
-
-
-def build_node_ids(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
-    """Return the survey ``loc_id`` of each graph node, in node order.
-
-    Raises:
-        ValueError: The graph's nodes are not the survey locations in ``loc_id`` order, the order of the per-user
-            tensors.
-    """
-    node_ids = pl.DataFrame({"loc_id": nodes_gdf.index.to_list()})
-    if not node_ids["loc_id"].equals(survey.locations_df["loc_id"]):
-        raise ValueError("The graph's nodes are not the survey locations in `loc_id` order.")
-
-    return node_ids
-
-
-def build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_cols: list[str]) -> DatasetSchema:
-    """Return the final dataset schema. Extracts schema from ``survey`` and infers schema on ``nodes_gdf``.
-
-    Args:
-        survey: The survey which is the source of the demographics schema.
-        nodes_gdf: The graph nodes that contain the location feature columns.
-        node_feature_cols: The columns names of the location features, in tensor column order.
-
-    Returns:
-        The dataset schema.
-    """
-    locations_schema = infer_schema("locations", nodes_gdf, node_feature_cols, {})
-
-    return DatasetSchema(
-        locations=locations_schema,
-        edges=EDGE_SCHEMA,
-        user_nodes=USER_NODE_SCHEMA,
-        user_attributes=survey.demographics_schema,
-        distances=DISTANCE_SCHEMA,
-        targets=TARGET_SCHEMA,
-    )
-
-
-def build_location_tensors(
-    pyg_graph: pyg.data.Data, distance_m: torch.Tensor, node_ids: pl.DataFrame
-) -> LocationTensors:
-    """Return the location tensors of the PyG graph built by city2graph.
-
-    Raises:
-        ValueError: The graph has no edge index.
-    """
-    if pyg_graph.edge_index is None:
-        raise ValueError("The graph has no edge index.")
-
-    return LocationTensors(
-        x=cast(torch.Tensor, pyg_graph.x),
-        edge_index=pyg_graph.edge_index,
-        edge_attr=cast(torch.Tensor, pyg_graph.edge_attr),
-        distance_m=distance_m,
-        node_ids=node_ids,
-    )
 
 
 def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gpd.GeoDataFrame) -> SurveyTensors:
@@ -274,32 +209,24 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         device="cpu",
     )
 
-    distance_m = build_node_distances(nodes_gdf)
-    node_ids = build_node_ids(survey, nodes_gdf)
-    locations = build_location_tensors(cast(pyg.data.Data, pyg_graph), distance_m, node_ids)
+    distance_m = _build_node_distances(nodes_gdf)
+    node_ids = _build_node_ids(survey, nodes_gdf)
+    locations = _build_location_tensors(cast(pyg.data.Data, pyg_graph), distance_m, node_ids)
 
-    attributes, attributes_cat = build_user_attributes(survey)
+    attributes, attributes_cat = _build_user_attributes(survey)
     users = UserTensors(
-        home_node=build_home_nodes(survey),
-        visited=build_visit_labels(survey, list(Purpose)),
+        home_node=_build_home_nodes(survey),
+        visited=_build_visit_labels(survey, list(Purpose)),
         attributes=attributes,
         attributes_cat=attributes_cat,
-        group_ids=build_group_ids(survey),
-        user_ids=build_user_ids(survey),
+        group_ids=_build_group_ids(survey),
+        user_ids=_build_user_ids(survey),
     )
 
-    schema = build_schema(survey, nodes_gdf, node_feature_cols)
+    schema = _build_schema(survey, nodes_gdf, node_feature_cols)
     check_tensors(locations, users, schema)
 
     return locations, users, schema
-
-
-def build_survey_tensors(cfg: DataConfig, project_root: Path) -> SurveyTensors:
-    """Build the SurveyTensors from the (cached or rebuilt) ``SurveyData`` and survey Graph described by ``cfg``."""
-    survey = load_survey(cfg, project_root).with_filter("zone")
-    nodes_gdf, edges_gdf = load_graph(survey, cfg, project_root)
-
-    return build_tensors(survey, nodes_gdf, edges_gdf)
 
 
 def load_tensors(cfg: Config, project_root: Path | None = None) -> SurveyTensors:
@@ -314,6 +241,79 @@ def load_tensors(cfg: Config, project_root: Path | None = None) -> SurveyTensors
     try:
         return read_tensors(root)
     except FileNotFoundError:
-        tensors = build_survey_tensors(cfg.data, project_root)
+        tensors = _build_survey_tensors(cfg.data, project_root)
         save_tensors(root, *tensors)
         return tensors
+
+
+def _build_user_ids(survey: SurveyData) -> pl.DataFrame:
+    """Return the survey ``user_id`` and ``hh_id`` of each user, in tensor row order."""
+    user_ids = survey.users_df.select("user_id", "hh_id")
+    assert user_ids["user_id"].equals(survey.user_ids)
+
+    return user_ids
+
+
+def _build_node_ids(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+    """Return the survey ``loc_id`` of each graph node, in node order.
+
+    Raises:
+        ValueError: The graph's nodes are not the survey locations in ``loc_id`` order, the order of the per-user
+            tensors.
+    """
+    node_ids = pl.DataFrame({"loc_id": nodes_gdf.index.to_list()})
+    if not node_ids["loc_id"].equals(survey.locations_df["loc_id"]):
+        raise ValueError("The graph's nodes are not the survey locations in `loc_id` order.")
+
+    return node_ids
+
+
+def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_cols: list[str]) -> DatasetSchema:
+    """Return the final dataset schema. Extracts schema from ``survey`` and infers schema on ``nodes_gdf``.
+
+    Args:
+        survey: The survey which is the source of the demographics schema.
+        nodes_gdf: The graph nodes that contain the location feature columns.
+        node_feature_cols: The columns names of the location features, in tensor column order.
+
+    Returns:
+        The dataset schema.
+    """
+    locations_schema = infer_schema("locations", nodes_gdf, node_feature_cols, {})
+
+    return DatasetSchema(
+        locations=locations_schema,
+        edges=EDGE_SCHEMA,
+        user_nodes=USER_NODE_SCHEMA,
+        user_attributes=survey.demographics_schema,
+        distances=DISTANCE_SCHEMA,
+        targets=TARGET_SCHEMA,
+    )
+
+
+def _build_location_tensors(
+    pyg_graph: pyg.data.Data, distance_m: torch.Tensor, node_ids: pl.DataFrame
+) -> LocationTensors:
+    """Return the location tensors of the PyG graph built by city2graph.
+
+    Raises:
+        ValueError: The graph has no edge index.
+    """
+    if pyg_graph.edge_index is None:
+        raise ValueError("The graph has no edge index.")
+
+    return LocationTensors(
+        x=cast(torch.Tensor, pyg_graph.x),
+        edge_index=pyg_graph.edge_index,
+        edge_attr=cast(torch.Tensor, pyg_graph.edge_attr),
+        distance_m=distance_m,
+        node_ids=node_ids,
+    )
+
+
+def _build_survey_tensors(cfg: DataConfig, project_root: Path) -> SurveyTensors:
+    """Build the SurveyTensors from the (cached or rebuilt) ``SurveyData`` and survey Graph described by ``cfg``."""
+    survey = load_survey(cfg, project_root).with_filter("zone")
+    nodes_gdf, edges_gdf = load_graph(survey, cfg, project_root)
+
+    return build_tensors(survey, nodes_gdf, edges_gdf)

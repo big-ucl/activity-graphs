@@ -35,57 +35,12 @@ def check_schema[TDataFrame: (gpd.GeoDataFrame, pl.DataFrame), TSchema: (pl.Sche
         pl.DataFrame: the valid DataFrame
     """
     if isinstance(df, pl.DataFrame) and isinstance(schema, pl.Schema):
-        return check_polars_schema(df, schema, ignore_extra_cols=ignore_extra_cols)
+        return _check_polars_schema(df, schema, ignore_extra_cols=ignore_extra_cols)
 
     if (isinstance(df, gpd.GeoDataFrame) or isinstance(df, pd.DataFrame)) and isinstance(schema, dict):
-        return check_geopandas_schema(df, schema, ignore_extra_cols=ignore_extra_cols)
+        return _check_geopandas_schema(df, schema, ignore_extra_cols=ignore_extra_cols)
 
     raise ValueError(f"Invalid types: Got {type(df)=}, {type(schema)=}")
-
-
-def check_polars_schema(df: pl.DataFrame, schema: pl.Schema, ignore_extra_cols: bool) -> pl.DataFrame:
-    """Validate a Polars DataFrame against a ``pl.Schema``, raise ``ValueError`` on mismatch."""
-    df_items = set(df.schema.items())
-    schema_items = set(schema.items())
-
-    missing = schema_items - df_items
-    extra = df_items - schema_items
-
-    if missing or (extra and not ignore_extra_cols):
-        raise ValueError(
-            f"Schemas do not match:\nMissing elements: {missing}\n"
-            + (f"Extra elements: {extra}" if not ignore_extra_cols else "")
-        )
-
-    return df
-
-
-def check_geopandas_schema(gdf: gpd.GeoDataFrame, schema: PandasSchema, ignore_extra_cols: bool) -> gpd.GeoDataFrame:
-    """Validate a GeoPandas/Pandas DataFrame against a column-name -> dtype-string mapping."""
-
-    def dtypes_match(dtype: str, expected: str) -> bool:
-        return (dtype == "str" and expected == "object") or dtype == expected
-
-    if not ignore_extra_cols and set(schema.keys()) != set(gdf.columns):
-        raise ValueError(
-            f"Columns do not match schema. \nGot: {sorted(gdf.columns)}\nExpected: {sorted(schema.keys())}"
-        )
-
-    if ignore_extra_cols and not set(schema.keys()).issubset(set(gdf.columns)):
-        missing = set(schema.keys()).difference(set(gdf.columns))
-
-        raise ValueError(f"Columns do not match schema. \nGot: {sorted(schema.keys())}\nMissing columns: {missing}")
-
-    mismatches = [
-        (col, dtype, schema[col])
-        for col, dtype in gdf.dtypes.items()
-        if col in schema and not dtypes_match(dtype, schema[col])
-    ]
-    if mismatches:
-        errors = [f"\n\t`{col}`: got {dtype}, expected {expected}" for col, dtype, expected in mismatches]
-        raise ValueError("Invalid types: " + "".join(errors))
-
-    return gdf
 
 
 def check_geometry_shapes(geometry: gpd.GeoSeries, *shapes: str) -> gpd.GeoSeries:
@@ -204,3 +159,48 @@ def invert_mapping(mapping: dict[Hashable, list[Hashable]]) -> dict[Hashable, Ha
             inversion[v] = k
 
     return inversion
+
+
+def _check_polars_schema(df: pl.DataFrame, schema: pl.Schema, ignore_extra_cols: bool) -> pl.DataFrame:
+    """Validate a Polars DataFrame against a ``pl.Schema``, raise ``ValueError`` on mismatch."""
+    df_items = set(df.schema.items())
+    schema_items = set(schema.items())
+
+    missing = schema_items - df_items
+    extra = df_items - schema_items
+
+    if missing or (extra and not ignore_extra_cols):
+        raise ValueError(
+            f"Schemas do not match:\nMissing elements: {missing}\n"
+            + (f"Extra elements: {extra}" if not ignore_extra_cols else "")
+        )
+
+    return df
+
+
+def _check_geopandas_schema(gdf: gpd.GeoDataFrame, schema: PandasSchema, ignore_extra_cols: bool) -> gpd.GeoDataFrame:
+    """Validate a GeoPandas/Pandas DataFrame against a column-name -> dtype-string mapping."""
+
+    def dtypes_match(dtype: str, expected: str) -> bool:
+        return (dtype == "str" and expected == "object") or dtype == expected
+
+    if not ignore_extra_cols and set(schema.keys()) != set(gdf.columns):
+        raise ValueError(
+            f"Columns do not match schema. \nGot: {sorted(gdf.columns)}\nExpected: {sorted(schema.keys())}"
+        )
+
+    if ignore_extra_cols and not set(schema.keys()).issubset(set(gdf.columns)):
+        missing = set(schema.keys()).difference(set(gdf.columns))
+
+        raise ValueError(f"Columns do not match schema. \nGot: {sorted(schema.keys())}\nMissing columns: {missing}")
+
+    mismatches = [
+        (col, dtype, schema[col])
+        for col, dtype in gdf.dtypes.items()
+        if col in schema and not dtypes_match(dtype, schema[col])
+    ]
+    if mismatches:
+        errors = [f"\n\t`{col}`: got {dtype}, expected {expected}" for col, dtype, expected in mismatches]
+        raise ValueError("Invalid types: " + "".join(errors))
+
+    return gdf

@@ -4,9 +4,9 @@ import polars as pl
 import pytest
 import torch
 
-from activitygraphs.models.schema_encoder import SchemaEncoder, default_emb_dim
+from activitygraphs.models.schema_encoder import SchemaEncoder, _default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
-from activitygraphs.tensors.build import encode_categories
+from activitygraphs.tensors.build import _encode_categories
 
 INCOME_BAND = ColumnSpec("income_band", ColumnKind.CATEGORICAL, ("low", "mid", "high"))
 VEHICLES = ColumnSpec("hh_num_vehicles", ColumnKind.CATEGORICAL, ("0", "1", "2"))
@@ -28,31 +28,31 @@ class TestEncodeCategories:
     def test_a_category_gets_its_position_plus_one(self):
         values = pl.Series(["high", "low", "mid", "low"])
 
-        assert encode_categories(values, INCOME_BAND).tolist() == [3, 1, 2, 1]
+        assert _encode_categories(values, INCOME_BAND).tolist() == [3, 1, 2, 1]
 
     def test_missing_and_unknown_values_get_code_zero(self):
         values = pl.Series(["mid", None, "very high"])
 
-        assert encode_categories(values, INCOME_BAND).tolist() == [2, 0, 0]
+        assert _encode_categories(values, INCOME_BAND).tolist() == [2, 0, 0]
 
     def test_integer_values_match_their_string_categories(self):
         values = pl.Series([2, 0, None, 7], dtype=pl.Int64)
 
-        assert encode_categories(values, VEHICLES).tolist() == [3, 1, 0, 0]
+        assert _encode_categories(values, VEHICLES).tolist() == [3, 1, 0, 0]
 
     def test_codes_are_int64(self):
-        assert encode_categories(pl.Series(["low"]), INCOME_BAND).dtype == torch.long
+        assert _encode_categories(pl.Series(["low"]), INCOME_BAND).dtype == torch.long
 
 
 class TestSchemaEncoder:
     @pytest.mark.parametrize(("cardinality", "width"), [(2, 1), (4, 2), (11, 6), (31, 16), (100, 16)])
     def test_default_embedding_width(self, cardinality, width):
-        assert default_emb_dim(cardinality) == width
+        assert _default_emb_dim(cardinality) == width
 
     def test_out_dim_is_the_numeric_columns_plus_the_embedding_widths(self):
         encoder = SchemaEncoder(mixed_schema())
 
-        assert encoder.out_dim == 2 + default_emb_dim(4) + default_emb_dim(4)
+        assert encoder.out_dim == 2 + _default_emb_dim(4) + _default_emb_dim(4)
 
     def test_numeric_columns_come_first_unchanged_then_one_embedding_per_categorical_column(self):
         encoder = SchemaEncoder(mixed_schema(), emb_dim=lambda cardinality: 3)

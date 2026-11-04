@@ -22,21 +22,6 @@ N_DISTANCE_BINS = 20
 BIN_PSEUDOCOUNT = 0.5
 
 
-def clamp_distances(distance_m: torch.Tensor) -> torch.Tensor:
-    """Return the distances in metres clamped below at ``MIN_DISTANCE_M``, shaped like ``distance_m``."""
-    return distance_m.float().clamp(min=MIN_DISTANCE_M)
-
-
-def extract_home_distances(batch: UserBatch) -> torch.Tensor:
-    """Return the clamped distance in metres from home of every node for every user, ``[num_users, num_nodes]``."""
-    return clamp_distances(batch.home_distance_m)
-
-
-def expand_node_indices(batch: UserBatch) -> torch.Tensor:
-    """Return the index of every node for every user, ``[num_users, num_nodes]``."""
-    return torch.arange(batch.num_nodes, device=batch.visited.device).expand(batch.num_users, -1)
-
-
 class DistanceDecayBaseline(FittedScorer):
     """Nearest first: scores each node by ``-log(d)``, with ``d`` its distance from home in metres.
 
@@ -45,7 +30,7 @@ class DistanceDecayBaseline(FittedScorer):
 
     def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
         """Return minus the log distance from home of every node for every user, ``[num_users, num_nodes]``."""
-        return -extract_home_distances(batch).log()
+        return -_extract_home_distances(batch).log()
 
 
 class GravityBaseline(FittedScorer):
@@ -83,7 +68,7 @@ class GravityBaseline(FittedScorer):
         pairs = non_home_mask(train)
         labels = train.visited[pairs].float()
         offset = self.popularity_logit.expand_as(train.visited)[pairs]
-        distance = clamp_distances(locations.distance_m[train.home_node])[pairs]
+        distance = _clamp_distances(locations.distance_m[train.home_node])[pairs]
 
         self.d0 = float(distance[labels > 0.5].median())
         relative = distance / self.d0
@@ -113,7 +98,7 @@ class GravityBaseline(FittedScorer):
 
     def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
         """Return the gravity logit of every node for every user, ``[num_users, num_nodes]``."""
-        return self.pair_logits(expand_node_indices(batch), extract_home_distances(batch))
+        return self.pair_logits(_expand_node_indices(batch), _extract_home_distances(batch))
 
 
 class GravityBinnedBaseline(FittedScorer):
@@ -148,7 +133,7 @@ class GravityBinnedBaseline(FittedScorer):
         pairs = non_home_mask(train)
         visited = train.visited[pairs] > 0.5
         expected = popularity.expand_as(train.visited)[pairs]
-        distance = clamp_distances(locations.distance_m[train.home_node])[pairs]
+        distance = _clamp_distances(locations.distance_m[train.home_node])[pairs]
 
         quantiles = torch.linspace(0, 1, self.n_bins + 1)[1:-1]
         self.edges = torch.quantile(distance[visited], quantiles)
@@ -163,7 +148,7 @@ class GravityBinnedBaseline(FittedScorer):
     def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
         """Return the binned-gravity logit of every node for every user, ``[num_users, num_nodes]``."""
         device = batch.visited.device
-        bins = torch.bucketize(extract_home_distances(batch), self.edges.to(device))
+        bins = torch.bucketize(_extract_home_distances(batch), self.edges.to(device))
         popularity = self.log_popularity.to(device)
 
         return popularity + self.log_deterrence.to(device)[bins]
@@ -197,7 +182,7 @@ class ConditionalGravityBaseline(FittedScorer):
         self.counts, self.users = home_visit_counts(train.visited, train.home_node)
 
         node_idx = torch.arange(val.visited.shape[1]).expand_as(val.visited)
-        val_distance = clamp_distances(locations.distance_m[val.home_node])
+        val_distance = _clamp_distances(locations.distance_m[val.home_node])
         val_prior = self.gravity.pair_logits(node_idx, val_distance).sigmoid()
 
         self.strength = fit_smoothing_strength(self.counts, self.users, val, val_prior)
@@ -214,3 +199,18 @@ class ConditionalGravityBaseline(FittedScorer):
         rate = smoothed_rate(counts, self.users.to(device)[homes], prior, self.strength)
 
         return torch.logit(rate)
+
+
+def _clamp_distances(distance_m: torch.Tensor) -> torch.Tensor:
+    """Return the distances in metres clamped below at ``MIN_DISTANCE_M``, shaped like ``distance_m``."""
+    return distance_m.float().clamp(min=MIN_DISTANCE_M)
+
+
+def _extract_home_distances(batch: UserBatch) -> torch.Tensor:
+    """Return the clamped distance in metres from home of every node for every user, ``[num_users, num_nodes]``."""
+    return _clamp_distances(batch.home_distance_m)
+
+
+def _expand_node_indices(batch: UserBatch) -> torch.Tensor:
+    """Return the index of every node for every user, ``[num_users, num_nodes]``."""
+    return torch.arange(batch.num_nodes, device=batch.visited.device).expand(batch.num_users, -1)

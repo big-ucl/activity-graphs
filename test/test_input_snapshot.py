@@ -26,7 +26,7 @@ from activitygraphs.config import HomePEConfig
 from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, UserDataset, Users, datamodule
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.models.features import InputFeatures, build_feature_encoder
-from activitygraphs.models.schema_encoder import default_emb_dim
+from activitygraphs.models.schema_encoder import _default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
 from activitygraphs.surveys.cmap import CMAPSurvey
 from activitygraphs.surveys.demographics import (
@@ -45,7 +45,7 @@ from activitygraphs.tensors import (
     save_tensors,
     tensors_path,
 )
-from activitygraphs.tensors.build import build_location_tensors
+from activitygraphs.tensors.build import _build_location_tensors
 from activitygraphs.tensors.bundles import UserFile
 from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR
 from activitygraphs.utils import add_lon_lat_from_centroid
@@ -354,7 +354,7 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     encoder = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)
     embedded_width = 0
     for spec in categorical.columns:
-        embedded_width += default_emb_dim(spec.cardinality)
+        embedded_width += _default_emb_dim(spec.cardinality)
 
     assert None in employment
     assert categorical.names == [
@@ -396,7 +396,7 @@ def test_a_graph_without_an_edge_index_raises():
     graph = pyg.data.Data(x=locations.x, edge_attr=locations.edge_attr)
 
     with pytest.raises(ValueError, match="no edge index"):
-        build_location_tensors(graph, locations.distance_m, locations.node_ids)
+        _build_location_tensors(graph, locations.distance_m, locations.node_ids)
 
 
 def test_tensors_that_disagree_on_the_number_of_users_raise():
@@ -436,8 +436,8 @@ def test_prepare_splits_loads_the_tensors_only_while_a_cache_is_stale(tmp_path, 
     monkeypatch.setattr(datamodule, "load_tensors", counting_load_tensors)
     split = HouseholdSplit(val_size=0.2, test_size=0.2)
 
-    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
-    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+    datamodule._prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+    datamodule._prepare_splits(cfg, split, seed=42, project_root=tmp_path)
 
     assert len(loads) == 1
 
@@ -448,11 +448,11 @@ def test_prepare_splits_rebuilds_a_cache_missing_a_tensor_file(tmp_path, compose
     cache_survey_tensors("cmap", root)
     monkeypatch.setattr(datamodule, "load_tensors", lambda *args, **kwargs: cache_survey_tensors("cmap", root))
     split = HouseholdSplit(val_size=0.2, test_size=0.2)
-    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+    datamodule._prepare_splits(cfg, split, seed=42, project_root=tmp_path)
 
     missing = root / USERS_DIR / UserFile.ATTRIBUTES_CAT
     missing.unlink()
-    datamodule.prepare_splits(cfg, split, seed=42, project_root=tmp_path)
+    datamodule._prepare_splits(cfg, split, seed=42, project_root=tmp_path)
 
     assert missing.exists()
 

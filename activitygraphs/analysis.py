@@ -115,7 +115,21 @@ def read_home_distances(run_path: str | Path) -> pl.DataFrame:
     return distances.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
 
 
-def with_ranking_metrics(per_user_results: pl.DataFrame, budget: int) -> pl.DataFrame:
+def read_report_run(run_path: str | Path, max_recall_k: int) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Read a run for reporting, with the aggregate results and the per-user ``avg_recall``.
+
+    Args:
+        run_path: The run directory, e.g. from ``runs.run_dir``.
+        max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
+
+    Returns:
+        Tuple ``(aggregate_results, per_user_results)``.
+    """
+    aggregate, per_user = read_run(run_path)
+    return aggregate, _with_ranking_metrics(per_user, max_recall_k)
+
+
+def _with_ranking_metrics(per_user_results: pl.DataFrame, budget: int) -> pl.DataFrame:
     """Add the per-user ``avg_recall`` and per-positive ``pos_avg_recall`` columns, derived from the stored rank counts.
 
     Args:
@@ -151,20 +165,6 @@ def _positive_average_recall(positives: pl.DataFrame, budget: int) -> pl.Series:
         average_recall(positives[N_SCORED_HIGHER_COLUMN].to_numpy(), positives[N_TIED_COLUMN].to_numpy(), budget),
         dtype=pl.Float64,
     )
-
-
-def read_report_run(run_path: str | Path, max_recall_k: int) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Read a run for reporting, with the aggregate results and the per-user ``avg_recall``.
-
-    Args:
-        run_path: The run directory, e.g. from ``runs.run_dir``.
-        max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
-
-    Returns:
-        Tuple ``(aggregate_results, per_user_results)``.
-    """
-    aggregate, per_user = read_run(run_path)
-    return aggregate, with_ranking_metrics(per_user, max_recall_k)
 
 
 # =========================================
@@ -251,7 +251,7 @@ def paired_comparison(
     return pl.DataFrame(rows).sort("mean_diff", descending=True)
 
 
-def _restrict_to_realised_size(per_user_results: pl.DataFrame, min_size: int) -> pl.DataFrame:
+def restrict_to_realised_size(per_user_results: pl.DataFrame, min_size: int) -> pl.DataFrame:
     """Keep only the test users whose realised set (incl. home node) has at least ``min_size`` nodes.
 
     Rows that are not per-user rows (the aggregate and score-vector stages) are not affected.
@@ -262,7 +262,7 @@ def _restrict_to_realised_size(per_user_results: pl.DataFrame, min_size: int) ->
     return per_user_results.filter(is_aggregate_stage | is_realised_size_large_enough)
 
 
-def _num_scored_dropped_users(aggregate_results: pl.DataFrame) -> tuple[int, int]:
+def num_scored_dropped_users(aggregate_results: pl.DataFrame) -> tuple[int, int]:
     """Number of test users that were scored and dropped."""
     return (
         int(cast(int, aggregate_results[SCORED_USERS_COLUMN].drop_nulls().first())),
@@ -466,58 +466,6 @@ def check_overfit_health(aggregate_results: pl.DataFrame, budget: int) -> pl.Dat
     )
 
 
-def check_user_invariance(scores: np.ndarray, max_users: int = 200, seed: int = 0) -> float:
-    """Check if the model gives users different scores or not.
-
-    Computes the pairwise Spearman correlation between test users' score vectors.
-
-    If ~1.0, then the model ranks every user identically: collapsed to a single global ordering and is ignoring
-    ``is_home``/distance/demographics. Computes at most ``max_users`` pairs, sampled from the test set.
-    """
-    if len(scores) < 2:
-        return float("nan")
-
-    if len(scores) > max_users:
-        rng = np.random.default_rng(seed)
-        scores = scores[rng.choice(len(scores), size=max_users, replace=False)]
-
-    unit_ranks = _row_ranks(scores)
-    correlations = unit_ranks @ unit_ranks.T
-
-    return float(np.median(correlations[np.triu_indices(len(scores), k=1)]))
-
-
-def check_popularity_correlation(scores: np.ndarray, popularity: np.ndarray) -> float:
-    """Check if the models are just learning the global/per-home-zone popularity or extract signal beyond it.
-
-    Computes the Spearman between the user-averaged score vector and the training set popularity ranking.
-
-    If ~1.0, then the model outputs the popularity marginal. Can work for ``logit(p_n)`` or the scores from
-    VisitFrequency since the two are monotonic transformations of the popularities.
-    """
-    if len(scores) == 0:
-        return float("nan")
-
-    unit_ranks = _row_ranks(np.stack([scores.mean(axis=0), popularity]))
-
-    return float(unit_ranks[0] @ unit_ranks[1])
-
-
-def check_home_node_rank(scores: np.ndarray, home_nodes: np.ndarray) -> tuple[float, float]:
-    """Check if the model ranks each user's home node at the top.
-
-    Returns:
-        ``(share of users whose home node ranks first, median home-node rank)``.
-    """
-    if len(scores) == 0:
-        return float("nan"), float("nan")
-
-    home_scores = scores[np.arange(len(scores)), home_nodes][:, None]
-    ranks = 1 + (scores > home_scores).sum(axis=1)
-
-    return float((ranks == 1).mean()), float(np.median(ranks))
-
-
 def check_model_health(
     score_vectors: pl.DataFrame,
     per_user_results: pl.DataFrame,
@@ -560,9 +508,9 @@ def check_model_health(
 
         home_nodes = users.join(home_by_user, on="user_idx", how="left")["home_node"].to_numpy()
 
-        user_invariance = check_user_invariance(scores, max_users, seed)
-        popularity_corr = check_popularity_correlation(scores, popularity_rows[0])
-        home_is_top1, home_median_rank = check_home_node_rank(scores, home_nodes)
+        user_invariance = _check_user_invariance(scores, max_users, seed)
+        popularity_corr = _check_popularity_correlation(scores, popularity_rows[0])
+        home_is_top1, home_median_rank = _check_home_node_rank(scores, home_nodes)
 
         rows.append({
             "name": name,
@@ -586,6 +534,58 @@ def check_model_health(
         )
         .sort("user_invariance", "name", descending=[True, False])
     )
+
+
+def _check_user_invariance(scores: np.ndarray, max_users: int = 200, seed: int = 0) -> float:
+    """Check if the model gives users different scores or not.
+
+    Computes the pairwise Spearman correlation between test users' score vectors.
+
+    If ~1.0, then the model ranks every user identically: collapsed to a single global ordering and is ignoring
+    ``is_home``/distance/demographics. Computes at most ``max_users`` pairs, sampled from the test set.
+    """
+    if len(scores) < 2:
+        return float("nan")
+
+    if len(scores) > max_users:
+        rng = np.random.default_rng(seed)
+        scores = scores[rng.choice(len(scores), size=max_users, replace=False)]
+
+    unit_ranks = _row_ranks(scores)
+    correlations = unit_ranks @ unit_ranks.T
+
+    return float(np.median(correlations[np.triu_indices(len(scores), k=1)]))
+
+
+def _check_popularity_correlation(scores: np.ndarray, popularity: np.ndarray) -> float:
+    """Check if the models are just learning the global/per-home-zone popularity or extract signal beyond it.
+
+    Computes the Spearman between the user-averaged score vector and the training set popularity ranking.
+
+    If ~1.0, then the model outputs the popularity marginal. Can work for ``logit(p_n)`` or the scores from
+    VisitFrequency since the two are monotonic transformations of the popularities.
+    """
+    if len(scores) == 0:
+        return float("nan")
+
+    unit_ranks = _row_ranks(np.stack([scores.mean(axis=0), popularity]))
+
+    return float(unit_ranks[0] @ unit_ranks[1])
+
+
+def _check_home_node_rank(scores: np.ndarray, home_nodes: np.ndarray) -> tuple[float, float]:
+    """Check if the model ranks each user's home node at the top.
+
+    Returns:
+        ``(share of users whose home node ranks first, median home-node rank)``.
+    """
+    if len(scores) == 0:
+        return float("nan"), float("nan")
+
+    home_scores = scores[np.arange(len(scores)), home_nodes][:, None]
+    ranks = 1 + (scores > home_scores).sum(axis=1)
+
+    return float((ranks == 1).mean()), float(np.median(ranks))
 
 
 def _score_matrix(score_vectors: pl.DataFrame, name: str, seed: int | None) -> np.ndarray:
@@ -615,6 +615,64 @@ def _row_ranks(scores: np.ndarray) -> np.ndarray:
 # =========================================
 
 
+def band_decomposition(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
+    """Per-user ``metric`` split by the hop band of each positive, mean +- sd over training seeds.
+
+    Returns:
+        Frame of ``name, band, n_seeds, mean, sd, n_pos, share_of_metric, share_of_pos``, ordered by band then mean
+        (descending). ``share_of_metric`` is the band's fraction of the model's summed band means, ``share_of_pos`` its
+        fraction of the positives.
+    """
+    seed_means = (
+        _band_contributions(per_user_results, metric)
+        .group_by("name", "seed", "band")
+        .agg(seed_mean=pl.col("contribution").mean(), n_pos=pl.col("n_band_pos").sum())
+    )
+    band_to_ordinal = {band: _extract_band_lower_bound(band) for band in seed_means["band"].unique()}
+
+    return (
+        seed_means
+        .group_by("name", "band")
+        .agg(
+            n_seeds=pl.len(),
+            mean=pl.col("seed_mean").mean(),
+            sd=pl.col("seed_mean").std(),
+            n_pos=pl.col("n_pos").mean(),
+        )
+        .with_columns(
+            share_of_metric=pl.col("mean") / pl.col("mean").sum().over("name"),
+            share_of_pos=pl.col("n_pos") / pl.col("n_pos").sum().over("name"),
+        )
+        .sort(pl.col("band").replace_strict(band_to_ordinal), "mean", descending=[False, True])
+    )
+
+
+def paired_comparison_by_band(
+    per_user_results: pl.DataFrame,
+    reference_model: str,
+    metric: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` run on each hop band's contribution to the per-user ``metric``.
+
+    Returns:
+        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
+        ``mean_diff`` (descending).
+    """
+    contributions = _band_contributions(per_user_results, metric)
+    bands = sorted(contributions["band"].unique(), key=_extract_band_lower_bound)
+
+    comparisons = [
+        paired_comparison(
+            contributions.filter(pl.col("band") == band), reference_model, "contribution", n_bootstrap, seed
+        ).with_columns(band=pl.lit(band))
+        for band in bands
+    ]
+
+    return pl.concat(comparisons).select("band", pl.all().exclude("band"))
+
+
 def _extract_band_lower_bound(band: str) -> int:
     """Return the lower hop bound of a band label, e.g. ``3`` for ``"3-5"`` and ``13`` for ``"13+"``."""
     return int(band.partition("-")[0].partition("+")[0])
@@ -627,7 +685,7 @@ def _hop_band(hops: pl.Expr) -> pl.Expr:
     ])
 
 
-def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
+def _band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
     """Split each user's per-user ``metric`` into the contributions of the positives in each hop band.
 
     Args:
@@ -672,146 +730,9 @@ def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFr
     )
 
 
-def band_decomposition(per_user_results: pl.DataFrame, metric: str) -> pl.DataFrame:
-    """Per-user ``metric`` split by the hop band of each positive, mean +- sd over training seeds.
-
-    Returns:
-        Frame of ``name, band, n_seeds, mean, sd, n_pos, share_of_metric, share_of_pos``, ordered by band then mean
-        (descending). ``share_of_metric`` is the band's fraction of the model's summed band means, ``share_of_pos`` its
-        fraction of the positives.
-    """
-    seed_means = (
-        band_contributions(per_user_results, metric)
-        .group_by("name", "seed", "band")
-        .agg(seed_mean=pl.col("contribution").mean(), n_pos=pl.col("n_band_pos").sum())
-    )
-    band_to_ordinal = {band: _extract_band_lower_bound(band) for band in seed_means["band"].unique()}
-
-    return (
-        seed_means
-        .group_by("name", "band")
-        .agg(
-            n_seeds=pl.len(),
-            mean=pl.col("seed_mean").mean(),
-            sd=pl.col("seed_mean").std(),
-            n_pos=pl.col("n_pos").mean(),
-        )
-        .with_columns(
-            share_of_metric=pl.col("mean") / pl.col("mean").sum().over("name"),
-            share_of_pos=pl.col("n_pos") / pl.col("n_pos").sum().over("name"),
-        )
-        .sort(pl.col("band").replace_strict(band_to_ordinal), "mean", descending=[False, True])
-    )
-
-
-def paired_comparison_by_band(
-    per_user_results: pl.DataFrame,
-    reference_model: str,
-    metric: str,
-    n_bootstrap: int = 10_000,
-    seed: int = 0,
-) -> pl.DataFrame:
-    """``paired_comparison`` run on each hop band's contribution to the per-user ``metric``.
-
-    Returns:
-        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
-        ``mean_diff`` (descending).
-    """
-    contributions = band_contributions(per_user_results, metric)
-    bands = sorted(contributions["band"].unique(), key=_extract_band_lower_bound)
-
-    comparisons = [
-        paired_comparison(
-            contributions.filter(pl.col("band") == band), reference_model, "contribution", n_bootstrap, seed
-        ).with_columns(band=pl.lit(band))
-        for band in bands
-    ]
-
-    return pl.concat(comparisons).select("band", pl.all().exclude("band"))
-
-
 # =========================================
 # Distance band analysis
 # =========================================
-
-
-def _edge_label(edge: pl.Expr) -> pl.Expr:
-    """Return a band edge in km as a string, without the trailing zero of a whole number of km."""
-    return pl.when(edge == edge.round(0)).then(edge.cast(pl.Int64).cast(pl.String)).otherwise(edge.cast(pl.String))
-
-
-def _distance_band_label(lower: pl.Expr, upper: pl.Expr) -> pl.Expr:
-    """Return the label of the distance band with these edges in km, e.g. ``"1-2.5"`` or ``"10+"``."""
-    finite_upper = pl.when(upper.is_infinite()).then(lower).otherwise(upper)
-
-    return (
-        pl
-        .when(upper.is_infinite())
-        .then(_edge_label(lower) + pl.lit("+"))
-        .otherwise(_edge_label(lower) + pl.lit("-") + _edge_label(finite_upper))
-    )
-
-
-def distance_band_index(distances: np.ndarray, bands: Sequence[float]) -> np.ndarray:
-    """Return the band each distance falls in, as a position in ``bands``.
-
-    Args:
-        distances: Distances from home in metres, any shape.
-        bands: Upper band edges in km, each band holding the distances in ``[lower_edge, upper_edge)``.
-
-    Returns:
-        Integer array shaped like ``distances``.
-    """
-    return np.digitize(distances / METRES_PER_KM, np.asarray(bands, dtype=np.float64))
-
-
-def _band_edges(bands: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
-    """Return the lower and upper edge in km of every band, the last band's upper edge being ``inf``."""
-    edges = np.asarray(bands, dtype=np.float64)
-
-    return np.concatenate([[0.0], edges]), np.concatenate([edges, [np.inf]])
-
-
-def _per_positive_band_auc(
-    scores: np.ndarray, positives: Sequence[Sequence[int]], home_nodes: np.ndarray, band_index: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Score every positive of one model and seed against the unvisited nodes of its own band.
-
-    Args:
-        scores: Score of every node for every user, ``[n_users, n_nodes]``.
-        positives: Node indices of each user's positives, one sequence per user.
-        home_nodes: Home node of each user, ``[n_users]``.
-        band_index: Band of every node for every user, ``[n_users, n_nodes]``.
-
-    Returns:
-        ``(auc, n_negatives)``, each ``[n_positives]``, one entry per positive in user order.
-    """
-    scored = []
-
-    for start in range(0, len(scores), USER_CHUNK):
-        chunk = slice(start, start + USER_CHUNK)
-        chunk_scores = scores[chunk]
-
-        target = np.zeros(chunk_scores.shape, dtype=bool)
-        for user, user_positives in enumerate(positives[chunk]):
-            target[user, list(user_positives)] = True
-
-        valid = np.ones(chunk_scores.shape, dtype=bool)
-        valid[np.arange(len(chunk_scores)), home_nodes[chunk]] = False
-
-        scored.append(
-            positive_band_auc(
-                torch.from_numpy(chunk_scores),
-                torch.from_numpy(target),
-                torch.from_numpy(band_index[chunk]),
-                torch.from_numpy(valid),
-            )
-        )
-
-    return (
-        np.concatenate([auc.numpy() for auc, _ in scored]),
-        np.concatenate([n_negatives.numpy() for _, n_negatives in scored]),
-    )
 
 
 def distance_band_recall(
@@ -843,7 +764,7 @@ def distance_band_recall(
         .select("name", "seed", "user_idx", "n_pos", PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
         .explode(PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
     )
-    band_index = distance_band_index(positives["pos_distance"].to_numpy().astype(np.float64), bands)
+    band_index = _distance_band_index(positives["pos_distance"].to_numpy().astype(np.float64), bands)
 
     return (
         positives
@@ -905,7 +826,86 @@ def distance_band_recall_table(band_recall: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def within_band_auc(
+def _edge_label(edge: pl.Expr) -> pl.Expr:
+    """Return a band edge in km as a string, without the trailing zero of a whole number of km."""
+    return pl.when(edge == edge.round(0)).then(edge.cast(pl.Int64).cast(pl.String)).otherwise(edge.cast(pl.String))
+
+
+def _distance_band_label(lower: pl.Expr, upper: pl.Expr) -> pl.Expr:
+    """Return the label of the distance band with these edges in km, e.g. ``"1-2.5"`` or ``"10+"``."""
+    finite_upper = pl.when(upper.is_infinite()).then(lower).otherwise(upper)
+
+    return (
+        pl
+        .when(upper.is_infinite())
+        .then(_edge_label(lower) + pl.lit("+"))
+        .otherwise(_edge_label(lower) + pl.lit("-") + _edge_label(finite_upper))
+    )
+
+
+def _distance_band_index(distances: np.ndarray, bands: Sequence[float]) -> np.ndarray:
+    """Return the band each distance falls in, as a position in ``bands``.
+
+    Args:
+        distances: Distances from home in metres, any shape.
+        bands: Upper band edges in km, each band holding the distances in ``[lower_edge, upper_edge)``.
+
+    Returns:
+        Integer array shaped like ``distances``.
+    """
+    return np.digitize(distances / METRES_PER_KM, np.asarray(bands, dtype=np.float64))
+
+
+def _band_edges(bands: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+    """Return the lower and upper edge in km of every band, the last band's upper edge being ``inf``."""
+    edges = np.asarray(bands, dtype=np.float64)
+
+    return np.concatenate([[0.0], edges]), np.concatenate([edges, [np.inf]])
+
+
+def _per_positive_band_auc(
+    scores: np.ndarray, positives: Sequence[Sequence[int]], home_nodes: np.ndarray, band_index: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score every positive of one model and seed against the unvisited nodes of its own band.
+
+    Args:
+        scores: Score of every node for every user, ``[n_users, n_nodes]``.
+        positives: Node indices of each user's positives, one sequence per user.
+        home_nodes: Home node of each user, ``[n_users]``.
+        band_index: Band of every node for every user, ``[n_users, n_nodes]``.
+
+    Returns:
+        ``(auc, n_negatives)``, each ``[n_positives]``, one entry per positive in user order.
+    """
+    scored = []
+
+    for start in range(0, len(scores), USER_CHUNK):
+        chunk = slice(start, start + USER_CHUNK)
+        chunk_scores = scores[chunk]
+
+        target = np.zeros(chunk_scores.shape, dtype=bool)
+        for user, user_positives in enumerate(positives[chunk]):
+            target[user, list(user_positives)] = True
+
+        valid = np.ones(chunk_scores.shape, dtype=bool)
+        valid[np.arange(len(chunk_scores)), home_nodes[chunk]] = False
+
+        scored.append(
+            positive_band_auc(
+                torch.from_numpy(chunk_scores),
+                torch.from_numpy(target),
+                torch.from_numpy(band_index[chunk]),
+                torch.from_numpy(valid),
+            )
+        )
+
+    return (
+        np.concatenate([auc.numpy() for auc, _ in scored]),
+        np.concatenate([n_negatives.numpy() for _, n_negatives in scored]),
+    )
+
+
+def _within_band_auc(
     per_user_results: pl.DataFrame,
     score_vectors: pl.DataFrame,
     home_distances: pl.DataFrame,
@@ -934,7 +934,7 @@ def within_band_auc(
             _model_seed_rows(score_vectors, name, seed).select("user_idx", "scores"), on="user_idx"
         )
         user_indices = model_rows["user_idx"].to_list()
-        band_index = distance_band_index(
+        band_index = _distance_band_index(
             np.asarray([distance_by_user[user] for user in user_indices], dtype=np.float64), bands
         )
         positives = model_rows[PER_POSITIVE_NODE_COLUMN].to_list()
@@ -980,11 +980,11 @@ def _model_seed_rows(results: pl.DataFrame, name: str, seed: int | None) -> pl.D
     return rows.filter(pl.col("seed").is_null() if seed is None else pl.col("seed") == seed)
 
 
-def within_band_auc_table(band_auc: pl.DataFrame) -> pl.DataFrame:
+def _within_band_auc_table(band_auc: pl.DataFrame) -> pl.DataFrame:
     """Within-band AUC of each model in each distance band, mean +- sd over training seeds.
 
     Args:
-        band_auc: Per-user within-band AUC from ``within_band_auc``.
+        band_auc: Per-user within-band AUC from ``_within_band_auc``.
 
     Returns:
         Frame of ``band, name, n_seeds, mean, sd, n_users, n_pos, n_unvisited``, ordered by band then ``mean``
@@ -1014,7 +1014,7 @@ def within_band_auc_table(band_auc: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def paired_within_band_auc(
+def _paired_within_band_auc(
     band_auc: pl.DataFrame,
     reference_model: str,
     n_bootstrap: int = 10_000,
@@ -1023,7 +1023,7 @@ def paired_within_band_auc(
     """``paired_comparison`` run on each distance band's within-band AUC.
 
     Args:
-        band_auc: Per-user within-band AUC from ``within_band_auc``.
+        band_auc: Per-user within-band AUC from ``_within_band_auc``.
         reference_model: Model every other model is compared against.
         n_bootstrap: Bootstrap resamples behind the confidence interval.
         seed: Seed of the bootstrap.
@@ -1035,7 +1035,7 @@ def paired_within_band_auc(
     return _paired_by_distance_band(band_auc, reference_model, "auc", n_bootstrap, seed)
 
 
-def paired_distance_band_recall(
+def _paired_distance_band_recall(
     band_recall: pl.DataFrame,
     reference_model: str,
     n_bootstrap: int = 10_000,
@@ -1257,7 +1257,7 @@ def print_report(
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
     aggregate, per_user = read_report_run(run_path, max_recall_k)
 
-    n_scored, n_dropped = _num_scored_dropped_users(aggregate)
+    n_scored, n_dropped = num_scored_dropped_users(aggregate)
     metric = analysis.per_user_metric
     reference = analysis.reference_model
     ks = analysis.recall_curve_ks
@@ -1282,7 +1282,7 @@ def print_report(
         print(paired_comparison(per_user, reference, metric))
 
         min_size = analysis.min_realised_size
-        restricted = _restrict_to_realised_size(per_user, min_size)
+        restricted = restrict_to_realised_size(per_user, min_size)
 
         print("\n-- test users by |RG_i| --")
         print(realised_size_summary(per_user, n_dropped))
@@ -1305,7 +1305,7 @@ def print_report(
         print(distance_band_recall_table(by_distance))
 
         print(f"\n-- paired per-user {metric} by distance band of each positive, vs {reference} --")
-        print(paired_distance_band_recall(by_distance, reference))
+        print(_paired_distance_band_recall(by_distance, reference))
 
         print("\n-- home coverage of test users --")
         print(home_coverage_summary(per_user))
@@ -1316,13 +1316,13 @@ def print_report(
         if (run_path / SCORES_FILE).exists():
             scores = read_score_vectors(run_path)
             home_distances = read_home_distances(run_path)
-            band_auc = within_band_auc(per_user, scores, home_distances, distance_bands)
+            band_auc = _within_band_auc(per_user, scores, home_distances, distance_bands)
 
             print(f"\n-- AUC within each positive's distance band, edges {distance_bands} km, avg over seeds --")
-            print(within_band_auc_table(band_auc))
+            print(_within_band_auc_table(band_auc))
 
             print(f"\n-- paired AUC within each positive's distance band, vs {reference} --")
-            print(paired_within_band_auc(band_auc, reference))
+            print(_paired_within_band_auc(band_auc, reference))
 
             print("\n-- model health checks --")
             print(check_model_health(scores, per_user, POPULARITY_MODEL))

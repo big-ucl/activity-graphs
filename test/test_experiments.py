@@ -17,18 +17,18 @@ from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTO
 from activitygraphs.config import Config, HomePEConfig, read_config
 from activitygraphs.experiments import runners
 from activitygraphs.experiments.results import (
+    _drop_empty_columns,
     create_output_dir,
-    drop_empty_columns,
     run_config,
     save_config,
     save_results,
 )
-from activitygraphs.experiments.runners import run_variants
+from activitygraphs.experiments.runners import _run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
-from activitygraphs.experiments.training import WandBParams, build_callbacks
+from activitygraphs.experiments.training import WandBParams, _build_callbacks
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.main import EXPERIMENTS
-from activitygraphs.models.architectures import BUILDERS, build_scorer, lookup_architecture
+from activitygraphs.models.architectures import BUILDERS, _lookup_architecture, build_scorer
 from activitygraphs.models.baselines import HomeZoneMFBaseline
 from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
@@ -102,7 +102,7 @@ def record_training(monkeypatch, frame=None) -> list[dict]:
 
 
 def make_score_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
-    """Two score-vector rows, as ``score_vector_frame`` returns them."""
+    """Two score-vector rows, as ``_score_vector_frame`` returns them."""
     return pl.DataFrame({
         "user_idx": [7, 9],
         "scores": [[0.1, 0.9, 0.4], [0.7, 0.2, 0.5]],
@@ -283,7 +283,7 @@ class TestArchitectureRegistry:
         model = with_overrides(cfg.models.mlp, {"architecture": "unknown"})
 
         with pytest.raises(KeyError, match="unknown"):
-            lookup_architecture(model)
+            _lookup_architecture(model)
 
 
 class TestRunVariants:
@@ -292,14 +292,14 @@ class TestRunVariants:
 
     def test_trains_every_variant_once_per_seed(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        frames = run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
+        frames = _run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
 
         assert len(frames) == 4
         assert [call["variant"].name for call in calls] == ["MLP", "GATv2-8-dist", "MLP", "GATv2-8-dist"]
 
     def test_tags_each_frame_with_its_training_seed(self, cfg, monkeypatch):
         record_training(monkeypatch)
-        seeds = pl.concat(run_variants(make_setup(cfg, [1, 2]), self._variants(cfg)))["seed"].to_list()
+        seeds = pl.concat(_run_variants(make_setup(cfg, [1, 2]), self._variants(cfg)))["seed"].to_list()
 
         assert seeds == [1, 1, 2, 2]
 
@@ -312,26 +312,26 @@ class TestRunVariants:
             return built[-1]
 
         monkeypatch.setattr(runners, "build_scorer", build)
-        run_variants(make_setup(cfg, [1, 2]), [Variant(cfg.models.mlp)])
+        _run_variants(make_setup(cfg, [1, 2]), [Variant(cfg.models.mlp)])
 
         assert len(built) == 2
         assert built[0] is not built[1]
 
     def test_run_tag_separates_checkpoints_across_seeds(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
 
         assert [call["run_tag"] for call in calls] == ["seed1", "seed1", "seed2", "seed2"]
 
     def test_no_run_tag_for_a_single_seed(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        run_variants(make_setup(cfg, [42]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [42]), self._variants(cfg))
 
         assert [call["run_tag"] for call in calls] == [None, None]
 
     def test_forwards_each_variant(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        run_variants(make_setup(cfg, [42]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [42]), self._variants(cfg))
 
         assert [call["variant"] for call in calls] == self._variants(cfg)
 
@@ -348,12 +348,12 @@ class TestDropEmptyColumns:
     def test_drops_all_null_columns_only(self):
         df = pl.DataFrame({"kept": [1, None], "dropped": [None, None]})
 
-        assert drop_empty_columns(df).columns == ["kept"]
+        assert _drop_empty_columns(df).columns == ["kept"]
 
     def test_empty_frame_is_returned_unchanged(self):
         df = pl.DataFrame({"a": [], "b": []})
 
-        assert drop_empty_columns(df).columns == ["a", "b"]
+        assert _drop_empty_columns(df).columns == ["a", "b"]
 
 
 class TestDemographicsAblation:
@@ -465,7 +465,7 @@ class TestBuildCallbacks:
 
     def _early_stopping(self, cfg, **overrides) -> list[EarlyStopping]:
         run_cfg = cast(Config, OmegaConf.merge(cfg, overrides))
-        callbacks = build_callbacks(BCELoss, run_cfg, run_dir=None, run_name="MLP", debug=False)
+        callbacks = _build_callbacks(BCELoss, run_cfg, run_dir=None, run_name="MLP", debug=False)
 
         return [callback for callback in callbacks if isinstance(callback, EarlyStopping)]
 

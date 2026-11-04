@@ -49,7 +49,34 @@ class NetworkSizes:
     edge_dim: int
 
 
-def build_mlp(config: MLPConfig, sizes: NetworkSizes) -> NodeMLP:
+NORMS: dict[str, Callable[[int], torch.nn.Module]] = {
+    "layer_norm": torch.nn.LayerNorm,
+    "batch_norm": torch.nn.BatchNorm1d,
+}
+
+
+def build_scorer(
+    config: ModelConfig,
+    features: InputFeatures,
+    locations: Locations,
+    schema: DatasetSchema,
+    home_pe_cfg: HomePEConfig,
+) -> Scorer:
+    """Instantiate the scorer of the architecture ``config``, with the input ``features``.
+
+    Args:
+        config: The architecture, its optimiser settings and its hyperparameters, from ``cfg.models``.
+        features: The input features the scorer is trained with.
+        locations: The location graph the scorer is trained on.
+        schema: The column schema of each tensor group.
+        home_pe_cfg: Settings of the home-anchored positional encoding, read when ``features.use_home_pe`` is set.
+    """
+    build = _lookup_architecture(config)
+
+    return build(config, features, locations, schema, home_pe_cfg)
+
+
+def _build_mlp(config: MLPConfig, sizes: NetworkSizes) -> NodeMLP:
     """Instantiate a ``NodeMLP`` from ``config``, sized by ``sizes``."""
     return NodeMLP(
         num_layers=config.num_layers,
@@ -60,13 +87,7 @@ def build_mlp(config: MLPConfig, sizes: NetworkSizes) -> NodeMLP:
     )
 
 
-NORMS: dict[str, Callable[[int], torch.nn.Module]] = {
-    "layer_norm": torch.nn.LayerNorm,
-    "batch_norm": torch.nn.BatchNorm1d,
-}
-
-
-def build_gat(config: GATConfig, sizes: NetworkSizes) -> GAT:
+def _build_gat(config: GATConfig, sizes: NetworkSizes) -> GAT:
     """Instantiate a ``GAT`` from ``config``, sized by ``sizes``.
 
     Raises:
@@ -89,7 +110,7 @@ def build_gat(config: GATConfig, sizes: NetworkSizes) -> GAT:
     )
 
 
-def build_gps(config: GPSConfig, sizes: NetworkSizes) -> GraphTransformer:
+def _build_gps(config: GPSConfig, sizes: NetworkSizes) -> GraphTransformer:
     """Instantiate a ``GraphTransformer`` (GPS) from ``config``, sized by ``sizes``."""
     return GraphTransformer(
         in_channels=sizes.in_channels,
@@ -102,7 +123,7 @@ def build_gps(config: GPSConfig, sizes: NetworkSizes) -> GraphTransformer:
     )
 
 
-def encoded_scorer(
+def _encoded_scorer(
     build_network_fn: Callable[..., torch.nn.Module],
     scorer_cls: type[EncodedScorer],
 ) -> ScorerBuilder:
@@ -137,7 +158,7 @@ def encoded_scorer(
     return build
 
 
-def build_home_zone_mf(
+def _build_home_zone_mf(
     config: ModelConfig,
     features: InputFeatures,
     locations: Locations,
@@ -157,7 +178,7 @@ def build_home_zone_mf(
     return HomeZoneMFBaseline(locations.num_nodes, home_zone_mf.n_factors)
 
 
-def build_two_tower(
+def _build_two_tower(
     config: ModelConfig,
     features: InputFeatures,
     locations: Locations,
@@ -193,7 +214,7 @@ def build_two_tower(
         out_channels=embedding_dim,
         edge_dim=schema.edges.width,
     )
-    node_network = build_gat(two_tower, node_sizes)
+    node_network = _build_gat(two_tower, node_sizes)
     node_tower = NodeTower(node_network, num_rwpe_features, node_embedding)
 
     attributes = SchemaEncoder(schema.user_attributes) if features.use_demographics else None
@@ -216,16 +237,7 @@ def build_two_tower(
     return TwoTowerScorer(node_tower, user_tower, pair_encoder, pair_network, bias)
 
 
-BUILDERS: dict[str, ScorerBuilder] = {
-    "mlp": encoded_scorer(build_mlp, NodeScorer),
-    "gat": encoded_scorer(build_gat, GraphScorer),
-    "gps": encoded_scorer(build_gps, GraphScorer),
-    "home_zone_mf": build_home_zone_mf,
-    "two_tower": build_two_tower,
-}
-
-
-def lookup_architecture(config: ModelConfig) -> ScorerBuilder:
+def _lookup_architecture(config: ModelConfig) -> ScorerBuilder:
     """Return the scorer builder registered in ``BUILDERS`` under ``config.architecture``.
 
     Raises:
@@ -237,22 +249,10 @@ def lookup_architecture(config: ModelConfig) -> ScorerBuilder:
     return BUILDERS[config.architecture]
 
 
-def build_scorer(
-    config: ModelConfig,
-    features: InputFeatures,
-    locations: Locations,
-    schema: DatasetSchema,
-    home_pe_cfg: HomePEConfig,
-) -> Scorer:
-    """Instantiate the scorer of the architecture ``config``, with the input ``features``.
-
-    Args:
-        config: The architecture, its optimiser settings and its hyperparameters, from ``cfg.models``.
-        features: The input features the scorer is trained with.
-        locations: The location graph the scorer is trained on.
-        schema: The column schema of each tensor group.
-        home_pe_cfg: Settings of the home-anchored positional encoding, read when ``features.use_home_pe`` is set.
-    """
-    build = lookup_architecture(config)
-
-    return build(config, features, locations, schema, home_pe_cfg)
+BUILDERS: dict[str, ScorerBuilder] = {
+    "mlp": _encoded_scorer(_build_mlp, NodeScorer),
+    "gat": _encoded_scorer(_build_gat, GraphScorer),
+    "gps": _encoded_scorer(_build_gps, GraphScorer),
+    "home_zone_mf": _build_home_zone_mf,
+    "two_tower": _build_two_tower,
+}

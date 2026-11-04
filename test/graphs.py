@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from activitygraphs.datasets import Locations, UserBatch, UserDataset, Users
-from activitygraphs.datasets.locations import compute_hop_distance
+from activitygraphs.datasets.locations import _compute_hop_distance
 
 
 def chain_edge_index(num_nodes: int) -> torch.Tensor:
@@ -40,7 +40,7 @@ def make_locations(
         edge_index=edge_index,
         edge_attr=edge_attr,
         random_walk_pe=random_walk_pe,
-        hop_distance=compute_hop_distance(edge_index, num_nodes),
+        hop_distance=_compute_hop_distance(edge_index, num_nodes),
         distance_m=distance_m,
         distance=distance_m,
         node_ids=pl.DataFrame({"loc_id": [f"z{node}" for node in range(num_nodes)]}),

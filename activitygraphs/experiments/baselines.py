@@ -29,7 +29,34 @@ class BaselineSpec:
     baseline: FittedScorer
 
 
-def closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
+def measure_baselines(
+    datamodule: SurveyDataModule,
+    loss: Loss,
+    cfg: Config,
+    wandb_params: WandBParams,
+) -> list[pl.DataFrame]:
+    """Fit and evaluate the closed-form baselines: the frequency baselines, then the distance-decay ones.
+
+    Each baseline is fitted once, and its frames carry a null ``seed``.
+
+    Returns:
+        One result frame per baseline, in order.
+    """
+    datamodule.setup()
+    train_users = datamodule.train_dataset.users
+    val_users = datamodule.val_dataset.users
+    locations = datamodule.locations
+    results = []
+
+    for spec in _closed_form_baselines(locations.num_nodes):
+        baseline = spec.baseline.fit(train_users, val_users, locations)
+        result = evaluate_baseline(baseline, datamodule, loss, spec.name, cfg, wandb_params)
+        results.append(result.with_columns(seed=pl.lit(None, dtype=pl.Int64)))
+
+    return results
+
+
+def _closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
     """Return the specs of the baselines fitted once, rather than once per training seed.
 
     The baselines are returned unfitted.
@@ -50,30 +77,3 @@ def closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
         BaselineSpec("GravityBinned", GravityBinnedBaseline()),
         BaselineSpec("ConditionalGravity", ConditionalGravityBaseline(gravity)),
     ]
-
-
-def measure_baselines(
-    datamodule: SurveyDataModule,
-    loss: Loss,
-    cfg: Config,
-    wandb_params: WandBParams,
-) -> list[pl.DataFrame]:
-    """Fit and evaluate the closed-form baselines: the frequency baselines, then the distance-decay ones.
-
-    Each baseline is fitted once, and its frames carry a null ``seed``.
-
-    Returns:
-        One result frame per baseline, in order.
-    """
-    datamodule.setup()
-    train_users = datamodule.train_dataset.users
-    val_users = datamodule.val_dataset.users
-    locations = datamodule.locations
-    results = []
-
-    for spec in closed_form_baselines(locations.num_nodes):
-        baseline = spec.baseline.fit(train_users, val_users, locations)
-        result = evaluate_baseline(baseline, datamodule, loss, spec.name, cfg, wandb_params)
-        results.append(result.with_columns(seed=pl.lit(None, dtype=pl.Int64)))
-
-    return results

@@ -1,10 +1,10 @@
 """Geneva TPG survey: raw tables -> ``TPGSurvey``, and the census statistics for its graph nodes.
 
-Survey: ``TPGSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``build_tpg_survey``,
+Survey: ``TPGSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``_build_tpg_survey``,
 which builds the locations, matches each journey's stop names to them, and keeps the locations the journeys visit.
-Statistics: ``read_tpg_statistics`` and ``add_tpg_population_job_statistics`` add census population and jobs to
+Statistics: ``_read_tpg_statistics`` and ``_add_tpg_population_job_statistics`` add census population and jobs to
 the zones.
-Island edges: ``build_tpg_island_edges`` joins the island zones, which have no contiguous neighbour, to the
+Island edges: ``_build_tpg_island_edges`` joins the island zones, which have no contiguous neighbour, to the
 mainland. ``LOADER`` bundles these steps for the survey registry.
 """
 
@@ -135,7 +135,7 @@ class TPGSurvey(SurveyData, DataFrameStore):
 
             return cls(user_journeys_df, locations_gdf)
 
-        survey = build_tpg_survey(read_tables(cfg, project_root))
+        survey = _build_tpg_survey(read_tables(cfg, project_root))
         survey.save(cfg, project_root, name)
 
         return survey
@@ -211,11 +211,11 @@ def read_tables(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTabl
     return TPGTables(raw_journeys_df, subsectors_gdf, postcodes_gdf, localities_gdf, boundaries_gdf, french_gdf, gtfs)
 
 
-def build_tpg_survey(inputs: TPGTables) -> TPGSurvey:
+def _build_tpg_survey(inputs: TPGTables) -> TPGSurvey:
     """Parse raw TPG tables into a standardised ``TPGSurvey`` instance."""
     # Create locations with all PT stops
-    locations_gdf = build_tpg_locations(inputs)
-    user_journeys_df = build_tpg_journeys(inputs, locations_gdf)
+    locations_gdf = _build_tpg_locations(inputs)
+    user_journeys_df = _build_tpg_journeys(inputs, locations_gdf)
 
     # Filter out locations not in user journeys
     user_loc_ids = (
@@ -236,21 +236,21 @@ def build_tpg_survey(inputs: TPGTables) -> TPGSurvey:
 # =========================================
 
 
-def read_tpg_statistics(cfg: TPGDataConfig, project_root: Path | None = None) -> gpd.GeoDataFrame:
+def _read_tpg_statistics(cfg: TPGDataConfig, project_root: Path | None = None) -> gpd.GeoDataFrame:
     """Read the Geneva census grid of population and job densities."""
     stats_cfg = cfg.inputs.statistics
 
     return gpd.read_file(get_project_root(project_root) / stats_cfg.directory / stats_cfg.file)
 
 
-def add_tpg_population_job_statistics(
+def _add_tpg_population_job_statistics(
     locations: gpd.GeoDataFrame, statistics: gpd.GeoDataFrame, normalise: bool = True
 ) -> gpd.GeoDataFrame:
     """Add population and job counts to Geneva subsector locations.
 
     Args:
         locations: Subsector locations (must have a ``loc_id`` column).
-        statistics: Census grid from ``read_tpg_statistics``.
+        statistics: Census grid from ``_read_tpg_statistics``.
         normalise: If True, divide counts by polygon area to obtain densities.
     """
     utm_crs = locations.estimate_utm_crs()
@@ -279,7 +279,7 @@ def add_tpg_population_job_statistics(
 # =========================================
 
 
-def build_tpg_island_edges(nodes_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def _build_tpg_island_edges(nodes_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Build kNN edges joining the island subsectors, which have no contiguous neighbour, to the mainland.
 
     Returns:
@@ -303,9 +303,9 @@ def build_tpg_island_edges(nodes_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 LOADER = SurveyLoader(
     load=TPGSurvey.load,
-    read_statistics=read_tpg_statistics,
-    add_statistics=add_tpg_population_job_statistics,
-    build_extra_edges=build_tpg_island_edges,
+    read_statistics=_read_tpg_statistics,
+    add_statistics=_add_tpg_population_job_statistics,
+    build_extra_edges=_build_tpg_island_edges,
 )
 
 
@@ -314,7 +314,7 @@ LOADER = SurveyLoader(
 # =========================================
 
 
-def build_tpg_locations(inputs: TPGTables) -> gpd.GeoDataFrame:
+def _build_tpg_locations(inputs: TPGTables) -> gpd.GeoDataFrame:
     """Concatenate all Geneva location types (NA sentinel, PT stops, subsectors, Swiss and French municipalities)."""
     special_locations = build_special_locations()
     pt_locations = _build_pt_locations(inputs.gtfs.stops_df)
@@ -414,11 +414,11 @@ def _build_municipality_french_locations(french_gdf: gpd.GeoDataFrame) -> gpd.Ge
 # =========================================
 
 
-def build_tpg_journeys(inputs: TPGTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+def _build_tpg_journeys(inputs: TPGTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
     """Parse raw trip records into standardised journey DF conforming to ``USER_JOURNEY_SCHEMA``."""
     # Match user trips to existing locations then parse other columns
     user_journeys_df = _handle_null_values(inputs.raw_journeys_df)
-    user_journeys_df = match_loc_ids(user_journeys_df, utils.gdf_to_polars(locations_gdf), inputs.gtfs.stops_df)
+    user_journeys_df = _match_loc_ids(user_journeys_df, utils.gdf_to_polars(locations_gdf), inputs.gtfs.stops_df)
     user_journeys_df = user_journeys_df.select(
         user_id=pl.col("id_utilisateur").cast(pl.String),
         journey_id=pl.col("id_deplacement").cast(pl.String),
@@ -471,12 +471,12 @@ def _handle_null_values(raw_tpg_df: pl.DataFrame) -> pl.DataFrame:
     return imputed_line_df
 
 
-def match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, stops_df: pl.DataFrame) -> pl.DataFrame:
+def _match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, stops_df: pl.DataFrame) -> pl.DataFrame:
     """Match raw location strings in journey records to ``loc_id`` values via a cascade of matching strategies."""
-    stop_names_to_id_df = build_stop_names_to_loc_id_mapping(stops_df)
+    stop_names_to_id_df = _build_stop_names_to_loc_id_mapping(stops_df)
 
-    user_journeys_df = manual_patch_stop_names(user_journeys_df, "lieu_depart_trajet", "lieu_arrivee_trajet")
-    matched_df = match_loc_id_on_strict_stop_name(user_journeys_df, stop_names_to_id_df)
+    user_journeys_df = _manual_patch_stop_names(user_journeys_df, "lieu_depart_trajet", "lieu_arrivee_trajet")
+    matched_df = _match_loc_id_on_strict_stop_name(user_journeys_df, stop_names_to_id_df)
 
     columns = [
         ("dep_loc_id", "lieu_depart_trajet", "dep_match_type"),
@@ -486,18 +486,18 @@ def match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, st
     for loc_id_col, stop_name_col, match_type_col in columns:
         matched_df = (
             matched_df
-            .pipe(match_loc_id_on_subsector, locations_df, loc_id_col, stop_name_col, match_type_col)
-            .pipe(match_loc_id_on_municipality_swiss, locations_df, loc_id_col, stop_name_col, match_type_col)
-            .pipe(match_loc_id_on_municipality_french, locations_df, loc_id_col, stop_name_col, match_type_col)
-            .pipe(match_loc_id_on_na, locations_df, loc_id_col, stop_name_col, match_type_col)
-            .pipe(match_loc_id_on_fuzzy_stop_names, stop_names_to_id_df, loc_id_col, stop_name_col, match_type_col)
-            .pipe(match_null_loc_ids_to_na, loc_id_col, match_type_col)
+            .pipe(_match_loc_id_on_subsector, locations_df, loc_id_col, stop_name_col, match_type_col)
+            .pipe(_match_loc_id_on_municipality_swiss, locations_df, loc_id_col, stop_name_col, match_type_col)
+            .pipe(_match_loc_id_on_municipality_french, locations_df, loc_id_col, stop_name_col, match_type_col)
+            .pipe(_match_loc_id_on_na, locations_df, loc_id_col, stop_name_col, match_type_col)
+            .pipe(_match_loc_id_on_fuzzy_stop_names, stop_names_to_id_df, loc_id_col, stop_name_col, match_type_col)
+            .pipe(_match_null_loc_ids_to_na, loc_id_col, match_type_col)
         )
 
     return matched_df
 
 
-def build_stop_names_to_loc_id_mapping(stops_df: pl.DataFrame) -> pl.DataFrame:
+def _build_stop_names_to_loc_id_mapping(stops_df: pl.DataFrame) -> pl.DataFrame:
     """Return a ``(loc_name, loc_id)`` DataFrame mapping stop names to their parent station IDs."""
     df = stops_df.with_columns(
         pl
@@ -524,12 +524,14 @@ def build_stop_names_to_loc_id_mapping(stops_df: pl.DataFrame) -> pl.DataFrame:
     return pl.concat([with_parents, without_parents])
 
 
-def manual_patch_stop_names(user_journeys_df: pl.DataFrame, *stop_name_cols: str) -> pl.DataFrame:
+def _manual_patch_stop_names(user_journeys_df: pl.DataFrame, *stop_name_cols: str) -> pl.DataFrame:
     """Replace known misspelled stop names in ``stop_name_cols`` with their GTFS names."""
     return user_journeys_df.with_columns(pl.col(stop_name_cols).replace(STOP_NAME_MAPPING))
 
 
-def match_loc_id_on_strict_stop_name(user_journeys_df: pl.DataFrame, stop_names_to_id_df: pl.DataFrame) -> pl.DataFrame:
+def _match_loc_id_on_strict_stop_name(
+    user_journeys_df: pl.DataFrame, stop_names_to_id_df: pl.DataFrame
+) -> pl.DataFrame:
     """Match departure and arrival stops to locations by case-insensitive exact stop name."""
     return (
         user_journeys_df
@@ -549,7 +551,7 @@ def match_loc_id_on_strict_stop_name(user_journeys_df: pl.DataFrame, stop_names_
     )
 
 
-def match_loc_id_on_subsector(
+def _match_loc_id_on_subsector(
     user_journeys_df: pl.DataFrame,
     all_locations_df: pl.DataFrame,
     loc_id_col: str,
@@ -578,7 +580,7 @@ def match_loc_id_on_subsector(
     )
 
 
-def match_loc_id_on_municipality_swiss(
+def _match_loc_id_on_municipality_swiss(
     user_journeys_df: pl.DataFrame,
     all_locations_df: pl.DataFrame,
     loc_id_col: str,
@@ -614,7 +616,7 @@ def match_loc_id_on_municipality_swiss(
     )
 
 
-def match_loc_id_on_municipality_french(
+def _match_loc_id_on_municipality_french(
     user_journeys_df: pl.DataFrame,
     all_locations_df: pl.DataFrame,
     loc_id_col: str,
@@ -646,7 +648,7 @@ def match_loc_id_on_municipality_french(
     )
 
 
-def match_loc_id_on_na(
+def _match_loc_id_on_na(
     user_journeys_df: pl.DataFrame,
     all_locations_df: pl.DataFrame,
     loc_id_col: str,
@@ -676,7 +678,7 @@ def match_loc_id_on_na(
     )
 
 
-def match_loc_id_on_fuzzy_stop_names(
+def _match_loc_id_on_fuzzy_stop_names(
     user_journeys_df: pl.DataFrame,
     stop_names_to_id_df: pl.DataFrame,
     loc_id_col: str,
@@ -729,7 +731,7 @@ def match_loc_id_on_fuzzy_stop_names(
     )
 
 
-def match_null_loc_ids_to_na(user_journeys_df: pl.DataFrame, loc_id_col: str, match_type_col: str) -> pl.DataFrame:
+def _match_null_loc_ids_to_na(user_journeys_df: pl.DataFrame, loc_id_col: str, match_type_col: str) -> pl.DataFrame:
     """Assign every stop that is still unmatched to the NA location."""
     is_unmatched = pl.col(loc_id_col).is_null()
 

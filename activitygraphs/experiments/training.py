@@ -38,56 +38,6 @@ def home_distance_frame(datamodule: SurveyDataModule) -> pl.DataFrame:
     ).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
 
-def score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:
-    """Full per-node test score vectors as ``stage="test_scores"`` rows, one row per scored test user.
-
-    The ``scores`` column is a list of one score per node, in node-index order, row-aligned with the
-    ``test_user`` rows of the same run. Empty when the module was built without ``store_score_vectors``.
-    """
-    if not module.per_user_score_vectors:
-        return pl.DataFrame()
-
-    return pl.DataFrame(
-        {
-            "user_idx": module.per_user_columns["user_idx"],
-            "scores": module.per_user_score_vectors,
-        },
-        schema_overrides={"scores": pl.List(pl.Float32)},
-    ).with_columns(
-        name=pl.lit(name),
-        stage=pl.lit(SCORE_VECTOR_STAGE),
-        epoch=pl.lit(None, dtype=pl.Int64),
-    )
-
-
-def aggregate_frame(rows: list[dict], name: str) -> pl.DataFrame:
-    """Collected ``stage="fit"``/``stage="test"`` rows as one named frame.
-
-    Scans every row for the schema: the single test row comes last, after one fit row per epoch, so
-    Polars' default 100-row inference window would silently drop the ``test_*`` metrics on any run
-    longer than that many epochs.
-    """
-    return pl.DataFrame(rows, infer_schema_length=None).with_columns(name=pl.lit(name))
-
-
-def per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
-    """Per-user test scores as ``stage="test_user"`` rows, one row per scored test user.
-
-    Carried inside the same long-format frame as the aggregate rows so that every caller keeps a
-    single return value; ``save_results`` splits the two stages into separate parquet files.
-    """
-    if not module.per_user_columns:
-        return pl.DataFrame()
-
-    per_user_df = pl.DataFrame(module.per_user_columns).with_columns(
-        name=pl.lit(name),
-        stage=pl.lit(PER_USER_STAGE),
-        epoch=pl.lit(None, dtype=pl.Int64),
-    )
-
-    return per_user_df.join(home_coverage_df, on="user_idx", how="left")
-
-
 @dataclass
 class WandBParams:
     """W&B logging identity shared by every run of one experiment invocation.
@@ -186,52 +136,12 @@ def evaluate_baseline(
     test_row = {"name": name, "stage": "test", "epoch": None, **test_results}
 
     aggregate_results = pl.DataFrame([fit_row, test_row])
-    per_user_results = per_user_frame(baseline_module, name, datamodule.home_coverage)
-    score_vectors = score_vector_frame(baseline_module, name)
+    per_user_results = _per_user_frame(baseline_module, name, datamodule.home_coverage)
+    score_vectors = _score_vector_frame(baseline_module, name)
 
     return pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal").with_columns(
         is_baseline=pl.lit(True)
     )
-
-
-def build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: str, debug: bool) -> list[L.Callback]:
-    """Build the ``Trainer`` callbacks of one training run.
-
-    Args:
-        loss: ``Loss`` instance, whose ``monitor`` metric and ``monitor_mode`` direction the checkpoint and early
-            stopping follow.
-        cfg: The config used by the experiment. ``cfg.train.early_stopping.patience`` sets the early stopping;
-            ``cfg.trainer.overfit_batches > 0`` turns it off.
-        run_dir: Run directory. Checkpoints are written to ``checkpoints/<run_name>/``. None disables them.
-        run_name: Name of the training run, which names its checkpoint directory.
-        debug: Flag that adds the ``OverfitDebugCallback``.
-
-    Returns:
-        The epoch learning-rate monitor, then the best and last checkpoint when ``run_dir`` is set, early stopping
-        unless its patience is None or the run is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
-    """
-    callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
-
-    if run_dir is not None:
-        callbacks.append(
-            ModelCheckpoint(
-                dirpath=str(run_dir / CHECKPOINTS_DIR / run_name),
-                filename="best",
-                save_last=True,
-                save_top_k=1,
-                monitor=loss.monitor,
-                mode=loss.monitor_mode,
-            )
-        )
-
-    patience = cfg.train.early_stopping.patience
-    if patience is not None and cfg.trainer.overfit_batches == 0:
-        callbacks.append(EarlyStopping(monitor=loss.monitor, mode=loss.monitor_mode, patience=patience))
-
-    if debug:
-        callbacks.append(OverfitDebugCallback())
-
-    return callbacks
 
 
 def train_and_evaluate_model(
@@ -293,7 +203,7 @@ def train_and_evaluate_model(
         log_train_ranking=train.log_train_ranking,
     )
 
-    callbacks = build_callbacks(loss, cfg, run_dir, run_name, debug)
+    callbacks = _build_callbacks(loss, cfg, run_dir, run_name, debug)
 
     log_dir = str(run_dir / LOGS_DIR) if run_dir is not None else "."
 
@@ -337,9 +247,9 @@ def train_and_evaluate_model(
         if run_dir is not None:
             trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-        aggregate_results = aggregate_frame(metrics_logger.rows, name)
-        per_user_results = per_user_frame(lit_model, name, datamodule.home_coverage)
-        score_vectors = score_vector_frame(lit_model, name)
+        aggregate_results = _aggregate_frame(metrics_logger.rows, name)
+        per_user_results = _per_user_frame(lit_model, name, datamodule.home_coverage)
+        score_vectors = _score_vector_frame(lit_model, name)
 
         results = pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal").with_columns(
             is_baseline=pl.lit(False)
@@ -355,3 +265,93 @@ def train_and_evaluate_model(
             import wandb
 
             wandb.finish()
+
+
+def _score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:
+    """Full per-node test score vectors as ``stage="test_scores"`` rows, one row per scored test user.
+
+    The ``scores`` column is a list of one score per node, in node-index order, row-aligned with the
+    ``test_user`` rows of the same run. Empty when the module was built without ``store_score_vectors``.
+    """
+    if not module.per_user_score_vectors:
+        return pl.DataFrame()
+
+    return pl.DataFrame(
+        {
+            "user_idx": module.per_user_columns["user_idx"],
+            "scores": module.per_user_score_vectors,
+        },
+        schema_overrides={"scores": pl.List(pl.Float32)},
+    ).with_columns(
+        name=pl.lit(name),
+        stage=pl.lit(SCORE_VECTOR_STAGE),
+        epoch=pl.lit(None, dtype=pl.Int64),
+    )
+
+
+def _aggregate_frame(rows: list[dict], name: str) -> pl.DataFrame:
+    """Collected ``stage="fit"``/``stage="test"`` rows as one named frame.
+
+    Scans every row for the schema: the single test row comes last, after one fit row per epoch, so
+    Polars' default 100-row inference window would silently drop the ``test_*`` metrics on any run
+    longer than that many epochs.
+    """
+    return pl.DataFrame(rows, infer_schema_length=None).with_columns(name=pl.lit(name))
+
+
+def _per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:
+    """Per-user test scores as ``stage="test_user"`` rows, one row per scored test user.
+
+    Carried inside the same long-format frame as the aggregate rows so that every caller keeps a
+    single return value; ``save_results`` splits the two stages into separate parquet files.
+    """
+    if not module.per_user_columns:
+        return pl.DataFrame()
+
+    per_user_df = pl.DataFrame(module.per_user_columns).with_columns(
+        name=pl.lit(name),
+        stage=pl.lit(PER_USER_STAGE),
+        epoch=pl.lit(None, dtype=pl.Int64),
+    )
+
+    return per_user_df.join(home_coverage_df, on="user_idx", how="left")
+
+
+def _build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: str, debug: bool) -> list[L.Callback]:
+    """Build the ``Trainer`` callbacks of one training run.
+
+    Args:
+        loss: ``Loss`` instance, whose ``monitor`` metric and ``monitor_mode`` direction the checkpoint and early
+            stopping follow.
+        cfg: The config used by the experiment. ``cfg.train.early_stopping.patience`` sets the early stopping;
+            ``cfg.trainer.overfit_batches > 0`` turns it off.
+        run_dir: Run directory. Checkpoints are written to ``checkpoints/<run_name>/``. None disables them.
+        run_name: Name of the training run, which names its checkpoint directory.
+        debug: Flag that adds the ``OverfitDebugCallback``.
+
+    Returns:
+        The epoch learning-rate monitor, then the best and last checkpoint when ``run_dir`` is set, early stopping
+        unless its patience is None or the run is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
+    """
+    callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
+
+    if run_dir is not None:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(run_dir / CHECKPOINTS_DIR / run_name),
+                filename="best",
+                save_last=True,
+                save_top_k=1,
+                monitor=loss.monitor,
+                mode=loss.monitor_mode,
+            )
+        )
+
+    patience = cfg.train.early_stopping.patience
+    if patience is not None and cfg.trainer.overfit_batches == 0:
+        callbacks.append(EarlyStopping(monitor=loss.monitor, mode=loss.monitor_mode, patience=patience))
+
+    if debug:
+        callbacks.append(OverfitDebugCallback())
+
+    return callbacks

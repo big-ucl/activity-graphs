@@ -1,8 +1,8 @@
 """Toronto THATS survey: raw tables -> ``THATSSurvey``, and the census statistics for its graph nodes.
 
-Survey: ``THATSSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``build_thats_survey``,
+Survey: ``THATSSurvey.load`` reads the processed cache, or else calls ``read_tables`` and ``_build_thats_survey``,
 which builds the locations, journeys, activities and users in turn.
-Statistics: ``read_thats_statistics`` and ``add_thats_population_job_statistics`` add census population and jobs to
+Statistics: ``_read_thats_statistics`` and ``_add_thats_population_job_statistics`` add census population and jobs to
 the zones. ``LOADER`` bundles these steps for the survey registry.
 """
 
@@ -229,7 +229,7 @@ class THATSSurvey(SurveyData, DataFrameStore):
 
             return cls(locations_gdf, user_journeys_df, activities_df, users_df)
 
-        survey = build_thats_survey(read_tables(cfg, project_root))
+        survey = _build_thats_survey(read_tables(cfg, project_root))
         survey.save(cfg, project_root, name)
 
         return survey
@@ -265,12 +265,12 @@ def read_tables(cfg: THATSDataConfig, project_root: Path | None = None) -> THATS
     )
 
 
-def build_thats_survey(inputs: THATSTables) -> THATSSurvey:
+def _build_thats_survey(inputs: THATSTables) -> THATSSurvey:
     """Parse raw Toronto inputs into a standardised ``THATSSurvey`` instance."""
-    locations_gdf = build_thats_locations(inputs)
-    user_journeys_df = build_thats_journeys(inputs, locations_gdf)
+    locations_gdf = _build_thats_locations(inputs)
+    user_journeys_df = _build_thats_journeys(inputs, locations_gdf)
     activities_df = build_thats_activities(inputs, user_journeys_df)
-    users_df = build_thats_users(inputs, locations_gdf, user_journeys_df)
+    users_df = _build_thats_users(inputs, locations_gdf, user_journeys_df)
 
     return THATSSurvey(locations_gdf, user_journeys_df, activities_df, users_df)
 
@@ -288,7 +288,7 @@ class THATSStatistics:
     jobs_df: pl.LazyFrame
 
 
-def read_thats_statistics(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSStatistics:
+def _read_thats_statistics(cfg: THATSDataConfig, project_root: Path | None = None) -> THATSStatistics:
     """Read the Toronto census profile and place-of-work CSVs."""
     stats_cfg = cfg.inputs.statistics
     stats_dir = get_project_root(project_root) / stats_cfg.directory
@@ -303,14 +303,14 @@ def read_thats_statistics(cfg: THATSDataConfig, project_root: Path | None = None
     return THATSStatistics(census_df, jobs_df)
 
 
-def add_thats_population_job_statistics(
+def _add_thats_population_job_statistics(
     locations: gpd.GeoDataFrame, statistics: THATSStatistics, normalise: bool = True
 ) -> gpd.GeoDataFrame:
     """Add census population and job counts to Toronto census-tract locations.
 
     Args:
         locations: Toronto locations (must have a ``loc_id`` matching ``ALT_GEO_CODE``).
-        statistics: Census tables from ``read_thats_statistics``.
+        statistics: Census tables from ``_read_thats_statistics``.
         normalise: If True, divide counts by area to obtain densities.
     """
     locations_df = gdf_to_polars(locations).lazy()
@@ -364,8 +364,8 @@ def add_thats_population_job_statistics(
 
 LOADER = SurveyLoader(
     load=THATSSurvey.load,
-    read_statistics=read_thats_statistics,
-    add_statistics=add_thats_population_job_statistics,
+    read_statistics=_read_thats_statistics,
+    add_statistics=_add_thats_population_job_statistics,
 )
 
 
@@ -374,10 +374,10 @@ LOADER = SurveyLoader(
 # =========================================
 
 
-def build_thats_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
+def _build_thats_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     """Build the Toronto locations GeoDataFrame (census tracts and NA)."""
     special_locations = build_special_locations()
-    zone_locations = build_zone_locations(inputs)
+    zone_locations = _build_zone_locations(inputs)
     return gpd.GeoDataFrame(
         pd.concat(
             [
@@ -390,7 +390,7 @@ def build_thats_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     )
 
 
-def build_zone_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
+def _build_zone_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
     """Extract the census tracts within the Toronto CMA as zone locations."""
     toronto_cma = inputs.metropolitan_areas_gdf.query(f"CMAUID == '{TORONTO_CMA}'")
     utm_crs = toronto_cma.estimate_utm_crs()
@@ -414,7 +414,7 @@ def build_zone_locations(inputs: THATSTables) -> gpd.GeoDataFrame:
 # =========================================
 
 
-def build_thats_journeys(inputs: THATSTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
+def _build_thats_journeys(inputs: THATSTables, locations_gdf: gpd.GeoDataFrame) -> pl.DataFrame:
     """Parse raw trip records into standardised journey DF conforming to ``USER_JOURNEY_SCHEMA``."""
     trips = inputs.raw_journeys_df
     persons = inputs.raw_person_df
@@ -519,7 +519,7 @@ def build_thats_journeys(inputs: THATSTables, locations_gdf: gpd.GeoDataFrame) -
 def build_thats_activities(inputs: THATSTables, user_journeys_df: pl.DataFrame):
     """Parse the wide-format hourly activity DF into a long, collapsed by span, activity DataFrame."""
     # Move from a wide to long data format by adding an "index" column for activities that happen in the same hour
-    activities = unpivot_activities(inputs.raw_activities_df)
+    activities = _unpivot_activities(inputs.raw_activities_df)
 
     # Only keep users with recorded trips
     user_ids = user_journeys_df["user_id"].unique()
@@ -561,7 +561,7 @@ def build_thats_activities(inputs: THATSTables, user_journeys_df: pl.DataFrame):
     ).rename({"ActivityType": "act_purpose"})
 
     # Collapse hourly breakdown into list of activities with start and end time
-    activities = collapse_activities(activities)
+    activities = _collapse_activities(activities)
 
     # Filter out empty purpose activities
     activities = activities.drop_nulls("act_purpose")
@@ -569,7 +569,7 @@ def build_thats_activities(inputs: THATSTables, user_journeys_df: pl.DataFrame):
     return activities.collect()
 
 
-def unpivot_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
+def _unpivot_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
     """Convert the wide per-hour, per-index activity columns into a long LazyFrame."""
     value_cols = [
         "StrtTripID",
@@ -611,7 +611,7 @@ def unpivot_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
     return unpivoted_df
 
 
-def collapse_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
+def _collapse_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
     """Merge consecutive same-purpose hourly activity rows into contiguous spans with start/end times."""
     # Find the hour of the previous activity with the same purpose that day
     activities = activity_df.with_columns(
@@ -655,7 +655,7 @@ def collapse_activities(activity_df: pl.LazyFrame) -> pl.LazyFrame:
 # =========================================
 
 
-def build_thats_users(
+def _build_thats_users(
     inputs: THATSTables, locations_gdf: gpd.GeoDataFrame, user_journeys_df: pl.DataFrame
 ) -> pl.DataFrame:
     """Build the user DataFrame with household demographics and home location for Toronto."""

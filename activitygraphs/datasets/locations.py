@@ -54,7 +54,7 @@ class Locations:
         graph = pyg.data.Data(edge_index=tensors.edge_index, num_nodes=tensors.num_nodes)
         random_walk_pe = T.AddRandomWalkPE(walk_length=RWPE_WALK_LENGTH)(graph).random_walk_pe
         # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
-        hop_distance = compute_hop_distance(tensors.edge_index, tensors.num_nodes)
+        hop_distance = _compute_hop_distance(tensors.edge_index, tensors.num_nodes)
 
         if transforms is None:
             x, edge_attr, distance = tensors.x, tensors.edge_attr, tensors.distance_m
@@ -96,7 +96,7 @@ class Locations:
         return replace(self, **moved)
 
 
-def compute_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def _compute_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     """Return the all-pairs contiguity-hop distance matrix ``[num_nodes, num_nodes]``, float32.
 
     Treats the graph as undirected and unweighted; unreachable pairs are ``inf``.

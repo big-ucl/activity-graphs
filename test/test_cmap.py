@@ -17,17 +17,17 @@ from activitygraphs.surveys.cmap import (
     PURPOSE_MAP,
     CMAPSurvey,
     CMAPTables,
-    build_cmap_journeys,
-    build_cmap_locations,
-    build_cmap_survey,
-    build_cmap_users,
+    _build_cmap_journeys,
+    _build_cmap_locations,
+    _build_cmap_survey,
+    _build_cmap_users,
 )
 from activitygraphs.surveys.demographics import DEMOGRAPHICS_SCHEMA
 from activitygraphs.tensors.build import (
-    build_group_ids,
-    build_home_nodes,
-    build_user_attributes,
-    build_visit_labels,
+    _build_group_ids,
+    _build_home_nodes,
+    _build_user_attributes,
+    _build_visit_labels,
 )
 
 IN_REGION_TRACTS = ["17031000100", "17031000200", "17043000100"]
@@ -62,7 +62,7 @@ def boundaries_ct() -> gpd.GeoDataFrame:
 
 @pytest.fixture
 def locations_gdf(boundaries_ct) -> gpd.GeoDataFrame:
-    return build_cmap_locations(CMAPTables(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), boundaries_ct))
+    return _build_cmap_locations(CMAPTables(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), boundaries_ct))
 
 
 def make_journeys(rows: list[dict]) -> pl.DataFrame:
@@ -151,7 +151,7 @@ class TestBuildJourneys:
         journeys = make_journeys([{"person_id": 1}, {"person_id": 2}])
         inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
-        built = build_cmap_journeys(inputs, locations_gdf)
+        built = _build_cmap_journeys(inputs, locations_gdf)
 
         assert built.schema == USER_JOURNEY_SCHEMA
         assert built.height == 2
@@ -163,7 +163,7 @@ class TestBuildJourneys:
         journeys = make_journeys([{"d_tract_2020": IN_REGION_TRACTS[1]}, {"d_tract_2020": destination}])
         inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
-        built = build_cmap_journeys(inputs, locations_gdf)
+        built = _build_cmap_journeys(inputs, locations_gdf)
 
         assert built["arr_loc_id"].to_list() == [IN_REGION_TRACTS[1], NA]
 
@@ -173,7 +173,7 @@ class TestBuildJourneys:
         journeys = make_journeys([{"d_tract_2020": OUT_OF_REGION_TRACT}])
         inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
-        assert build_cmap_journeys(inputs, locations_gdf).height == 1
+        assert _build_cmap_journeys(inputs, locations_gdf).height == 1
 
     def test_unmapped_codes_become_unknown(self, boundaries_ct, locations_gdf):
         journeys = make_journeys([
@@ -182,7 +182,7 @@ class TestBuildJourneys:
         ])
         inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
-        built = build_cmap_journeys(inputs, locations_gdf)
+        built = _build_cmap_journeys(inputs, locations_gdf)
 
         assert set(built["leg_mode"].to_list()) == {Mode.UNKNOWN}
         assert set(built["arr_purpose"].to_list()) == {Purpose.UNKNOWN}
@@ -193,7 +193,7 @@ class TestBuildJourneys:
         journeys = make_journeys([{"o_purpose_category": 1, "d_purpose_category": 7}])
         inputs = CMAPTables(journeys, pl.DataFrame(), pl.DataFrame(), boundaries_ct)
 
-        built = build_cmap_journeys(inputs, locations_gdf)
+        built = _build_cmap_journeys(inputs, locations_gdf)
 
         assert built["dep_purpose"].item() == Purpose.HOME
         assert built["arr_purpose"].item() == Purpose.SHOP
@@ -204,7 +204,7 @@ class TestBuildUsers:
         journeys = make_journeys([{"person_id": row} for row in persons["person_id"]]) if journeys is None else journeys
         inputs = CMAPTables(journeys, persons, households, boundaries_ct)
 
-        return build_cmap_users(inputs, locations_gdf, build_cmap_journeys(inputs, locations_gdf))
+        return _build_cmap_users(inputs, locations_gdf, _build_cmap_journeys(inputs, locations_gdf))
 
     def test_output_matches_the_user_schema(self, boundaries_ct, locations_gdf):
         # Compared as dicts: check_schema is set-based, so the builder does not fix column order.
@@ -364,7 +364,7 @@ def cmap_survey(boundaries_ct) -> CMAPSurvey:
     ])
     journeys = make_journeys([{"person_id": p, "linked_trip_id": p} for p in (1, 2, 3, 4)])
 
-    return build_cmap_survey(CMAPTables(journeys, persons, households, boundaries_ct)).with_filter("zone")
+    return _build_cmap_survey(CMAPTables(journeys, persons, households, boundaries_ct)).with_filter("zone")
 
 
 class TestCMAPSurveyViews:
@@ -372,7 +372,7 @@ class TestCMAPSurveyViews:
         assert cmap_survey.users_df["user_id"].to_list() == ["1", "2", "3"]
 
     def test_user_ids_match_users_df_order(self, cmap_survey):
-        # build_group_ids and the user attributes tensor are both aligned positionally on this.
+        # _build_group_ids and the user attributes tensor are both aligned positionally on this.
         assert cmap_survey.user_ids.to_list() == cmap_survey.users_df["user_id"].to_list()
 
     def test_home_locations_cover_every_user(self, cmap_survey):
@@ -380,7 +380,7 @@ class TestCMAPSurveyViews:
         assert cmap_survey.home_locations["loc_id"].null_count() == 0
 
     def test_every_users_df_column_is_a_feature_or_an_identifier(self, cmap_survey):
-        # Fails the moment a column is added to build_cmap_users without being classified, which is
+        # Fails the moment a column is added to _build_cmap_users without being classified, which is
         # the only way hh_id (or any other identifier) could reach the user attributes tensor.
         assert set(cmap_survey.demographics_schema.names) | IDENTIFIER_COLUMNS == set(cmap_survey.users_df.columns)
 
@@ -388,7 +388,7 @@ class TestCMAPSurveyViews:
         # hh_id lives on users_df for the grouped split; it is an identifier, not a feature.
         assert "hh_id" not in cmap_survey.demographics_schema.names
 
-        user_attributes, _ = build_user_attributes(cmap_survey)
+        user_attributes, _ = _build_user_attributes(cmap_survey)
         assert user_attributes.shape == (len(cmap_survey.user_ids), cmap_survey.demographics_schema.numeric.width)
 
     def test_demographic_column_order_is_declared_not_incidental(self, cmap_survey):
@@ -397,7 +397,7 @@ class TestCMAPSurveyViews:
         assert cmap_survey.demographics_schema == DEMOGRAPHICS_SCHEMA
 
     def test_group_ids_are_shared_by_co_residents_only(self, cmap_survey):
-        group_ids = build_group_ids(cmap_survey)
+        group_ids = _build_group_ids(cmap_survey)
 
         assert group_ids.shape == (len(cmap_survey.user_ids),)
         assert group_ids[0] == group_ids[1]  # persons 1 and 2 share household 1
@@ -406,25 +406,25 @@ class TestCMAPSurveyViews:
     def test_group_ids_are_stable_across_rebuilds(self, cmap_survey, boundaries_ct):
         # polars unique() does not maintain order by default; an unstable labelling would silently
         # change the split for a fixed seed on every cache rebuild.
-        assert build_group_ids(cmap_survey).tolist() == build_group_ids(cmap_survey).tolist()
+        assert _build_group_ids(cmap_survey).tolist() == _build_group_ids(cmap_survey).tolist()
 
 
 class TestUserNodeTensors:
     def test_home_nodes_are_the_users_home_locations(self, cmap_survey):
-        assert build_home_nodes(cmap_survey).tolist() == [0, 0, 1]
+        assert _build_home_nodes(cmap_survey).tolist() == [0, 0, 1]
 
     def test_visit_labels_over_every_purpose_mark_both_trip_ends(self, cmap_survey):
-        labels = build_visit_labels(cmap_survey, list(Purpose))
+        labels = _build_visit_labels(cmap_survey, list(Purpose))
 
         assert labels.tolist() == [[1, 1, 0]] * 3
 
     def test_visit_labels_keep_only_the_given_purposes(self, cmap_survey):
-        labels = build_visit_labels(cmap_survey, [Purpose.WORK_MAIN])
+        labels = _build_visit_labels(cmap_survey, [Purpose.WORK_MAIN])
 
         assert labels.tolist() == [[0, 1, 0]] * 3
 
     def test_visit_labels_without_purposes_are_empty(self, cmap_survey):
-        assert build_visit_labels(cmap_survey, []).sum() == 0
+        assert _build_visit_labels(cmap_survey, []).sum() == 0
 
 
 @pytest.mark.integration

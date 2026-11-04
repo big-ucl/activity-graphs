@@ -17,47 +17,6 @@ EDGE_ATTR_CONVS = [
 ]
 
 
-def accepts_edge_attr(conv: Module) -> bool:
-    """Return whether ``conv`` takes edge attributes."""
-    return any(isinstance(conv, valid_conv) for valid_conv in EDGE_ATTR_CONVS)
-
-
-def build_module_list(
-    module_f: Callable[..., Module],
-    num_layers: int,
-    in_channels: int,
-    out_channels: int,
-    hidden_channels: int | None = None,
-    **module_kwargs,
-) -> torch.nn.ModuleList:
-    """Construct a ``ModuleList`` of ``num_layers`` stacked ``module_f`` instances.
-
-    Args:
-        module_f: Callable ``(in, out, **kwargs) -> nn.Module`` used to create each layer.
-        num_layers: Total number of layers; must be >= 1.
-        in_channels: Input size of the first layer.
-        out_channels: Output size of the last layer.
-        hidden_channels: Hidden size for intermediate layers; required when ``num_layers > 1``.
-        **module_kwargs: Extra keyword arguments forwarded to ``module_f``.
-
-    Returns:
-        ``ModuleList`` of length ``num_layers``.
-    """
-    if num_layers > 1 and hidden_channels is None:
-        raise ValueError(f"Hidden channels not provided for {num_layers=} and {hidden_channels=}")
-
-    if num_layers < 1:
-        raise ValueError(f"Invalid number of layers: {num_layers=}")
-
-    layers = [in_channels] + [hidden_channels] * (num_layers - 1) + [out_channels]
-    modules = torch.nn.ModuleList()
-
-    for num_in, num_out in itertools.pairwise(layers):
-        modules.append(module_f(num_in, num_out, **module_kwargs))
-
-    return modules
-
-
 class ConvStack(torch.nn.Module):
     """Stack of message-passing layers with optional pre-norm, identity residuals and leaky-ReLU activations."""
 
@@ -79,7 +38,7 @@ class ConvStack(torch.nn.Module):
 
         self.residuals = residuals
         self.dropout = dropout
-        self.convs = build_module_list(conv, num_layers, in_channels, out_channels, hidden_channels)
+        self.convs = _build_module_list(conv, num_layers, in_channels, out_channels, hidden_channels)
 
         widths = [in_channels] + [hidden_channels] * (num_layers - 1)
         self.norms = torch.nn.ModuleList(torch.nn.Identity() if norm is None else norm(width) for width in widths)
@@ -104,7 +63,7 @@ class ConvStack(torch.nn.Module):
     @staticmethod
     def convolve(conv: Module, x: Tensor, edge_index: Tensor, edge_attr: Tensor | None) -> torch.Tensor:
         """Apply ``conv``, passing ``edge_attr`` only if given and supported."""
-        if edge_attr is not None and accepts_edge_attr(conv):
+        if edge_attr is not None and _accepts_edge_attr(conv):
             return conv(x, edge_index, edge_attr=edge_attr)
         else:
             return conv(x, edge_index)
@@ -119,7 +78,7 @@ class NodeMLP(torch.nn.Module):
         super().__init__()
 
         self.dropout = dropout
-        self.lins = build_module_list(torch.nn.Linear, num_layers, in_channels, out_channels, hidden_channels)
+        self.lins = _build_module_list(torch.nn.Linear, num_layers, in_channels, out_channels, hidden_channels)
 
     def forward(
         self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor | None = None, batch=None
@@ -249,3 +208,44 @@ class GraphTransformer(torch.nn.Module):
             x = layer(x, edge_index, edge_attr, batch)
 
         return self.output(x)
+
+
+def _accepts_edge_attr(conv: Module) -> bool:
+    """Return whether ``conv`` takes edge attributes."""
+    return any(isinstance(conv, valid_conv) for valid_conv in EDGE_ATTR_CONVS)
+
+
+def _build_module_list(
+    module_f: Callable[..., Module],
+    num_layers: int,
+    in_channels: int,
+    out_channels: int,
+    hidden_channels: int | None = None,
+    **module_kwargs,
+) -> torch.nn.ModuleList:
+    """Construct a ``ModuleList`` of ``num_layers`` stacked ``module_f`` instances.
+
+    Args:
+        module_f: Callable ``(in, out, **kwargs) -> nn.Module`` used to create each layer.
+        num_layers: Total number of layers; must be >= 1.
+        in_channels: Input size of the first layer.
+        out_channels: Output size of the last layer.
+        hidden_channels: Hidden size for intermediate layers; required when ``num_layers > 1``.
+        **module_kwargs: Extra keyword arguments forwarded to ``module_f``.
+
+    Returns:
+        ``ModuleList`` of length ``num_layers``.
+    """
+    if num_layers > 1 and hidden_channels is None:
+        raise ValueError(f"Hidden channels not provided for {num_layers=} and {hidden_channels=}")
+
+    if num_layers < 1:
+        raise ValueError(f"Invalid number of layers: {num_layers=}")
+
+    layers = [in_channels] + [hidden_channels] * (num_layers - 1) + [out_channels]
+    modules = torch.nn.ModuleList()
+
+    for num_in, num_out in itertools.pairwise(layers):
+        modules.append(module_f(num_in, num_out, **module_kwargs))
+
+    return modules
