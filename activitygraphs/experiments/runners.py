@@ -7,7 +7,7 @@ import lightning as L
 import polars as pl
 
 from activitygraphs.analysis import check_overfit_health
-from activitygraphs.config import Config, DepthSweepConfig
+from activitygraphs.config import Config, DepthSweepConfig, TwoTowerConfig
 from activitygraphs.experiments.results import save_results
 from activitygraphs.experiments.setup import ExperimentSetup, setup_experiment, with_overrides
 from activitygraphs.experiments.training import train_and_evaluate_model
@@ -163,14 +163,16 @@ def core_experiment(cfg: Config):
 
 
 def two_tower_ablation_experiment(cfg: Config):
-    """Ablate the inputs of the two-tower model and run its in-city diagnostics, beside ``MLP-hpe-dist``.
+    """Ablate the inputs of the two-tower model and run its in-city diagnostics, beside ``MLP-hpe-dist`` and the GAT.
 
     Trains the two-tower model without the pairwise features and the demographics, with each, and with both. With both,
-    it also trains the free per-node bias in place of the location bias, and the node-identity embedding. Every model
-    is trained once per training seed.
+    it also trains the free per-node bias in place of the location bias, and the node-identity embedding. The GAT has
+    the features of ``MLP-hpe-dist`` and the depth of the two-tower model's node tower. Every model is trained once per
+    training seed.
     """
     setup = setup_experiment(cfg)
-    mlp, two_tower = setup.models["mlp"], setup.models["two_tower"]
+    mlp, two_tower = setup.models["mlp"], cast(TwoTowerConfig, setup.models["two_tower"])
+    gat = with_overrides(setup.models["gat"], {"num_gcn_layers": two_tower.num_gcn_layers})
     node_bias = with_overrides(two_tower, {"bias": "node"})
     node_embedding = with_overrides(two_tower, {"node_embedding": True})
 
@@ -181,6 +183,7 @@ def two_tower_ablation_experiment(cfg: Config):
 
     variants = [
         Variant(mlp, both),
+        Variant(gat, both),
         Variant(two_tower, bare, suffix="nodemo"),
         Variant(two_tower, pairwise, suffix="nodemo"),
         Variant(two_tower, demographics),

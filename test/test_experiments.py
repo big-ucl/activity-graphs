@@ -404,21 +404,28 @@ class TestTwoTowerAblation:
 
         return calls
 
-    def test_trains_every_ablation_and_diagnostic_beside_the_mlp(self, cfg, monkeypatch):
+    def test_trains_every_ablation_and_diagnostic_beside_the_mlp_and_the_gat(self, cfg, monkeypatch):
         names = [call["variant"].name for call in self._recorded(cfg, monkeypatch)]
 
-        assert names[:7] == [
+        assert names[:8] == [
             "MLP-hpe-dist",
-            "TwoTower-8-nodemo",
-            "TwoTower-8-hpe-dist-nodemo",
-            "TwoTower-8",
-            "TwoTower-8-hpe-dist",
-            "TwoTower-8-nodebias-hpe-dist",
-            "TwoTower-8-nodeemb-hpe-dist",
+            "GATv2-4-hpe-dist",
+            "TwoTower-4-nodemo",
+            "TwoTower-4-hpe-dist-nodemo",
+            "TwoTower-4",
+            "TwoTower-4-hpe-dist",
+            "TwoTower-4-nodebias-hpe-dist",
+            "TwoTower-4-nodeemb-hpe-dist",
         ]
 
+    def test_the_gat_follows_the_depth_of_the_node_tower(self, cfg, monkeypatch):
+        shallow = cast(Config, OmegaConf.merge(cfg, {"models": {"two_tower": {"num_gcn_layers": 2}}}))
+        names = {call["variant"].name for call in self._recorded(shallow, monkeypatch)}
+
+        assert {"GATv2-2-hpe-dist", "TwoTower-2-hpe-dist"} <= names
+
     def test_every_variant_runs_once_per_seed(self, cfg, monkeypatch):
-        assert len(self._recorded(cfg, monkeypatch)) == 14  # 7 variants x 2 seeds
+        assert len(self._recorded(cfg, monkeypatch)) == 16  # 8 variants x 2 seeds
 
 
 class TestCore:
