@@ -30,7 +30,7 @@ def per_user_recall(
     Args:
         preds: Candidate scores, ``[n_rows]``.
         target: Binary labels aligned with ``preds``, ``[n_rows]``.
-        indexes: User id of each row, ``[n_rows]``.
+        indexes: Dataset index of the user of each row, ``[n_rows]``.
         budget: Largest rank cutoff ``K`` of ``avg_recall@K``.
         ks: Rank cutoffs of the returned ``recall@k``.
 
@@ -38,11 +38,8 @@ def per_user_recall(
         ``(avg_recall, recall_at_ks, n_dropped)``: ``[n_scored_users]`` and ``[n_scored_users, len(ks)]`` for the
         users with at least one positive, and the number of users without one.
     """
-    _, user_row = torch.unique(indexes, return_inverse=True)
-    order = torch.argsort(user_row, stable=True)
-
-    scores, valid = to_dense_batch(preds[order], user_row[order])
-    labels, _ = to_dense_batch(target[order].bool(), user_row[order], fill_value=False)
+    labels = target.bool()
+    _, (scores, labels), valid = _dense_by_user(indexes, (preds, labels))
     n_pos = (labels & valid).sum(dim=1)
 
     n_higher, n_tied = positive_rank_stats(scores, labels, valid)
@@ -128,16 +125,16 @@ class RetrievalRPrecision(Metric):
 
     def update(self, preds: torch.Tensor, target: torch.Tensor, indexes: torch.Tensor) -> None:
         """Accumulate per-user R-precision over a batch, counting users with no positives as dropped."""
-        for idx in torch.unique(indexes):
-            mask = indexes == idx
-            t = target[mask]
-            r = int(t.sum())
-            if r == 0:
-                self.n_dropped = self.n_dropped + 1
-                continue
-            top = preds[mask].topk(min(r, t.numel())).indices
-            self.score_sum = self.score_sum + t[top].sum() / r
-            self.n_users = self.n_users + 1
+        labels = target.bool()
+        _, (scores, labels), valid = _dense_by_user(indexes, (preds, labels))
+        n_pos, in_top_r = _top_r(scores, labels, valid)
+
+        is_user_scored_mask = n_pos > 0
+        hits = (in_top_r & labels).sum(dim=1)
+
+        self.score_sum = self.score_sum + (hits[is_user_scored_mask] / n_pos[is_user_scored_mask]).sum()
+        self.n_users = self.n_users + is_user_scored_mask.sum()
+        self.n_dropped = self.n_dropped + (~is_user_scored_mask).sum()
 
     def compute(self) -> torch.Tensor:
         """Return the mean R-precision over scored users."""
@@ -206,51 +203,43 @@ class PerUserRanking(Metric):
         Args:
             preds: flat tensor of predicted scores, [n_users * n_nodes]
             target: tensor of binary visit labels, aligned with ``preds``, [n_users * n_nodes]
-            indexes: tensor of user ids of each row, [n_users * n_nodes]
+            indexes: tensor of the dataset index of the user of each row, [n_users * n_nodes]
             exclude: boolean mask of the rows to be excluded from ranking (e.g. ``is_home`` flag), , aligned with
                 ``preds``, [n_users * n_nodes]
             hops: tensor of hop distances for each node, aligned with ``preds``, [n_users * n_nodes]
         """
-        for idx in torch.unique(indexes):
-            mask = indexes == idx
+        labels = target.bool()
+        users, (scores, labels, excluded, hop_rows), valid = _dense_by_user(indexes, (preds, labels, exclude, hops))
+        candidates = valid & ~excluded
 
-            full_target = target[mask]
-            full_scores = preds[mask]
+        n_pos_home_incl = (labels & valid).sum(dim=1)
+        n_pos, in_top_r = _top_r(scores, labels, candidates)
 
-            non_excluded_nodes = ~exclude[mask]
-            scored_target = full_target[non_excluded_nodes]
-            scored_scores = full_scores[non_excluded_nodes]
-            scored_hops = hops[mask][non_excluded_nodes]
-            scored_nodes = torch.arange(len(full_target), device=full_target.device)[non_excluded_nodes]
+        kept = n_pos > 0
+        scores = scores[kept]
+        labels = labels[kept]
+        candidates = candidates[kept]
+        hop_rows = hop_rows[kept]
+        in_top_r = in_top_r[kept]
+        n_pos = n_pos[kept]
 
-            num_positives = int(scored_target.sum())
-            if num_positives == 0:
-                continue
+        r_precision = (in_top_r & labels).sum(dim=1) / n_pos
+        n_scored_higher, n_tied = positive_rank_stats(scores, labels, candidates)
+        rows, nodes = (labels & candidates).nonzero(as_tuple=True)
 
-            top_r = scored_scores.topk(min(num_positives, scored_target.numel())).indices
+        self.user_idx.append(users[kept].long())
+        self.n_pos.append(n_pos.long())
+        self.n_pos_home_incl.append(n_pos_home_incl[kept].long())
+        self.r_precision.append(r_precision.float())
 
-            full_num_positives = full_target.sum()
-            r_precision = scored_target[top_r].sum() / num_positives
+        self.pos_node.append(nodes.long())
+        self.pos_hops.append(hop_rows[rows, nodes].float())
+        self.pos_in_top_r.append(in_top_r[rows, nodes])
+        self.pos_n_scored_higher.append(n_scored_higher.long())
+        self.pos_n_tied.append(n_tied.long())
 
-            is_positive = scored_target.bool()
-            in_top_r = torch.zeros_like(is_positive)
-            in_top_r[top_r] = True
-
-            n_scored_higher, n_tied = positive_rank_stats(scored_scores, scored_target)
-
-            self.user_idx.append(idx.reshape(1).long())
-            self.n_pos.append(torch.full((1,), num_positives, dtype=torch.long, device=scored_scores.device))
-            self.n_pos_home_incl.append(full_num_positives.reshape(1).long())
-            self.r_precision.append(r_precision.reshape(1).float())
-
-            self.pos_node.append(scored_nodes[is_positive].long())
-            self.pos_hops.append(scored_hops[is_positive].float())
-            self.pos_in_top_r.append(in_top_r[is_positive])
-            self.pos_n_scored_higher.append(n_scored_higher.long())
-            self.pos_n_tied.append(n_tied.long())
-
-            if self.store_score_vectors:
-                self.score_vector.append(full_scores.detach().float().reshape(1, -1).cpu())
+        if self.store_score_vectors:
+            self.score_vector.append(scores.detach().float().cpu())
 
     def columns(self) -> dict[str, torch.Tensor]:
         """Return the per-user columns as a mapping (col_name -> tensor of values), values are indexed by users.
@@ -293,3 +282,52 @@ class PerUserRanking(Metric):
     def compute(self) -> dict[str, torch.Tensor]:
         """Return the per-user ranking columns."""
         return self.columns()
+
+
+def _dense_by_user(
+    indexes: torch.Tensor, values: Sequence[torch.Tensor]
+) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
+    """Convert flat rows into one row per user, keeping the order within each user's rows.
+
+    Args:
+        indexes: Dataset index of the user of each flat row, ``[n_rows]``.
+        values: List of tensors aligned with ``indexes``, each ``[n_rows]``.
+
+    Returns:
+        A tuple of ``(users, dense, valid)``:
+            - ``users``: the distinct dataset indices in ascending order, ``[n_users]``,
+            - each tensor of ``values``, re-formed as ``[n_users, max_rows_per_user]``, and
+            - the mask of the entries that hold a row, ``[n_users, max_rows_per_user]``. The entries outside the mask
+               hold arbitrary values.
+    """
+    users, user_row = torch.unique(indexes, return_inverse=True)
+    order = torch.argsort(user_row, stable=True)
+    row_of_entry, valid = to_dense_batch(order, user_row[order])
+
+    return users, [value[row_of_entry] for value in values], valid
+
+
+def _top_r(scores: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Identify each user's ``R`` highest-scored candidates, ``R`` being the number of positives among the candidates.
+
+    Among tied candidates, the ones earlier in the row are placed first.
+
+    Args:
+        scores: Candidate scores, ``[n_users, n_nodes]``.
+        target: Boolean labels aligned with ``scores``.
+        valid: Boolean mask aligned with ``scores`` of the entries that are candidates.
+
+    Returns:
+        ``(n_pos, in_top_r)``: the number of positive candidates of each user, ``[n_users]``, and the mask of the
+        candidates in the user's top ``R``, ``[n_users, n_nodes]``.
+    """
+    n_pos = (target & valid).sum(dim=1)
+
+    masked_scores = scores.masked_fill(~valid, float("-inf"))
+    order = masked_scores.argsort(dim=1, descending=True, stable=True)
+    positions = torch.arange(scores.shape[1], device=scores.device).expand_as(order)
+    rank = torch.empty_like(order).scatter_(1, order, positions)
+
+    in_top_r = (rank < n_pos[:, None]) & valid
+
+    return n_pos, in_top_r

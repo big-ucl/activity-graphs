@@ -76,15 +76,27 @@ class SurveyDataModule(L.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         """Return a shuffled loader over the users of the training split."""
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return self._loader(self.train_dataset, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:
         """Return a loader over the users of the validation split."""
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return self._loader(self.val_dataset, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
         """Return a loader over the users of the test split."""
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return self._loader(self.test_dataset, shuffle=False)
+
+    def _loader(self, dataset: UserDataset, shuffle: bool) -> DataLoader:
+        """Return a loader over ``dataset`` with persistent workers across epochs."""
+        persistent_workers = self.num_workers > 0
+
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=self.num_workers,
+            persistent_workers=persistent_workers,
+        )
 
     @property
     def locations(self) -> Locations:
