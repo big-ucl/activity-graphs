@@ -25,7 +25,7 @@ from activitygraphs.surveys.cmap import (
 from activitygraphs.surveys.demographics import DEMOGRAPHICS_SCHEMA
 from activitygraphs.tensors.build import (
     build_group_ids,
-    build_home_indicator,
+    build_home_nodes,
     build_user_attributes,
     build_visit_labels,
 )
@@ -410,18 +410,16 @@ class TestCMAPSurveyViews:
 
 
 class TestUserNodeTensors:
-    def test_home_indicator_marks_each_users_home_only(self, cmap_survey):
-        is_home = build_home_indicator(cmap_survey).squeeze(-1)
-
-        assert is_home.tolist() == [[1, 0, 0], [1, 0, 0], [0, 1, 0]]
+    def test_home_nodes_are_the_users_home_locations(self, cmap_survey):
+        assert build_home_nodes(cmap_survey).tolist() == [0, 0, 1]
 
     def test_visit_labels_over_every_purpose_mark_both_trip_ends(self, cmap_survey):
-        labels = build_visit_labels(cmap_survey, list(Purpose)).squeeze(-1)
+        labels = build_visit_labels(cmap_survey, list(Purpose))
 
         assert labels.tolist() == [[1, 1, 0]] * 3
 
     def test_visit_labels_keep_only_the_given_purposes(self, cmap_survey):
-        labels = build_visit_labels(cmap_survey, [Purpose.WORK_MAIN]).squeeze(-1)
+        labels = build_visit_labels(cmap_survey, [Purpose.WORK_MAIN])
 
         assert labels.tolist() == [[0, 1, 0]] * 3
 

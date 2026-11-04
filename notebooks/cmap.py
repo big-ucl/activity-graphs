@@ -64,31 +64,33 @@ def _(edges_gdf, nodes_gdf):
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.datasets.dataset import load_dataset
+    from activitygraphs.datasets import Users
+    from activitygraphs.tensors import load_tensors
 
-    tensors = load_dataset(cfg, project_root)
-    return (tensors,)
+    location_tensors, user_tensors, _ = load_tensors(cfg, project_root)
+    users = Users.from_tensors(user_tensors, None)
+    return location_tensors, users
 
 
 @app.cell
-def _(tensors):
-    tensors.median_realised_size / len(tensors)
+def _(users):
+    users.median_realised_size / users.num_users
     return
 
 
 @app.cell
-def _(tensors):
+def _(location_tensors, users):
     from activitygraphs.analysis import home_zone_summary
 
-    home_zone_summary(tensors)
+    home_zone_summary(users.home_node, location_tensors.num_nodes)
     return
 
 
 @app.cell
 def _(cfg):
-    from activitygraphs.datasets import HouseholdSplit, VisitDataModule
+    from activitygraphs.datasets import HouseholdSplit, SurveyDataModule
 
-    datamodule = VisitDataModule(
+    datamodule = SurveyDataModule(
         cfg,
         HouseholdSplit(cfg.train.val_size, cfg.train.test_size),
         cfg.train.split_seed,
@@ -103,8 +105,7 @@ def _(cfg):
 @app.cell
 def _(datamodule):
     full_dataset = datamodule.train_dataset
-    is_home_idx = full_dataset.schema.user_nodes.index_of("is_home")
-    full_dataset.user_node_features[:, :, is_home_idx].argmax(dim=1).shape
+    full_dataset.users.home_node.shape
     return
 
 

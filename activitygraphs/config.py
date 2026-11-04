@@ -151,15 +151,13 @@ class CMAPPaths(SurveyPaths):
 
 @dataclass
 class DataPaths:
-    """Filesystem paths for a dataset (raw, processed, external, tensors)."""
+    """Filesystem paths for a dataset (raw, processed, external)."""
 
     processed: Path
     raw: Path
 
     external: Path
     gtfs: Path
-
-    tensors: Path
 
 
 # ===================================================
@@ -336,24 +334,33 @@ class ModelConfig:
     """Config for one architecture, from the ``model`` config group. Contains name, optimiser settings and model arch.
 
     Attributes:
-        architecture: Key of the builder in ``experiments.architectures.BUILDERS`` that constructs the model.
+        architecture: Key of the builder in ``models.architectures.BUILDERS`` that constructs the scorer.
         name: Name the architecture is reported under; a variant appends its flags to it.
         lr: Initial AdamW learning rate.
         weight_decay: AdamW weight decay.
-        hidden_channels: Width of the hidden layers.
-        dropout: Dropout probability.
     """
 
     architecture: str
     name: str
     lr: float
     weight_decay: float
+
+
+@dataclass
+class NetworkConfig(ModelConfig):
+    """Config for an neural network architecture.
+
+    Attributes:
+        hidden_channels: Width of the hidden layers.
+        dropout: Dropout probability.
+    """
+
     hidden_channels: int
     dropout: float
 
 
 @dataclass
-class MLPConfig(ModelConfig):
+class MLPConfig(NetworkConfig):
     """Config for the node-wise MLP (``NodeMLP``).
 
     Attributes:
@@ -364,7 +371,7 @@ class MLPConfig(ModelConfig):
 
 
 @dataclass
-class GATConfig(ModelConfig):
+class GATConfig(NetworkConfig):
     """Config for the GATv2 with skip connections (``GAT``).
 
     Attributes:
@@ -383,7 +390,7 @@ class GATConfig(ModelConfig):
 
 
 @dataclass
-class GPSConfig(ModelConfig):
+class GPSConfig(NetworkConfig):
     """Config for the GPS graph transformer (``GraphTransformer``).
 
     Attributes:
@@ -393,6 +400,52 @@ class GPSConfig(ModelConfig):
 
     num_layers: int
     num_heads: int
+
+
+@dataclass
+class TwoTowerConfig(GATConfig):
+    """Config for the two-tower scorer (``TwoTowerScorer``), whose node tower is a ``GAT`` with the fields of ``GATConfig``.
+
+    Attributes:
+        embedding_dim: Width ``d`` of the node and user embeddings.
+        num_user_layers: Number of linear layers of the user tower.
+        num_pair_layers: Number of linear layers of the pairwise block.
+        bias: The bias of each node. ``location`` is a function of the node embedding, and ``node`` is a free
+            parameter per node, an in-city diagnostic.
+        node_embedding: Append a learned embedding of each node's identity, of width ``d``, to the node tower's
+            input. It is an in-city diagnostic.
+    """
+
+    embedding_dim: int
+    num_user_layers: int
+    num_pair_layers: int
+    bias: Literal["location", "node"]
+    node_embedding: bool
+
+
+def two_tower_name_suffix(bias: str, node_embedding: bool) -> str:
+    """Return the part of a two-tower name that records its in-city diagnostics, empty for the transferable model."""
+    suffix = ""
+    if bias == "node":
+        suffix += "-nodebias"
+    if node_embedding:
+        suffix += "-nodeemb"
+
+    return suffix
+
+
+OmegaConf.register_new_resolver("two_tower_suffix", two_tower_name_suffix)
+
+
+@dataclass
+class HomeZoneMFConfig(ModelConfig):
+    """Config for the home-zone matrix factorisation (``HomeZoneMFBaseline``).
+
+    Attributes:
+        n_factors: Latent dimension of the home and node factors.
+    """
+
+    n_factors: int
 
 
 @dataclass

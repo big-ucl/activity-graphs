@@ -1,4 +1,4 @@
-"""Split strategies, each assigning every user of a dataset to the train, validation or test split, and the split cache."""
+"""Split strategies, each assigning every user of a survey to the train, validation or test split, and the split cache."""
 
 import json
 import logging
@@ -8,7 +8,7 @@ from typing import Protocol
 
 from sklearn.model_selection import GroupShuffleSplit
 
-from activitygraphs.datasets.dataset import Fingerprint, VisitDataset
+from activitygraphs.tensors import Fingerprint, UserTensors
 
 log = logging.getLogger(__name__)
 
@@ -16,15 +16,15 @@ type SplitIndices = tuple[list[int], list[int], list[int]]
 
 
 class SplitStrategy(Protocol):
-    """A rule assigning every user of a dataset to the train, validation or test split."""
+    """A rule assigning every user of a survey to the train, validation or test split."""
 
     @property
     def key(self) -> str:
         """Name of the strategy and its parameters in the split and transform cache file names."""
         ...
 
-    def split(self, dataset: VisitDataset, seed: int) -> SplitIndices:
-        """Return the ``(train, val, test)`` user indices of ``dataset`` drawn with ``seed``."""
+    def split(self, users: UserTensors, seed: int) -> SplitIndices:
+        """Return the ``(train, val, test)`` indices of ``users`` drawn with ``seed``."""
         ...
 
 
@@ -45,16 +45,16 @@ class HouseholdSplit:
         """Cache key naming the split fractions."""
         return f"val{self.val_size}_test{self.test_size}_household"
 
-    def split(self, dataset: VisitDataset, seed: int) -> SplitIndices:
-        """Return the ``(train, val, test)`` user indices of ``dataset``, grouped by ``dataset.group_ids``."""
-        all_idx = list(range(len(dataset)))
+    def split(self, users: UserTensors, seed: int) -> SplitIndices:
+        """Return the ``(train, val, test)`` indices of ``users``, grouped by ``users.group_ids``."""
+        all_idx = list(range(users.num_users))
 
         # Split Test and Train-Val
         gss_test = GroupShuffleSplit(n_splits=1, test_size=self.test_size, random_state=seed)
-        train_val_idx, test_idx = next(iter(gss_test.split(all_idx, groups=dataset.group_ids)))
+        train_val_idx, test_idx = next(iter(gss_test.split(all_idx, groups=users.group_ids)))
 
         # Compute size of validation set and adjust the group Ids
-        train_val_group_ids = dataset.group_ids[train_val_idx]
+        train_val_group_ids = users.group_ids[train_val_idx]
         proportional_val_size = self.val_size / (1 - self.test_size)
 
         # Split Val and Train
@@ -82,7 +82,7 @@ def read_split_indices(cache_path: Path, fingerprint: Fingerprint) -> SplitIndic
 
 
 def load_split_indices(
-    dataset: VisitDataset,
+    users: UserTensors,
     split: SplitStrategy,
     seed: int,
     fingerprint: Fingerprint,
@@ -98,7 +98,7 @@ def load_split_indices(
 
         log.info("Cached indices at `%s` do not match fingerprint, re-splitting.", cache_path.name)
 
-    train_idx, val_idx, test_idx = split.split(dataset, seed)
+    train_idx, val_idx, test_idx = split.split(users, seed)
 
     assert set(train_idx) & set(val_idx) == set() and set(train_idx + val_idx) & set(test_idx) == set(), (
         "Assert train/val/test sets are disjoint."

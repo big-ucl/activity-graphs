@@ -994,24 +994,24 @@ def _(cfg, latest_overfit_dir, max_recall_k, project_root, read_run):
 def _(mo):
     mo.md(r"""
     ## Home zones analysis
-    Based on original `VisitDataset`, no model outputs needed.
+    Based on the survey's users, no model outputs needed.
     """)
     return
 
 
 @app.cell
 def _(cfg, project_root):
-    from activitygraphs.datasets.dataset import load_dataset
+    from activitygraphs.tensors import load_tensors
 
-    dataset = load_dataset(cfg, project_root)
-    return (dataset,)
+    location_tensors, user_tensors, _ = load_tensors(cfg, project_root)
+    return location_tensors, user_tensors
 
 
 @app.cell
-def _(dataset):
+def _(location_tensors, user_tensors):
     from activitygraphs.analysis import home_zone_summary
 
-    home_zone_summary(dataset)
+    home_zone_summary(user_tensors.home_node, location_tensors.num_nodes)
     return
 
 

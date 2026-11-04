@@ -7,7 +7,7 @@ from torch_geometric.utils import to_dense_batch
 from torchmetrics import Metric
 from torchmetrics.utilities.data import dim_zero_cat
 
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
+from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Hop bands: (label, low_hops_inclusive, high_hops_inclusive)
 HopBands = Collection[tuple[str, float, float]]
@@ -167,7 +167,7 @@ class PerUserRanking(Metric):
 
     full_state_update = False
 
-    user_id: list[torch.Tensor]
+    user_idx: list[torch.Tensor]
     n_pos: list[torch.Tensor]
     n_pos_home_incl: list[torch.Tensor]
     r_precision: list[torch.Tensor]
@@ -180,7 +180,7 @@ class PerUserRanking(Metric):
 
     score_vector: list[torch.Tensor]
 
-    _FIELDS = ("user_id", "n_pos", "n_pos_home_incl", "r_precision")
+    _FIELDS = ("user_idx", "n_pos", "n_pos_home_incl", "r_precision")
     _POSITIVE_FIELDS = ("pos_node", "pos_hops", "pos_in_top_r", "pos_n_scored_higher", "pos_n_tied")
 
     def __init__(self, store_score_vectors: bool = False) -> None:
@@ -238,7 +238,7 @@ class PerUserRanking(Metric):
 
             n_scored_higher, n_tied = positive_rank_stats(scored_scores, scored_target)
 
-            self.user_id.append(idx.reshape(1).long())
+            self.user_idx.append(idx.reshape(1).long())
             self.n_pos.append(torch.full((1,), num_positives, dtype=torch.long, device=scored_scores.device))
             self.n_pos_home_incl.append(full_num_positives.reshape(1).long())
             self.r_precision.append(r_precision.reshape(1).float())

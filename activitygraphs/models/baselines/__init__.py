@@ -1,14 +1,13 @@
 """Baselines for visit prediction: frequency-based, distance-decay and matrix factorisation."""
 
-from activitygraphs.ml.baselines.common import Baseline
-from activitygraphs.ml.baselines.factorization import HomeZoneMFBaseline
-from activitygraphs.ml.baselines.frequency import (
+from activitygraphs.models.baselines.factorization import HomeZoneMFBaseline
+from activitygraphs.models.baselines.frequency import (
     ConditionalVisitFrequencyBaseline,
     GlobalBaseline,
     UniformBaseline,
     VisitFrequencyBaseline,
 )
-from activitygraphs.ml.baselines.gravity import (
+from activitygraphs.models.baselines.gravity import (
     ConditionalGravityBaseline,
     DistanceDecayBaseline,
     GravityBaseline,
@@ -16,7 +15,6 @@ from activitygraphs.ml.baselines.gravity import (
 )
 
 __all__ = [
-    "Baseline",
     "UniformBaseline",
     "GlobalBaseline",
     "VisitFrequencyBaseline",

@@ -1,14 +1,13 @@
 """Tests for the post-hoc analysis of experiment outputs (seed spread, pairing, hop bands, home zones)."""
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
 import pytest
 import torch
-import torch_geometric as pyg
 from encoders import make_encoder
+from graphs import chain_edge_index, join_users, make_locations, make_users
 from torchmetrics import Metric
 
 from activitygraphs.analysis import (
@@ -47,11 +46,11 @@ from activitygraphs.analysis import (
     within_band_auc_table,
 )
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.models import NodeMLP
+from activitygraphs.models.networks import NodeMLP
+from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.runs import PER_USER_FILE, RESULTS_FILE, SCORES_FILE
-from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import BCELoss
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"
@@ -77,50 +76,24 @@ REALISED_SIZES = {1: 2, 2: 3, 3: 4}
 def make_per_user() -> pl.DataFrame:
     """Three users scored by a model at two seeds and by a baseline once; the model wins on every user."""
     rows = [
-        {"name": name, "stage": PER_USER_STAGE, "user_id": user, "seed": seed, "r_precision": score}
+        {"name": name, "stage": PER_USER_STAGE, "user_idx": user, "seed": seed, "r_precision": score}
         for name, seed, scores in [("MLP", 42, [0.5, 0.5, 1.0]), ("MLP", 43, [0.5, 1.0, 1.0])]
         for user, score in zip([1, 2, 3], scores, strict=True)
     ]
     rows += [
-        {"name": "Baseline", "stage": PER_USER_STAGE, "user_id": user, "seed": None, "r_precision": score}
+        {"name": "Baseline", "stage": PER_USER_STAGE, "user_idx": user, "seed": None, "r_precision": score}
         for user, score in zip([1, 2, 3], [0.0, 0.5, 0.5], strict=True)
     ]
 
-    return pl.DataFrame(rows).with_columns(pl.col("user_id").replace_strict(REALISED_SIZES).alias(REALISED_SIZE_COLUMN))
-
-
-@dataclass
-class FakeSchema:
-    """Minimal stand-in for the ``DatasetSchema`` of a ``FakeDataset``."""
-
-    user_nodes: TensorSchema
-
-
-@dataclass
-class FakeDataset:
-    """Minimal stand-in exposing only what ``home_zone_summary`` reads off an ``VisitDataset``."""
-
-    user_node_features: torch.Tensor
-    num_nodes: int
-    schema: FakeSchema
-
-
-def make_dataset(home_nodes: list[int], n_nodes: int = 3, is_home_idx: int = 1) -> FakeDataset:
-    """Dataset whose ``is_home`` column peaks at ``home_nodes[i]`` for user ``i``."""
-    user_node = torch.zeros(len(home_nodes), n_nodes, is_home_idx + 1)
-    for user, node in enumerate(home_nodes):
-        user_node[user, node, is_home_idx] = 1.0
-
-    columns = tuple(ColumnSpec(f"flag_{c}", ColumnKind.BINARY) for c in range(is_home_idx))
-    user_nodes = TensorSchema("user_nodes", (*columns, ColumnSpec("is_home", ColumnKind.BINARY)))
-
-    return FakeDataset(user_node_features=user_node, num_nodes=n_nodes, schema=FakeSchema(user_nodes))
+    return pl.DataFrame(rows).with_columns(
+        pl.col("user_idx").replace_strict(REALISED_SIZES).alias(REALISED_SIZE_COLUMN)
+    )
 
 
 def make_score_vectors(run_scores: list[list[float]]) -> pl.DataFrame:
     """Score-vector rows as ``save_results`` writes them to ``<name>-scores-<n>.parquet``."""
     return pl.DataFrame({
-        "user_id": list(range(len(run_scores))),
+        "user_idx": list(range(len(run_scores))),
         "scores": run_scores,
     }).with_columns(
         name=pl.lit("MLP-dist"),
@@ -258,21 +231,21 @@ class TestModelHealthChecks:
     def _score_vectors(self) -> pl.DataFrame:
         rows = []
         for seed in (42, 43):
-            for user_id, home in self.HOMES.items():
+            for user_idx, home in self.HOMES.items():
                 collapsed = list(self.POPULARITY)
                 home_aware = list(self.POPULARITY)
                 home_aware[home] = 0.99
-                rows.append({"name": "Collapsed", "seed": seed, "user_id": user_id, "scores": collapsed})
-                rows.append({"name": "HomeAware", "seed": seed, "user_id": user_id, "scores": home_aware})
+                rows.append({"name": "Collapsed", "seed": seed, "user_idx": user_idx, "scores": collapsed})
+                rows.append({"name": "HomeAware", "seed": seed, "user_idx": user_idx, "scores": home_aware})
 
-        for user_id in self.HOMES:
-            rows.append({"name": "VisitFrequency", "seed": None, "user_id": user_id, "scores": list(self.POPULARITY)})
+        for user_idx in self.HOMES:
+            rows.append({"name": "VisitFrequency", "seed": None, "user_idx": user_idx, "scores": list(self.POPULARITY)})
 
         return pl.DataFrame(rows, schema_overrides={"seed": pl.Int64})
 
     def _per_user(self) -> pl.DataFrame:
         return pl.DataFrame({
-            "user_id": list(self.HOMES),
+            "user_idx": list(self.HOMES),
             "home_node": list(self.HOMES.values()),
             "stage": [PER_USER_STAGE] * len(self.HOMES),
         })
@@ -348,7 +321,7 @@ class TestRealisedSizeRestriction:
     def test_users_below_the_threshold_are_dropped(self):
         restricted = _restrict_to_realised_size(make_per_user(), min_size=3)
 
-        assert sorted(restricted["user_id"].unique().to_list()) == [2, 3]
+        assert sorted(restricted["user_idx"].unique().to_list()) == [2, 3]
 
     def test_non_per_user_rows_pass_through(self):
         """Aggregate and score-vector rows have no set size of their own and must survive the filter."""
@@ -499,7 +472,7 @@ class TestDiffSdPerSeed:
         )
         averaged_reference = (
             seeded_reference
-            .group_by("name", "stage", "user_id")
+            .group_by("name", "stage", "user_idx")
             .agg(pl.col("r_precision").mean())
             .with_columns(seed=pl.lit(None, dtype=pl.Int64))
         )
@@ -538,7 +511,7 @@ def make_positive_per_user() -> pl.DataFrame:
             "name": name,
             "stage": PER_USER_STAGE,
             "seed": seed,
-            "user_id": user,
+            "user_idx": user,
             "n_pos": len(hops),
             "r_precision": sum(flags[user]) / len(hops),
             "pos_hops": hops,
@@ -558,16 +531,16 @@ class TestBandDecomposition:
         contributions = band_contributions(make_positive_per_user(), PER_USER_METRIC)
 
         assert contributions.height == 6 * 3
-        user_2_far = contributions.filter((pl.col("user_id") == 2) & (pl.col("band") == "13+"))
+        user_2_far = contributions.filter((pl.col("user_idx") == 2) & (pl.col("band") == "13+"))
         assert user_2_far["contribution"].to_list() == [0.0, 0.0, 0.0]
 
     def test_contributions_sum_to_the_per_user_metric(self):
         per_user = make_positive_per_user().with_columns(pl.col("seed").fill_null(-1))
         summed = (
             band_contributions(per_user, PER_USER_METRIC)
-            .group_by("name", "seed", "user_id")
+            .group_by("name", "seed", "user_idx")
             .agg(pl.col("contribution").sum())
-            .join(per_user.select("name", "seed", "user_id", "r_precision"), on=["name", "seed", "user_id"])
+            .join(per_user.select("name", "seed", "user_idx", "r_precision"), on=["name", "seed", "user_idx"])
         )
 
         assert summed["contribution"].to_list() == pytest.approx(summed["r_precision"].to_list())
@@ -607,9 +580,9 @@ class TestBandDecomposition:
         per_user = with_ranking_metrics(make_positive_per_user(), BUDGET).with_columns(pl.col("seed").fill_null(-1))
         summed = (
             band_contributions(per_user, "avg_recall")
-            .group_by("name", "seed", "user_id")
+            .group_by("name", "seed", "user_idx")
             .agg(pl.col("contribution").sum())
-            .join(per_user.select("name", "seed", "user_id", "avg_recall"), on=["name", "seed", "user_id"])
+            .join(per_user.select("name", "seed", "user_idx", "avg_recall"), on=["name", "seed", "user_idx"])
         )
 
         assert summed.height == 6
@@ -619,7 +592,7 @@ class TestBandDecomposition:
         """Baseline user 1: the hop-1 positive at rank 1 gives 1/2, the unreachable one at rank 11 gives 0.8 / 2."""
         per_user = with_ranking_metrics(make_positive_per_user(), BUDGET)
         contributions = band_contributions(per_user, "avg_recall").filter(
-            (pl.col("name") == "Baseline") & (pl.col("user_id") == 1)
+            (pl.col("name") == "Baseline") & (pl.col("user_idx") == 1)
         )
 
         by_band = dict(zip(contributions["band"], contributions["contribution"], strict=True))
@@ -653,7 +626,7 @@ def make_band_per_user() -> pl.DataFrame:
             "name": name,
             "stage": PER_USER_STAGE,
             "seed": seed,
-            "user_id": user,
+            "user_idx": user,
             "n_pos": len(positives),
             "home_node": 0,
             "pos_node": positives,
@@ -668,7 +641,7 @@ def make_band_per_user() -> pl.DataFrame:
 def make_band_score_vectors() -> pl.DataFrame:
     """Score vectors of the same models, identical across seeds and users."""
     rows = [
-        {"name": name, "stage": SCORE_VECTOR_STAGE, "seed": seed, "user_id": user, "scores": BAND_SCORES[name]}
+        {"name": name, "stage": SCORE_VECTOR_STAGE, "seed": seed, "user_idx": user, "scores": BAND_SCORES[name]}
         for name, seed in [("MLP", 42), ("MLP", 43), ("Baseline", None)]
         for user in BAND_POSITIVES
     ]
@@ -677,7 +650,7 @@ def make_band_score_vectors() -> pl.DataFrame:
 
 
 def make_band_home_distances() -> pl.DataFrame:
-    return pl.DataFrame({"user_id": list(BAND_POSITIVES), "distances": [NODE_DISTANCES, NODE_DISTANCES]})
+    return pl.DataFrame({"user_idx": list(BAND_POSITIVES), "distances": [NODE_DISTANCES, NODE_DISTANCES]})
 
 
 def band_auc_frame(bands: list[float] | None = None) -> pl.DataFrame:
@@ -695,12 +668,12 @@ class TestWithinBandAUC:
         """Home outscores the near positive, so counting it would drop that AUC from 1 to 0.5."""
         near = band_auc_frame().filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("band") == "0-1"))
 
-        assert near["user_id"].to_list() == [1]
+        assert near["user_idx"].to_list() == [1]
         assert near["auc"].to_list() == pytest.approx([1.0])
         assert near["n_band_neg"].to_list() == pytest.approx([1.0])
 
     def test_a_positive_alone_in_its_band_is_dropped(self):
-        far = band_auc_frame().filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_id") == 2))
+        far = band_auc_frame().filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_idx") == 2))
 
         assert far["band"].to_list() == ["1-5"]
         assert far["auc"].to_list() == pytest.approx([0.0])
@@ -710,7 +683,7 @@ class TestWithinBandAUC:
         wide = band_auc_frame(bands=[5.0]).filter((pl.col("name") == "MLP") & (pl.col("seed") == 42))
 
         assert wide["band"].unique().to_list() == ["0-5"]
-        assert dict(zip(wide["user_id"], wide["auc"], strict=True)) == pytest.approx({1: 1.0, 2: 1 / 3})
+        assert dict(zip(wide["user_idx"], wide["auc"], strict=True)) == pytest.approx({1: 1.0, 2: 1 / 3})
 
     def test_table_averages_users_then_seeds(self):
         table = within_band_auc_table(band_auc_frame()).filter(pl.col("name") == "MLP")
@@ -733,8 +706,8 @@ BAND_POSITIVE_RECALL = {"MLP": {1: [0.8, 0.4], 2: [0.6, 0.2]}, "Baseline": {1: [
 
 def by_distance_frame() -> pl.DataFrame:
     per_user = make_band_per_user().with_columns(
-        pos_avg_recall=pl.struct("name", "user_id").map_elements(
-            lambda row: BAND_POSITIVE_RECALL[row["name"]][row["user_id"]], return_dtype=pl.List(pl.Float64)
+        pos_avg_recall=pl.struct("name", "user_idx").map_elements(
+            lambda row: BAND_POSITIVE_RECALL[row["name"]][row["user_idx"]], return_dtype=pl.List(pl.Float64)
         )
     )
 
@@ -781,7 +754,7 @@ def make_ranked_per_user() -> pl.DataFrame:
             "name": name,
             "stage": PER_USER_STAGE,
             "seed": seed,
-            "user_id": user,
+            "user_idx": user,
             "pos_n_scored_higher": counts,
             "pos_n_tied": [0] * len(counts),
         }
@@ -793,7 +766,7 @@ def make_ranked_per_user() -> pl.DataFrame:
             "name": "Uniform",
             "stage": PER_USER_STAGE,
             "seed": None,
-            "user_id": user,
+            "user_idx": user,
             "pos_n_scored_higher": [0] * n_pos,
             "pos_n_tied": [9] * n_pos,
         }
@@ -810,13 +783,13 @@ class TestRecallCurve:
 
     def test_without_ties_a_positive_counts_when_fewer_than_k_score_above(self):
         recalls = recall_at_ks(make_ranked_per_user(), [1, 2, 5]).filter(
-            (pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_id") == 1)
+            (pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_idx") == 1)
         )
         assert recalls["recall_at_k"].to_list() == pytest.approx([0.5, 0.5, 1.0])
 
     def test_a_fully_tied_model_gets_k_over_the_candidate_count(self):
         recalls = recall_at_ks(make_ranked_per_user(), [1, 2, 20]).filter(
-            (pl.col("name") == "Uniform") & (pl.col("user_id") == 1)
+            (pl.col("name") == "Uniform") & (pl.col("user_idx") == 1)
         )
         assert recalls["recall_at_k"].to_list() == pytest.approx([0.1, 0.2, 1.0])
 
@@ -826,7 +799,7 @@ class TestRecallCurve:
             "name": ["MLP"],
             "stage": [PER_USER_STAGE],
             "seed": [42],
-            "user_id": [1],
+            "user_idx": [1],
             "pos_n_scored_higher": [[2]],
             "pos_n_tied": [[3]],
         })
@@ -855,7 +828,7 @@ class TestWithRankingMetrics:
     def test_derives_the_per_user_mean_of_the_positive_contributions(self):
         """User 1 at seed 42 has positives at ranks 1 and 4: (50/50 + 47/50) / 2."""
         per_user = with_ranking_metrics(make_ranked_per_user(), BUDGET)
-        row = per_user.filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_id") == 1))
+        row = per_user.filter((pl.col("name") == "MLP") & (pl.col("seed") == 42) & (pl.col("user_idx") == 1))
 
         assert row["avg_recall"].to_list() == pytest.approx([(1.0 + 0.94) / 2])
         assert row["pos_avg_recall"].to_list() == [pytest.approx([1.0, 0.94])]
@@ -876,33 +849,27 @@ class TestWithRankingMetrics:
 
 
 def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) -> tuple[dict, pl.DataFrame]:
-    """Test an untrained module on graphs with coarse scores, returning its logged metrics and per-user rows."""
+    """Test an untrained module on users with coarse scores, returning its logged metrics and per-user rows."""
     generator = torch.Generator().manual_seed(0)
-    graphs = []
-    for user in range(num_graphs):
-        x_loc = torch.rand(num_nodes, 1, generator=generator)
-        x_user_node = torch.zeros(num_nodes, 1)
-        x_user_node[0, 0] = 1.0
-        y = (torch.rand(num_nodes, 1, generator=generator) < 0.2).float()
-        y[0] = 1.0
-        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y)
-        graph.user_attr = torch.zeros(1, 1)
-        graph.user_id = torch.tensor([user])
-        graphs.append(graph)
+    visited = (torch.rand(num_graphs, num_nodes, generator=generator) < 0.2).float()
+    visited[:, 0] = 1.0
+    home_node = torch.zeros(num_graphs, dtype=torch.long)
+    users = make_users(visited, home_node, attributes=torch.zeros(num_graphs, 1))
 
-    idx = torch.arange(num_nodes)
-    encoder = make_encoder(1, 1, 1)
+    x = torch.zeros(num_nodes, 1)
+    locations = make_locations(x, chain_edge_index(num_nodes))
+    encoder = make_encoder(1, 1)
     module = RankingModule(
-        model=NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1),
-        feature_encoder=encoder,
+        scorer=NodeScorer(
+            encoder, NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
+        ),
+        locations=locations,
         lr=1e-3,
         loss=BCELoss,
-        is_home_idx=0,
-        home_hop_distance=(idx[:, None] - idx[None, :]).abs().float(),
         max_recall_k=budget,
         recall_ks=[1, 5],
     )
-    coarse_logits = (torch.rand(num_graphs * num_nodes, 1, generator=generator) * 4).round()
+    coarse_logits = (torch.rand(num_graphs, num_nodes, generator=generator) * 4).round()
     module.compute_logits = lambda _batch: coarse_logits
 
     logged: dict = {}
@@ -910,7 +877,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
     module.log_dict = lambda mapping, **kw: logged.update(mapping)
 
     with torch.no_grad():
-        module.test_step(pyg.data.Batch.from_data_list(graphs), 0)
+        module.test_step(join_users(locations, users), 0)
     module.on_test_epoch_end()
 
     per_user = pl.DataFrame(module.per_user_columns).with_columns(stage=pl.lit(PER_USER_STAGE))
@@ -953,27 +920,27 @@ class TestLiftOverReference:
 class TestHomeZones:
     def test_counts_users_by_argmax_of_the_home_column(self):
         # Four users over three nodes; is_home is column 1. Homes: node 2, 2, 0, 2.
-        row = home_zone_summary(make_dataset([2, 2, 0, 2])).to_dicts()[0]
+        row = home_zone_summary(torch.tensor([2, 2, 0, 2]), num_nodes=3).to_dicts()[0]
         assert row["n_users"] == 4
         assert row["n_occupied_zones"] == 2
         assert row["max"] == 3
 
     def test_summary_divides_by_occupied_zones_not_all_nodes(self):
-        dataset = make_dataset([0] * 30 + [1] * 10, n_nodes=100)
-        row = home_zone_summary(dataset).to_dicts()[0]
+        home_node = torch.tensor([0] * 30 + [1] * 10)
+        row = home_zone_summary(home_node, num_nodes=100).to_dicts()[0]
         assert row["n_users"] == 40
         assert row["n_occupied_zones"] == 2
         assert row["users_per_occupied_zone"] == 20.0
         assert row["users_per_node"] == 0.4
 
     def test_occupancy_shares_are_over_users(self):
-        dataset = make_dataset([0] * 60 + [1] * 20 + [2] * 5)
-        row = home_zone_summary(dataset).to_dicts()[0]
+        home_node = torch.tensor([0] * 60 + [1] * 20 + [2] * 5)
+        row = home_zone_summary(home_node, num_nodes=3).to_dicts()[0]
         assert row["share_users_ge_10"] == 80 / 85
         assert row["share_users_ge_60"] == 60 / 85
 
     def test_thresholds_are_configurable(self):
-        dataset = make_dataset([0] * 60 + [1] * 20 + [2] * 5)
-        row = home_zone_summary(dataset, occupancy_thresholds=[5]).to_dicts()[0]
+        home_node = torch.tensor([0] * 60 + [1] * 20 + [2] * 5)
+        row = home_zone_summary(home_node, num_nodes=3, occupancy_thresholds=[5]).to_dicts()[0]
         assert set(row) & {"share_users_ge_5"} == {"share_users_ge_5"}
         assert row["share_users_ge_5"] == 1.0

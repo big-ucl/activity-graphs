@@ -2,15 +2,16 @@
 
 import pytest
 import torch
-import torch_geometric as pyg
 from encoders import make_encoder
+from graphs import join_users, make_locations, make_users
 
-from activitygraphs.datasets.dataset import compute_home_hop_distance
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.losses import BCELoss
-from activitygraphs.ml.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
-from activitygraphs.ml.models import NodeMLP
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_rank_stats
+from activitygraphs.datasets.locations import compute_hop_distance
+from activitygraphs.models.networks import NodeMLP
+from activitygraphs.models.scorers import NodeScorer
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
+from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Path graph 0-1-2-3-4 (both directions): hop distance from node 0 is [0, 1, 2, 3, 4].
 PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 3]])
@@ -18,13 +19,13 @@ PATH_EDGE_INDEX = torch.tensor([[0, 1, 2, 3, 1, 2, 3, 4], [1, 2, 3, 4, 0, 1, 2, 
 
 class TestHomeHopDistance:
     def test_path_graph(self):
-        hop = compute_home_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
+        hop = compute_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
         assert hop[0].tolist() == [0, 1, 2, 3, 4]
         assert hop[2].tolist() == [2, 1, 0, 1, 2]
 
     def test_disconnected_is_inf(self):
         edge_index = torch.tensor([[0], [1]])  # only 0-1 connected; node 2 isolated
-        hop = compute_home_hop_distance(edge_index, num_nodes=3)
+        hop = compute_hop_distance(edge_index, num_nodes=3)
         assert hop[0, 2] == float("inf")
 
 
@@ -168,7 +169,7 @@ class TestPerUserRanking:
         vectors = metric.score_vectors()
 
         assert vectors.shape == (2, 4)
-        assert metric.columns()["user_id"].tolist() == [0, 1]
+        assert metric.columns()["user_idx"].tolist() == [0, 1]
         assert vectors[0].tolist() == pytest.approx([0.9, 0.8, 0.2, 0.1])
         assert vectors[1].tolist() == pytest.approx([0.9, 0.2, 0.8, 0.1])
 
@@ -181,15 +182,15 @@ class TestPerUserRanking:
             preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4), hops=chain_hops(2, 2)
         )
 
-        assert metric.columns()["user_id"].tolist() == [0]
+        assert metric.columns()["user_idx"].tolist() == [0]
         assert metric.score_vectors().shape == (1, 2)
 
     def test_retains_one_row_per_user(self):
         columns = self._updated().columns()
 
-        assert set(columns) == {"user_id", "n_pos", "n_pos_home_incl", "r_precision"}
+        assert set(columns) == {"user_idx", "n_pos", "n_pos_home_incl", "r_precision"}
         assert all(len(column) == 2 for column in columns.values())
-        assert columns["user_id"].tolist() == [0, 1]
+        assert columns["user_idx"].tolist() == [0, 1]
         assert columns["n_pos"].tolist() == [2, 2]
 
     def test_scores_match_the_hand_computed_values(self):
@@ -232,7 +233,7 @@ class TestPerUserRanking:
             hops=chain_hops(2, 4),
         )
 
-        assert metric.columns()["user_id"].tolist() == [1]
+        assert metric.columns()["user_idx"].tolist() == [1]
 
     def test_the_retained_score_vector_still_covers_the_home_node(self):
         """The home-rank health check reads these vectors, so the excluded node's score must survive."""
@@ -252,7 +253,7 @@ class TestPerUserRanking:
             preds, target, indexes=torch.tensor([0, 0, 1, 1]), exclude=nothing_excluded(4), hops=chain_hops(2, 2)
         )
 
-        assert metric.columns()["user_id"].tolist() == [0]
+        assert metric.columns()["user_idx"].tolist() == [0]
 
     def test_accumulates_across_batches(self):
         metric = self._updated()
@@ -265,7 +266,7 @@ class TestPerUserRanking:
             hops=chain_hops(1, 2),
         )
 
-        assert metric.columns()["user_id"].tolist() == [0, 1, 2]
+        assert metric.columns()["user_idx"].tolist() == [0, 1, 2]
 
     def test_each_positive_keeps_its_hop_distance(self):
         metric = PerUserRanking()
@@ -373,32 +374,23 @@ class TestPerUserRanking:
 
 
 class TestPerUserColumnsInModule:
-    def _make_graph(self):
-        """One 5-node graph; node 0 is home, positives at hop 0 and hop 3."""
-        x_user_node = torch.zeros(5, 1)
-        x_user_node[0, 0] = 1.0  # is_home at column 0, node 0
-        y = torch.zeros(5, 1)
-        y[0] = 1.0
-        y[3] = 1.0
-        graph = pyg.data.Data(
-            x_loc=torch.rand(5, 1), x_user_node=x_user_node, edge_index=torch.zeros(2, 0, dtype=torch.long), y=y
-        )
-        graph.user_attr = torch.zeros(1, 2)
-        graph.user_attr_cat = torch.zeros(1, 0, dtype=torch.long)
-        graph.user_id = torch.tensor([0])
-        return graph
+    def _make_users(self):
+        """One user of the 5-node path; node 0 is home, positives at hop 0 and hop 3."""
+        visited = torch.zeros(1, 5)
+        visited[0, 0] = 1.0
+        visited[0, 3] = 1.0
+        home_node = torch.tensor([0])
+        return make_users(visited, home_node, attributes=torch.zeros(1, 2))
 
     def test_per_user_columns_populated_at_test_end(self, monkeypatch):
-        hop = compute_home_hop_distance(PATH_EDGE_INDEX, num_nodes=5)
-        encoder = make_encoder(1, 1, 2)
+        locations = make_locations(torch.zeros(5, 1), PATH_EDGE_INDEX)
+        encoder = make_encoder(1, 2)
         model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
         module = RankingModule(
-            model=model,
-            feature_encoder=encoder,
+            scorer=NodeScorer(encoder, model),
+            locations=locations,
             lr=1e-3,
             loss=BCELoss,
-            home_hop_distance=hop,
-            is_home_idx=0,
             max_recall_k=BUDGET,
             recall_ks=KS,
         )
@@ -406,7 +398,7 @@ class TestPerUserColumnsInModule:
         monkeypatch.setattr(module, "log", lambda key, val, **kw: None)
         monkeypatch.setattr(module, "log_dict", lambda mapping, **kw: None)
 
-        batch = pyg.data.Batch.from_data_list([self._make_graph()])
+        batch = join_users(locations, self._make_users())
         module.eval()
         with torch.no_grad():
             module.test_step(batch, 0)
@@ -414,7 +406,7 @@ class TestPerUserColumnsInModule:
 
         columns = module.per_user_columns
         assert set(columns) == {
-            "user_id",
+            "user_idx",
             "n_pos",
             "n_pos_home_incl",
             "r_precision",
@@ -424,7 +416,7 @@ class TestPerUserColumnsInModule:
             "pos_n_scored_higher",
             "pos_n_tied",
         }
-        assert columns["user_id"] == [0]
+        assert columns["user_idx"] == [0]
         assert columns["n_pos"] == [1]  # two positives, one of which is the excluded home node
         assert columns["n_pos_home_incl"] == [2]
         assert 0.0 <= columns["r_precision"][0] <= 1.0

@@ -1,4 +1,4 @@
-"""FeatureTransforms: the per-column transforms of the feature tensors, fitted on the training split, and applied in place."""
+"""FeatureTransforms: the per-column transforms of the feature tensors, fitted on the training split."""
 
 import logging
 import pickle
@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from sklearn.preprocessing import StandardScaler
 
-from activitygraphs.datasets.dataset import Fingerprint, VisitDataset
-from activitygraphs.schema import ColumnKind, TensorSchema
+from activitygraphs.schema import ColumnKind, DatasetSchema, TensorSchema
+from activitygraphs.tensors import Fingerprint, LocationTensors, UserTensors
 
 log = logging.getLogger(__name__)
 
@@ -127,8 +127,8 @@ class FeatureTransforms:
 
     Attributes:
         groups: The transforms of each feature group, keyed by group.
-        policy: The ``TRANSFORM_POLICY`` the transforms were fitted under.
-        fingerprint: Identity of the dataset fitted on, for cache validation.
+        policy: The ``TRANSFORM_POLICY`` used to fit the transforms.
+        fingerprint: Identity of the dataset that was fit on, for cache validation.
     """
 
     groups: dict[str, GroupTransform]
@@ -138,23 +138,6 @@ class FeatureTransforms:
     def is_current(self, fingerprint: Fingerprint) -> bool:
         """Return whether the transforms were fitted on the dataset ``fingerprint`` under the current ``TRANSFORM_POLICY``."""
         return self.fingerprint == fingerprint and self.policy == TRANSFORM_POLICY
-
-    def apply(self, dataset: VisitDataset) -> None:
-        """Transform the feature tensors of ``dataset``, in place.
-
-        Raises:
-            RuntimeError: The transforms were already applied to ``dataset``.
-        """
-        if dataset._is_scaled:
-            raise RuntimeError("FeatureTransforms.apply called twice on the same VisitDataset")
-
-        dataset.pyg_graph.x = self.groups["locations"].apply(dataset.location_x)
-        dataset.pyg_graph.edge_attr = self.groups["edges"].apply(dataset.edge_attr)
-        dataset.user_node_features = self.groups["user_nodes"].apply(dataset.user_node_features)
-        dataset.user_attributes = self.groups["user_attributes"].apply(dataset.user_attributes)
-        dataset.distances = self.groups["distances"].apply(dataset.distances)
-
-        dataset._is_scaled = True
 
     def save(self, path: Path) -> None:
         """Pickle the transforms to ``path``."""
@@ -168,32 +151,51 @@ class FeatureTransforms:
             return pickle.load(f)
 
 
-def fit_transforms(dataset: VisitDataset, train_idx: list[int], fingerprint: Fingerprint) -> FeatureTransforms:
-    """Fit the transforms of each feature group of ``dataset``, under the current ``TRANSFORM_POLICY``.
+def fit_transforms(
+    locations: LocationTensors,
+    users: UserTensors,
+    schema: DatasetSchema,
+    train_idx: list[int],
+    fingerprint: Fingerprint,
+) -> FeatureTransforms:
+    """Fit the transforms of each feature group of ``locations`` and ``users``, under the current ``TRANSFORM_POLICY``.
 
     Args:
-        dataset: The full ``VisitDataset`` (not yet transformed).
+        locations: The location tensors.
+        users: The user tensors.
+        schema: The column schema of each tensor group.
         train_idx: Indices of training users.
         fingerprint: Identity of the dataset being fitted on, stored for cache validation.
 
     Returns:
         ``FeatureTransforms`` with one ``GroupTransform`` per feature group.
+
+    Raises:
+        ValueError: The policy transforms a ``user_nodes`` column.
     """
     policy = TRANSFORM_POLICY
 
+    user_node_transforms = policy.column_transforms(schema.user_nodes.numeric)
+    if _scaled_column_indices(user_node_transforms):
+        raise ValueError("The `user_nodes` columns are built from the home node and cannot be transformed.")
+
+    train_homes = users.home_node[train_idx]
+
     # Location and edge features: no need to separate between train and test, the graph is the same.
     values = {
-        "locations": dataset.location_x,
-        "edges": dataset.edge_attr,
-        "user_nodes": dataset.user_node_features[train_idx],
-        "user_attributes": dataset.user_attributes[train_idx],
-        "distances": dataset.distances[train_idx],
+        "locations": locations.x,
+        "edges": locations.edge_attr,
+        "user_attributes": users.attributes[train_idx],
+        "distances": locations.distance_m[train_homes].unsqueeze(-1),
     }
 
-    groups = {}
-    for schema in dataset.schema.feature_groups:
-        numeric = schema.numeric
+    groups = {"user_nodes": GroupTransform(user_node_transforms, None)}
+    for group_schema in schema.feature_groups:
+        if group_schema is schema.user_nodes:
+            continue
+
+        numeric = group_schema.numeric
         transforms = policy.column_transforms(numeric)
-        groups[schema.group] = GroupTransform.fit(numeric, transforms, values[schema.group])
+        groups[group_schema.group] = GroupTransform.fit(numeric, transforms, values[group_schema.group])
 
     return FeatureTransforms(groups=groups, policy=policy, fingerprint=fingerprint)

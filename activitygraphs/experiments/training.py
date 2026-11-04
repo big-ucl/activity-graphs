@@ -6,25 +6,23 @@ from typing import cast
 
 import lightning as L
 import polars as pl
-import torch
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config
-from activitygraphs.datasets import VisitDataModule
+from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
-from activitygraphs.ml.baselines import Baseline
-from activitygraphs.ml.callbacks import OverfitDebugCallback
-from activitygraphs.ml.features import FeatureEncoder
-from activitygraphs.ml.lightning_module import RankingModule
-from activitygraphs.ml.loggers import MetricsLogger
-from activitygraphs.ml.losses import Loss
+from activitygraphs.models.scorers import FittedScorer, Scorer
 from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
+from activitygraphs.training.callbacks import OverfitDebugCallback
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.loggers import MetricsLogger
+from activitygraphs.training.losses import Loss
 
 
-def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
+def home_distance_frame(datamodule: SurveyDataModule) -> pl.DataFrame:
     """Distance from home to every node for each test user, as ``stage="test_distances"`` rows.
 
     The ``distances`` column is a list of one distance in metres per node, in node-index order. One frame per run: the
@@ -32,11 +30,10 @@ def home_distance_frame(datamodule: VisitDataModule) -> pl.DataFrame:
     """
     datamodule.setup()
     test_dataset = datamodule.test_dataset
-    user_idx = torch.as_tensor(list(test_dataset.indices()), dtype=torch.long)
-    distances = test_dataset.distances_m[user_idx].squeeze(-1)
+    distances = datamodule.locations.distance_m[test_dataset.users.home_node]
 
     return pl.DataFrame(
-        {"user_id": user_idx.tolist(), "distances": distances.tolist()},
+        {"user_idx": test_dataset.user_idx.tolist(), "distances": distances.tolist()},
         schema_overrides={"distances": pl.List(pl.Float32)},
     ).with_columns(stage=pl.lit(HOME_DISTANCE_STAGE), epoch=pl.lit(None, dtype=pl.Int64))
 
@@ -52,7 +49,7 @@ def score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:
 
     return pl.DataFrame(
         {
-            "user_id": module.per_user_columns["user_id"],
+            "user_idx": module.per_user_columns["user_idx"],
             "scores": module.per_user_score_vectors,
         },
         schema_overrides={"scores": pl.List(pl.Float32)},
@@ -88,7 +85,7 @@ def per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFr
         epoch=pl.lit(None, dtype=pl.Int64),
     )
 
-    return per_user_df.join(home_coverage_df, on="user_id", how="left")
+    return per_user_df.join(home_coverage_df, on="user_idx", how="left")
 
 
 @dataclass
@@ -119,8 +116,8 @@ class WandBParams:
 
 
 def evaluate_baseline(
-    baseline: Baseline,
-    datamodule: VisitDataModule,
+    baseline: FittedScorer,
+    datamodule: SurveyDataModule,
     loss: Loss,
     name: str,
     cfg: Config,
@@ -135,7 +132,7 @@ def evaluate_baseline(
 
     Args:
         baseline: Fitted baseline module to evaluate.
-        datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
+        datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance, for the BCE and the monitored metric.
         name: Baseline name used for logging and in the returned frame.
         cfg: The config used by the experiment, read for the evaluation settings under ``train`` and the
@@ -144,18 +141,13 @@ def evaluate_baseline(
         run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
             does not reach the returned frame, whose ``name`` stays ``name``.
     """
-    home_hop_distance = datamodule.train_dataset.home_hop_distance
-    is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
-
     baseline_module = RankingModule(
-        model=baseline,
-        feature_encoder=None,
+        scorer=baseline,
+        locations=datamodule.locations,
         lr=0.0,
         loss=loss,
         max_recall_k=cfg.train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
-        home_hop_distance=home_hop_distance,
-        is_home_idx=is_home_idx,
         calibration_bins=cfg.train.calibration_bins,
         store_score_vectors=cfg.train.save_score_vectors,
     )
@@ -243,10 +235,9 @@ def build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: str
 
 
 def train_and_evaluate_model(
-    model: torch.nn.Module,
-    feature_encoder: FeatureEncoder,
+    scorer: Scorer,
     variant: Variant,
-    datamodule: VisitDataModule,
+    datamodule: SurveyDataModule,
     loss: Loss,
     cfg: Config,
     run_dir: Path | None,
@@ -257,10 +248,9 @@ def train_and_evaluate_model(
     """Train a model and return per-epoch metrics as a Polars DataFrame.
 
     Args:
-        model: Model to train, must implement ``forward(x, edge_index, edge_attr, batch)``.
-        feature_encoder: Builds the inputs ``x`` for ``model`` from each batch.
-        variant: The variant ``model`` was built from, giving its name, optimiser settings and input features.
-        datamodule: ``VisitDataModule`` instance (``setup()`` is called internally if needed).
+        scorer: Scorer to train.
+        variant: The variant ``scorer`` was built from, giving its name, optimiser settings and input features.
+        datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
         cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, ``cfg.train`` the
             training and evaluation settings, and ``analysis.recall_curve_ks`` the ``recall@k`` cutoffs.
@@ -277,7 +267,7 @@ def train_and_evaluate_model(
         ``train_loss`` and the ``val_*`` metrics, plus (when a test run executed) one
         ``stage="test"`` row carrying the ``test_*`` metrics and one ``stage="test_user"`` row per
         test user carrying that user's ``r_precision``. Columns: ``name``, ``stage``,
-        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_id``, ``n_pos``, ``r_precision``;
+        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_idx``, ``n_pos``, ``r_precision``;
         cells absent for a row's stage are null. Empty on a ``fast_dev_run``.
     """
     name = variant.name
@@ -287,20 +277,16 @@ def train_and_evaluate_model(
     datamodule.setup()
 
     lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
-    home_hop_distance = datamodule.train_dataset.home_hop_distance
-    is_home_idx = datamodule.train_dataset.schema.user_nodes.index_of("is_home")
 
     lit_model = RankingModule(
-        model=model,
-        feature_encoder=feature_encoder,
+        scorer=scorer,
+        locations=datamodule.locations,
         lr=variant.model.lr,
         loss=loss,
         max_recall_k=train.max_recall_k,
         recall_ks=list(cfg.analysis.recall_curve_ks),
         weight_decay=variant.model.weight_decay,
         lr_scheduler=lr_scheduler,
-        home_hop_distance=home_hop_distance,
-        is_home_idx=is_home_idx,
         calibration_bins=train.calibration_bins,
         compile_model=train.compile,
         store_score_vectors=train.save_score_vectors,

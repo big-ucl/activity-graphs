@@ -20,7 +20,7 @@ data/raw
 data/external
 
 # Models
-models
+/models
 
 # Outputs
 reports

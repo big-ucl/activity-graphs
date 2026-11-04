@@ -1,36 +1,26 @@
 """Tests for the home-zone matrix factorisation baseline."""
 
+import lightning as L
 import pytest
 import torch
-import torch_geometric as pyg
+from graphs import edgeless_locations, join_users, loader_of, make_users
 
-from activitygraphs.ml.baselines.factorization import HomeZoneMFBaseline
-from activitygraphs.ml.losses import dense_bpr_loss
+from activitygraphs.config import LossConfig
+from activitygraphs.datasets import Locations
+from activitygraphs.models.baselines.factorization import HomeZoneMFBaseline
+from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.losses import build_loss
 
-NUM_LOCATION_FEATURES = 1
-IS_HOME_IDX = 0
 MAX_RECALL_K = 5
+N_FACTORS = 4
+LEARNING_RATE = 5e-2
+N_EPOCHS = 60
 
 N_NODES = 12
 BLOCK_SIZE = 4
 # Only the first two nodes of each block house anyone, so the other rows of the visit matrix stay empty.
 HOME_NODES = [0, 1, 4, 5, 8, 9]
 RESIDENTS_PER_HOME = 6
-
-
-def make_graphs(labels: torch.Tensor, homes: torch.Tensor) -> list[pyg.data.Data]:
-    """One graph per user, with ``is_home`` as the only per-user node feature."""
-    graphs = []
-    for user_labels, home in zip(labels, homes, strict=True):
-        x_user_node = torch.zeros(len(user_labels), 1)
-        x_user_node[home, IS_HOME_IDX] = 1.0
-        x_loc = torch.zeros(len(user_labels), NUM_LOCATION_FEATURES)
-        y = user_labels.float().unsqueeze(-1)
-        edge_index = torch.zeros(2, 0, dtype=torch.long)
-        graph = pyg.data.Data(x_loc=x_loc, x_user_node=x_user_node, edge_index=edge_index, y=y)
-        graph.distances_m = torch.zeros(len(user_labels), 1)
-        graphs.append(graph)
-    return graphs
 
 
 def block_preference(seed: int = 0, visit_home: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
@@ -65,71 +55,57 @@ def block_of(node: int) -> int:
     return node // BLOCK_SIZE
 
 
-def make_loaders(**kwargs) -> tuple[pyg.loader.DataLoader, pyg.loader.DataLoader]:
-    """Train and validation loaders over the same block-preference users."""
-    graphs = make_graphs(*block_preference(**kwargs))
-    return pyg.loader.DataLoader(graphs, batch_size=6), pyg.loader.DataLoader(graphs, batch_size=6)
-
-
-@pytest.fixture
-def loaders():
-    return make_loaders()
-
-
-def fitted(loaders, **kwargs) -> HomeZoneMFBaseline:
-    baseline = HomeZoneMFBaseline(
-        num_nodes=N_NODES,
-        is_home_idx_user_node=IS_HOME_IDX,
+def trained(visit_home: bool = True, seed: int = 0) -> tuple[HomeZoneMFBaseline, Locations]:
+    """Return a ``HomeZoneMFBaseline`` trained by ``RankingModule`` on the block-preference users, and its locations."""
+    torch.manual_seed(seed)
+    users = make_users(*block_preference(visit_home=visit_home))
+    locations = edgeless_locations(N_NODES)
+    scorer = HomeZoneMFBaseline(N_NODES, N_FACTORS)
+    loss = build_loss(LossConfig(), MAX_RECALL_K)
+    module = RankingModule(
+        scorer=scorer,
+        locations=locations,
+        lr=LEARNING_RATE,
+        loss=loss,
         max_recall_k=MAX_RECALL_K,
-        n_factors=4,
-        n_epochs=200,
-        eval_every=20,
-        **kwargs,
+        recall_ks=[1, MAX_RECALL_K],
     )
-    return baseline.fit(*loaders)
+    loader = loader_of(users, batch_size=12)
+    trainer = L.Trainer(
+        max_epochs=N_EPOCHS,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+    trainer.fit(module, train_dataloaders=loader, val_dataloaders=loader)
+
+    return scorer, locations
 
 
-class TestDenseBPRLoss:
-    def test_it_scores_the_sampled_pairs(self):
-        scores = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
-        pos_weight = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-        neg_weight = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+def scores_of(scorer: HomeZoneMFBaseline) -> torch.Tensor:
+    """Return the score of every node for a user living at every node, ``[N_NODES, N_NODES]``, indexed by (home, node)."""
+    with torch.no_grad():
+        return scorer.home_factors @ scorer.node_factors.T + scorer.bias
 
-        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
-        expected = -torch.nn.functional.logsigmoid(torch.tensor([2.0, 1.5])).mean()
 
-        assert loss == pytest.approx(float(expected), abs=1e-6)
-
-    def test_a_row_without_a_negative_is_dropped(self):
-        scores = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
-        pos_weight = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
-        neg_weight = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
-
-        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=4)
-        expected = -torch.nn.functional.logsigmoid(torch.tensor(1.5))
-
-        assert loss == pytest.approx(float(expected), abs=1e-6)
-
-    def test_no_row_with_both_gives_a_zero_attached_to_the_scores(self):
-        scores = torch.zeros(2, 2, requires_grad=True)
-        loss = dense_bpr_loss(scores, torch.zeros(2, 2), torch.ones(2, 2), n_pairs=4)
-
-        assert float(loss.detach()) == 0.0
-        assert loss.requires_grad
-
-    def test_a_zero_weight_candidate_is_never_drawn(self):
-        scores = torch.tensor([[0.0, 0.0, 100.0]])
-        pos_weight = torch.tensor([[1.0, 0.0, 0.0]])
-        neg_weight = torch.tensor([[0.0, 1.0, 0.0]])
-
-        loss = dense_bpr_loss(scores, pos_weight, neg_weight, n_pairs=64)
-
-        assert loss == pytest.approx(float(-torch.nn.functional.logsigmoid(torch.tensor(0.0))), abs=1e-6)
+@pytest.fixture(scope="module")
+def fitted() -> HomeZoneMFBaseline:
+    scorer, _ = trained()
+    return scorer
 
 
 class TestHomeZoneMFBaseline:
-    def test_it_ranks_the_home_block_above_the_others(self, loaders):
-        scores = fitted(loaders).scores
+    def test_the_home_factors_start_at_zero(self):
+        scorer = HomeZoneMFBaseline(N_NODES, N_FACTORS)
+
+        assert torch.equal(scorer.home_factors, torch.zeros(N_NODES, N_FACTORS))
+        assert scorer.node_factors.abs().sum() > 0
+
+    def test_it_ranks_the_home_block_above_the_others(self, fitted):
+        scores = scores_of(fitted)
 
         for home in HOME_NODES:
             same_block = torch.tensor([block_of(n) == block_of(home) and n != home for n in range(N_NODES)])
@@ -137,39 +113,19 @@ class TestHomeZoneMFBaseline:
 
             assert scores[home][same_block].min() > scores[home][other_block].max()
 
-    def test_a_home_without_residents_scores_the_bias_alone(self, loaders):
-        scores = fitted(loaders).scores
+    def test_a_home_without_residents_scores_the_bias_alone(self, fitted):
         empty = [n for n in range(N_NODES) if n not in HOME_NODES]
 
-        rows = scores[empty]
-        assert torch.allclose(rows, rows[0].expand_as(rows), atol=1e-6)
+        assert torch.equal(fitted.home_factors[empty], torch.zeros(len(empty), N_FACTORS))
+        torch.testing.assert_close(scores_of(fitted)[empty], fitted.bias.detach().expand(len(empty), -1))
 
-    def test_visits_to_the_home_node_do_not_change_the_fit(self):
-        with_home = fitted(make_loaders(visit_home=True), seed=4).scores
-        without_home = fitted(make_loaders(visit_home=False), seed=4).scores
+    def test_forward_reads_the_score_of_each_user_home_and_node(self, fitted):
+        users = make_users(*block_preference()).subset(list(range(6)))
+        locations = edgeless_locations(N_NODES)
+        batch = join_users(locations, users)
 
-        assert torch.equal(with_home, without_home)
+        with torch.no_grad():
+            out = fitted(locations, batch)
 
-    def test_forward_reads_the_score_of_each_user_home_and_node(self, loaders):
-        train_loader, _ = loaders
-        baseline = fitted(loaders)
-        batch = next(iter(train_loader))
-
-        out = baseline(batch)
-        homes = batch.x_user_node[:, IS_HOME_IDX].reshape(-1, N_NODES).argmax(dim=1)
-        expected = baseline.scores[homes.repeat_interleave(N_NODES), torch.arange(N_NODES).repeat(len(homes))]
-
-        assert out.shape == (len(homes) * N_NODES, 1)
-        assert torch.allclose(out.reshape(-1), expected)
-
-    def test_it_reports_the_validation_recall_of_the_epoch_it_keeps(self, loaders):
-        baseline = fitted(loaders)
-
-        assert 0.0 < baseline.val_avg_recall <= 1.0
-        assert baseline.best_epoch is not None
-
-    def test_the_same_seed_gives_the_same_scores(self, loaders):
-        assert torch.equal(fitted(loaders, seed=3).scores, fitted(loaders, seed=3).scores)
-
-    def test_different_seeds_give_different_scores(self, loaders):
-        assert not torch.equal(fitted(loaders, seed=1).scores, fitted(loaders, seed=2).scores)
+        assert out.shape == (6, N_NODES)
+        torch.testing.assert_close(out, scores_of(fitted)[users.home_node])

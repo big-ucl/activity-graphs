@@ -8,7 +8,7 @@
   - Density of home zones
 
 Reads the parquet files written by ``experiments.py:save_results`` and reports the points above. All analyses use the
-parquet files generated to the run directory only, except the home-zone analysis, which reads the built ``VisitDataset``.
+parquet files generated to the run directory only, except the home-zone analysis, which reads the users' home nodes.
 """
 
 from collections.abc import Sequence
@@ -22,10 +22,9 @@ from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
-from activitygraphs.datasets.dataset import VisitDataset
-from activitygraphs.ml.metrics import DEFAULT_HOP_BANDS
-from activitygraphs.ml.ranking import average_recall, expected_recall_at_k, positive_band_auc
 from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, latest_run, run_dir
+from activitygraphs.training.metrics import DEFAULT_HOP_BANDS
+from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_band_auc
 
 # Baseline model representing node popularity.
 POPULARITY_MODEL = "VisitFrequency"
@@ -100,7 +99,7 @@ def read_run(run_path: str | Path) -> tuple[pl.DataFrame, pl.DataFrame]:
 
 
 def read_score_vectors(run_path: str | Path) -> pl.DataFrame:
-    """Read the full per-user score vectors of a run: ``name, seed, user_id, scores``."""
+    """Read the full per-user score vectors of a run: ``name, seed, user_idx, scores``."""
     scores_path = Path(run_path) / SCORES_FILE
 
     if not scores_path.exists():
@@ -110,7 +109,7 @@ def read_score_vectors(run_path: str | Path) -> pl.DataFrame:
 
 
 def read_home_distances(run_path: str | Path) -> pl.DataFrame:
-    """Read each test user's distance from home to every node of a run: ``user_id, distances``, in metres."""
+    """Read each test user's distance from home to every node of a run: ``user_idx, distances``, in metres."""
     distances = pl.read_parquet(Path(run_path) / DISTANCES_FILE)
 
     return distances.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
@@ -209,7 +208,7 @@ def paired_comparison(
 ) -> pl.DataFrame:
     """Comparison of every model against ``reference``, paired up by user.
 
-    Pairs by ``user_id`` after averaging over seeds. For each model, reports the paired mean difference between its score and
+    Pairs by ``user_idx`` after averaging over seeds. For each model, reports the paired mean difference between its score and
     the reference model. Also reports confidence interval of difference (bootstrap over users) and a
     Wilcoxon signed-rank p-value (test to compare mean of two paired samples).
 
@@ -219,7 +218,7 @@ def paired_comparison(
     scores = _average_metric_over_seeds(per_user_results, metric)
     model_names = [n for n in scores["name"].unique().sort() if n != reference_model]
 
-    reference_scores = scores.filter(pl.col("name") == reference_model).select("user_id", ref_value=metric)
+    reference_scores = scores.filter(pl.col("name") == reference_model).select("user_idx", ref_value=metric)
     if reference_scores.is_empty():
         raise KeyError(f"Reference model {reference_model!r} not found in the per-user frame")
 
@@ -230,8 +229,8 @@ def paired_comparison(
         paired_scores = (
             scores
             .filter(pl.col("name") == model_name)
-            .select("user_id", value=metric)
-            .join(reference_scores, on="user_id")
+            .select("user_idx", value=metric)
+            .join(reference_scores, on="user_idx")
         )
 
         difference = paired_scores["value"].to_numpy() - paired_scores["ref_value"].to_numpy()
@@ -278,7 +277,7 @@ def realised_size_summary(per_user_results: pl.DataFrame, n_dropped: int) -> pl.
         Frame of ``n_pos_home_incl, scored, n_users, share_of_users``, sorted by size.
     """
     user_realised_set_sizes = (
-        per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", REALISED_SIZE_COLUMN).unique()
+        per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_idx", REALISED_SIZE_COLUMN).unique()
     )
 
     # Frame of num_users by |RG_i|, does not include the dropped users
@@ -334,7 +333,7 @@ def home_coverage_summary(per_user_results: pl.DataFrame) -> pl.DataFrame:
 
     One row for ``home_seen_in_train=0`` and one row for ``home_seen_in_train=1``.
     """
-    users = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", "home_seen_in_train").unique()
+    users = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_idx", "home_seen_in_train").unique()
 
     return (
         users
@@ -379,14 +378,14 @@ def _average_metric_over_seeds(per_user: pl.DataFrame, metric: str) -> pl.DataFr
     Avoids inflating the apparent sample size of users (duplicated across seeds).
 
     Returns:
-        Frame of ``name, user_id, <metric>`` with one row per model and user.
+        Frame of ``name, user_idx, <metric>`` with one row per model and user.
     """
     return (
         per_user
         .filter(pl.col("stage") == PER_USER_STAGE)
-        .group_by("name", "user_id")
+        .group_by("name", "user_idx")
         .agg(pl.col(metric).mean())
-        .sort("name", "user_id")
+        .sort("name", "user_idx")
     )
 
 
@@ -404,24 +403,24 @@ def _bootstrap_ci(differences: np.ndarray, rng: np.random.Generator, n_bootstrap
 def _diff_sd_per_seed(per_user_results: pl.DataFrame, model_name: str, reference_model: str, metric: str) -> float:
     """SD across seeds of the per-seed mean paired difference of ``model_name`` against ``reference_model``.
 
-    Differences are paired by user within a seed. Users are matched across seeds by user_id. If reference model has
+    Differences are paired by user within a seed. Users are matched across seeds by user_idx. If reference model has
     several seeds, the seeds are matched between the reference and the comparison model.
 
     Returns:
         SD over seeds, or NaN when fewer than two seeds are shared.
     """
     rows = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
-    model_scores = rows.filter(pl.col("name") == model_name).select("seed", "user_id", value=metric)
-    reference_scores = rows.filter(pl.col("name") == reference_model).select("seed", "user_id", ref_value=metric)
+    model_scores = rows.filter(pl.col("name") == model_name).select("seed", "user_idx", value=metric)
+    reference_scores = rows.filter(pl.col("name") == reference_model).select("seed", "user_idx", ref_value=metric)
 
     model_seeds = set(model_scores["seed"].drop_nulls())
     shared_seeds = model_seeds & set(reference_scores["seed"].drop_nulls())
 
     if shared_seeds:
-        paired_scores = model_scores.join(reference_scores, on=["seed", "user_id"])
+        paired_scores = model_scores.join(reference_scores, on=["seed", "user_idx"])
     else:
-        reference_means = reference_scores.group_by("user_id").agg(pl.col("ref_value").mean())
-        paired_scores = model_scores.join(reference_means, on="user_id")
+        reference_means = reference_scores.group_by("user_idx").agg(pl.col("ref_value").mean())
+        paired_scores = model_scores.join(reference_means, on="user_idx")
 
     sd_per_seed = (
         paired_scores.group_by("seed").agg(mean_diff=(pl.col("value") - pl.col("ref_value")).mean())["mean_diff"].std()
@@ -542,7 +541,7 @@ def check_model_health(
         home_median_rank`` and the ``*_sd`` standard deviation columns, sorted by ``user_invariance``
         descending (so that collapsed model at top).
     """
-    home_by_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_id", "home_node").unique()
+    home_by_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).select("user_idx", "home_node").unique()
 
     model_seeds = score_vectors.select("name", "seed").unique().sort("name", "seed")
     popularity_rows = _score_matrix(score_vectors, popularity_model, None)
@@ -557,9 +556,9 @@ def check_model_health(
         users = score_vectors.filter(
             (pl.col("name") == name)
             & (pl.col("seed").is_null() if model_seed is None else pl.col("seed") == model_seed)
-        ).select("user_id")
+        ).select("user_idx")
 
-        home_nodes = users.join(home_by_user, on="user_id", how="left")["home_node"].to_numpy()
+        home_nodes = users.join(home_by_user, on="user_idx", how="left")["home_node"].to_numpy()
 
         user_invariance = check_user_invariance(scores, max_users, seed)
         popularity_corr = check_popularity_correlation(scores, popularity_rows[0])
@@ -636,7 +635,7 @@ def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFr
         metric: A per-user metric with a per-positive value in ``POSITIVE_VALUE_COLUMNS``.
 
     Returns:
-        Frame of ``name, stage, seed, user_id, band, contribution, n_band_pos``, one row per model, seed, user and band.
+        Frame of ``name, stage, seed, user_idx, band, contribution, n_band_pos``, one row per model, seed, user and band.
         ``contribution`` is how much the metric evaluated on only this band contributes to the overall metric value.
 
     Raises:
@@ -662,14 +661,14 @@ def band_contributions(per_user_results: pl.DataFrame, metric: str) -> pl.DataFr
 
     return (
         rows
-        .select("row", "name", "stage", "seed", "user_id", "n_pos")
+        .select("row", "name", "stage", "seed", "user_idx", "n_pos")
         .join(per_band.select("band").unique(), how="cross")
         .join(per_band, on=["row", "band"], how="left")
         .with_columns(
             contribution=pl.col("band_sum").fill_null(0.0) / pl.col("n_pos"),
             n_band_pos=pl.col("n_band_pos").fill_null(0),
         )
-        .select("name", "stage", "seed", "user_id", "band", "contribution", "n_band_pos")
+        .select("name", "stage", "seed", "user_idx", "band", "contribution", "n_band_pos")
     )
 
 
@@ -826,22 +825,22 @@ def distance_band_recall(
         bands: Upper band edges in km.
 
     Returns:
-        Frame of ``name, stage, seed, user_id, band, band_lo, band_recall, n_band_pos, n_pos``, one row per model,
+        Frame of ``name, stage, seed, user_idx, band, band_lo, band_recall, n_band_pos, n_pos``, one row per model,
         seed, user and band the user has a positive in. ``band_recall`` is the mean ``pos_avg_recall`` of the user's
         positives in the band, ranked against every node, so ``band_recall * n_band_pos / n_pos`` summed over bands
         is the user's ``avg_recall``.
     """
     lower_edges, upper_edges = _band_edges(bands)
-    distances = home_distances.select("user_id", "distances")
+    distances = home_distances.select("user_idx", "distances")
 
     positives = (
         per_user_results
         .filter(pl.col("stage") == PER_USER_STAGE)
-        .join(distances, on="user_id")
+        .join(distances, on="user_idx")
         .with_columns(
             pos_distance=pl.col("distances").list.gather(pl.col(PER_POSITIVE_NODE_COLUMN)),
         )
-        .select("name", "seed", "user_id", "n_pos", PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
+        .select("name", "seed", "user_idx", "n_pos", PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
         .explode(PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
     )
     band_index = distance_band_index(positives["pos_distance"].to_numpy().astype(np.float64), bands)
@@ -850,15 +849,15 @@ def distance_band_recall(
         positives
         .with_columns(band_lo=pl.Series(lower_edges[band_index]), band_hi=pl.Series(upper_edges[band_index]))
         .with_columns(band=_distance_band_label(pl.col("band_lo"), pl.col("band_hi")))
-        .group_by("name", "seed", "user_id", "band", "band_lo")
+        .group_by("name", "seed", "user_idx", "band", "band_lo")
         .agg(
             band_recall=pl.col(PER_POSITIVE_AVG_RECALL_COLUMN).cast(pl.Float64).mean(),
             n_band_pos=pl.len(),
             n_pos=pl.col("n_pos").first(),
         )
         .with_columns(stage=pl.lit(PER_USER_STAGE))
-        .select("name", "stage", "seed", "user_id", "band", "band_lo", "band_recall", "n_band_pos", "n_pos")
-        .sort("band_lo", "name", "user_id")
+        .select("name", "stage", "seed", "user_idx", "band", "band_lo", "band_recall", "n_band_pos", "n_pos")
+        .sort("band_lo", "name", "user_idx")
     )
 
 
@@ -877,7 +876,7 @@ def distance_band_recall_table(band_recall: pl.DataFrame) -> pl.DataFrame:
     seed_means = (
         band_recall
         .with_columns(
-            n_seed_users=pl.col("user_id").n_unique().over("name", "seed"),
+            n_seed_users=pl.col("user_idx").n_unique().over("name", "seed"),
             weighted=pl.col("band_recall") * pl.col("n_band_pos") / pl.col("n_pos"),
         )
         .group_by("name", "seed", "band", "band_lo")
@@ -921,22 +920,22 @@ def within_band_auc(
         bands: Upper band edges in km.
 
     Returns:
-        Frame of ``name, stage, seed, user_id, band, band_lo, auc, n_band_pos, n_band_neg``, one row per model, seed,
+        Frame of ``name, stage, seed, user_idx, band, band_lo, auc, n_band_pos, n_band_neg``, one row per model, seed,
         user and band the user has a positive in. Positives whose band holds no unvisited node are dropped.
     """
     lower_edges, upper_edges = _band_edges(bands)
-    distance_by_user = dict(home_distances.select("user_id", "distances").iter_rows())
+    distance_by_user = dict(home_distances.select("user_idx", "distances").iter_rows())
     per_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
 
     rows = []
 
     for name, seed in score_vectors.select("name", "seed").unique().sort("name", "seed").iter_rows():
         model_rows = _model_seed_rows(per_user, name, seed).join(
-            _model_seed_rows(score_vectors, name, seed).select("user_id", "scores"), on="user_id"
+            _model_seed_rows(score_vectors, name, seed).select("user_idx", "scores"), on="user_idx"
         )
-        user_ids = model_rows["user_id"].to_list()
+        user_indices = model_rows["user_idx"].to_list()
         band_index = distance_band_index(
-            np.asarray([distance_by_user[user] for user in user_ids], dtype=np.float64), bands
+            np.asarray([distance_by_user[user] for user in user_indices], dtype=np.float64), bands
         )
         positives = model_rows[PER_POSITIVE_NODE_COLUMN].to_list()
 
@@ -946,14 +945,14 @@ def within_band_auc(
             model_rows[HOME_NODE_COLUMN].to_numpy(),
             band_index,
         )
-        positive_user = np.repeat(np.arange(len(user_ids)), [len(nodes) for nodes in positives])
+        positive_user = np.repeat(np.arange(len(user_indices)), [len(nodes) for nodes in positives])
         positive_band = band_index[positive_user, np.concatenate(positives).astype(int)]
 
         rows.append(
             pl.DataFrame({
                 "name": pl.Series([name] * len(auc), dtype=pl.String),
                 "seed": pl.Series([seed] * len(auc), dtype=pl.Int64),
-                "user_id": np.asarray(user_ids)[positive_user],
+                "user_idx": np.asarray(user_indices)[positive_user],
                 "band_lo": lower_edges[positive_band],
                 "band_hi": upper_edges[positive_band],
                 "auc": auc,
@@ -966,11 +965,11 @@ def within_band_auc(
         .concat(rows)
         .filter(pl.col("auc").is_not_nan())
         .with_columns(band=_distance_band_label(pl.col("band_lo"), pl.col("band_hi")))
-        .group_by("name", "seed", "user_id", "band", "band_lo")
+        .group_by("name", "seed", "user_idx", "band", "band_lo")
         .agg(auc=pl.col("auc").mean(), n_band_pos=pl.len(), n_band_neg=pl.col("n_band_neg").mean())
         .with_columns(stage=pl.lit(PER_USER_STAGE))
-        .select("name", "stage", "seed", "user_id", "band", "band_lo", "auc", "n_band_pos", "n_band_neg")
-        .sort("band_lo", "name", "user_id")
+        .select("name", "stage", "seed", "user_idx", "band", "band_lo", "auc", "n_band_pos", "n_band_neg")
+        .sort("band_lo", "name", "user_idx")
     )
 
 
@@ -1085,14 +1084,14 @@ def recall_at_ks(per_user_results: pl.DataFrame, ks: Sequence[int]) -> pl.DataFr
     add ``# remaining empty top-k "slots" / # entries in tie``, the expected value of the hit count.
 
     Returns:
-        Frame of ``name, stage, seed, user_id, k, recall_at_k``, one row per model, seed, user and cutoff.
+        Frame of ``name, stage, seed, user_idx, k, recall_at_k``, one row per model, seed, user and cutoff.
     """
     rows = per_user_results.filter(pl.col("stage") == PER_USER_STAGE).with_row_index("row")
     cutoffs = pl.DataFrame({"k": list(ks)}, schema={"k": pl.Int64})
 
     positives = (
         rows
-        .select("row", "name", "stage", "seed", "user_id", N_SCORED_HIGHER_COLUMN, N_TIED_COLUMN)
+        .select("row", "name", "stage", "seed", "user_idx", N_SCORED_HIGHER_COLUMN, N_TIED_COLUMN)
         .explode(N_SCORED_HIGHER_COLUMN, N_TIED_COLUMN)
         .join(cutoffs, how="cross")
     )
@@ -1103,10 +1102,10 @@ def recall_at_ks(per_user_results: pl.DataFrame, ks: Sequence[int]) -> pl.DataFr
     return (
         positives
         .with_columns(p_in_top_k=pl.Series(p_in_top_k, dtype=pl.Float64))
-        .group_by("row", "name", "stage", "seed", "user_id", "k")
+        .group_by("row", "name", "stage", "seed", "user_idx", "k")
         .agg(recall_at_k=pl.col("p_in_top_k").mean())
         .sort("row", "k")
-        .select("name", "stage", "seed", "user_id", "k", "recall_at_k")
+        .select("name", "stage", "seed", "user_idx", "k", "recall_at_k")
     )
 
 
@@ -1180,7 +1179,9 @@ def paired_comparison_by_k(
 # =========================================
 
 
-def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int] | None = None) -> pl.DataFrame:
+def home_zone_summary(
+    home_node: torch.Tensor, num_nodes: int, occupancy_thresholds: Sequence[int] | None = None
+) -> pl.DataFrame:
     """Density summary of a users-per-home-zone table (single row).
 
         - ``users_per_occupied_zone`` is the mean number of users per _occupied_ zone.
@@ -1188,18 +1189,20 @@ def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int]
         - ``p50/p90`` are the quantiles of the number of users per zone.
         - ``share_users_ge_{t}`` reports the proportion of all users that live in zones of at least ``t`` inhabitants.
 
+    Args:
+        home_node: Home node of each user, ``[num_users]``.
+        num_nodes: Number of nodes of the graph.
+        occupancy_thresholds: Zone sizes ``t`` of the ``share_users_ge_{t}`` columns. None takes the default ones.
+
     Returns:
         One-row frame of ``n_users, n_nodes, n_occupied_zones, users_per_occupied_zone,
         users_per_node, p50, p90, max, share_users_ge_10/25/60``.
     """
-    n_nodes = dataset.num_nodes
-    is_home_idx = dataset.schema.user_nodes.index_of("is_home")
-    home_nodes = dataset.user_node_features[:, :, is_home_idx].argmax(dim=1)
     occupancy_thresholds = (
         DEFAULT_ANALYSIS.occupancy_thresholds if occupancy_thresholds is None else occupancy_thresholds
     )
 
-    home_nodes_df = pl.DataFrame({"home_node": home_nodes.cpu().numpy()})
+    home_nodes_df = pl.DataFrame({"home_node": home_node.cpu().numpy()})
     users_per_home_zone = home_nodes_df.group_by("home_node").agg(n_users=pl.len())
 
     total_users = int(users_per_home_zone["n_users"].sum())
@@ -1212,10 +1215,10 @@ def home_zone_summary(dataset: VisitDataset, occupancy_thresholds: Sequence[int]
 
     return users_per_home_zone.select(
         n_users=total_users,
-        n_nodes=n_nodes,
+        n_nodes=num_nodes,
         n_occupied_zones=num_occupied_zones,
         users_per_occupied_zone=total_users / num_occupied_zones,
-        users_per_node=total_users / n_nodes,
+        users_per_node=total_users / num_nodes,
         p50=pl.col("n_users").median(),
         p90=pl.col("n_users").quantile(0.9),
         max=pl.col("n_users").max().cast(pl.Int64),

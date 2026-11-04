@@ -5,11 +5,9 @@ from typing import Literal, Protocol
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.utils import to_dense_batch
 
 from activitygraphs.config import LossConfig
 from activitygraphs.datasets.batch import UserBatch
-from activitygraphs.datasets.dataset import is_home_node_mask
 
 
 class LossFn(Protocol):
@@ -36,67 +34,76 @@ def bce_loss(
     batch: UserBatch,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Standard BCE loss with logits."""
-    return F.binary_cross_entropy_with_logits(logits, batch.y.float())
+    """Standard BCE loss with logits, over the ``[num_users, num_nodes]`` grid of scores."""
+    return F.binary_cross_entropy_with_logits(logits, batch.visited.float())
 
 
 BCELoss = Loss(name="bce", loss_fn=bce_loss, monitor="val_bce", monitor_mode="min")
 
 
-def build_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_idx: int, max_recall_k: int) -> Loss:
-    """Build the loss selected by ``cfg.type``."""
+def build_loss(cfg: LossConfig, max_recall_k: int) -> Loss:
+    """Build the loss selected by ``cfg.type``, over the ``[num_users, num_nodes]`` grid of a ``UserBatch``."""
     if cfg.type == "bce":
         return BCELoss
     if cfg.type == "bpr":
-        return _build_bpr_loss(cfg, distance_matrix, is_home_idx, max_recall_k)
+        return _build_bpr_loss(cfg, max_recall_k)
 
     raise ValueError(f"Unknown loss type {cfg.type}")
 
 
-def _build_bpr_loss(cfg: LossConfig, distance_matrix: torch.Tensor, is_home_idx: int, max_recall_k: int) -> Loss:
-    def _uniform_bpr_loss(logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None):
-        return bpr_loss(logits, batch.y, batch.batch, n_pairs=cfg.n_pairs, generator=generator)
+def _build_bpr_loss(cfg: LossConfig, max_recall_k: int) -> Loss:
+    def _uniform_bpr_loss(
+        logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        return bpr_loss(logits, batch.visited, cfg.n_pairs, generator=generator)
 
     def _hard_neg_bpr_loss(
         logits: torch.Tensor, batch: UserBatch, generator: torch.Generator | None = None
     ) -> torch.Tensor:
-        neg_restrict = _near_home_negative_mask(batch, distance_matrix, is_home_idx, cfg.is_near_threshold)
-        return bpr_loss(logits, batch.y, batch.batch, cfg.n_pairs, neg_restrict, generator)
+        near_home = batch.home_hops <= cfg.is_near_threshold
+        return bpr_loss(logits, batch.visited, cfg.n_pairs, near_home, generator)
 
     _bpr_loss = _hard_neg_bpr_loss if cfg.neg_sampler == "hard" else _uniform_bpr_loss
     return Loss(name="bpr", loss_fn=_bpr_loss, monitor=f"val_avg_recall@{max_recall_k}", monitor_mode="max")
 
 
 def bpr_loss(
-    logits: torch.Tensor,
+    scores: torch.Tensor,
     y: torch.Tensor,
-    batch_index: torch.Tensor,
-    n_pairs: int = 128,
+    n_pairs: int,
     neg_restrict: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Mean BPR loss over ``n_pairs`` sampled (v+, v-) pairs per user.
+    """Mean BPR loss over ``n_pairs`` sampled (v+, v-) pairs per user, over a grid of per-user scores.
 
-    ``logits`` and ``y`` are ``[num_nodes, 1]`` (or ``[num_nodes]``); ``batch_index`` is
-    ``batch.batch``. Negatives are this user's unvisited nodes, optionally restricted to
-    ``neg_restrict`` (a ``[B, N]`` boolean mask, e.g. near-home for hard negatives). Each user
-    contributes exactly ``n_pairs`` samples, so users are weighted equally regardless of |RG_i|.
-     Users with no positives are dropped.
+    Args:
+        scores: Score of every node for every user, ``[num_users, num_nodes]``.
+        y: Visit labels aligned with ``scores``.
+        n_pairs: Pairs drawn per user.
+        neg_restrict: Boolean mask aligned with ``scores`` of the nodes a negative may be drawn from, e.g. near home
+            for hard negatives. A user whose restricted pool is empty draws from every unvisited node.
+        generator: Generator of the pair sampling.
+
+    Returns:
+        Scalar loss. Users with no positives are dropped.
     """
-    scores, mask = to_dense_batch(logits.reshape(-1), batch_index)  # [B, N], [B, N]
-    labels, _ = to_dense_batch(y.reshape(-1).float(), batch_index)
-
-    pos_mask = (labels > 0.5) & mask
-    neg_mask = (labels <= 0.5) & mask
+    pos_mask = y > 0.5
+    neg_mask = ~pos_mask
     if neg_restrict is not None:
-        restricted = neg_mask & neg_restrict
-
-        empty = ~restricted.any(
-            dim=1, keepdim=True
-        )  # fall back to all unvisited for users whose restricted pool is empty
-        neg_mask = torch.where(empty, neg_mask, restricted)
+        neg_mask = _restrict_negatives(neg_mask, neg_restrict)
 
     return dense_bpr_loss(scores, pos_mask.float(), neg_mask.float(), n_pairs, generator)
+
+
+def _restrict_negatives(neg_mask: torch.Tensor, neg_restrict: torch.Tensor) -> torch.Tensor:
+    """Return the ``[B, N]`` mask ``neg_mask`` restricted to ``neg_restrict``.
+
+    A user whose restricted pool is empty keeps every node of ``neg_mask``.
+    """
+    restricted = neg_mask & neg_restrict
+    empty = ~restricted.any(dim=1, keepdim=True)
+
+    return torch.where(empty, neg_mask, restricted)
 
 
 def dense_bpr_loss(
@@ -130,27 +137,3 @@ def dense_bpr_loss(
 
     diff = row_scores.gather(1, pos_idx) - row_scores.gather(1, neg_idx)  # [n_rows_with_pairs, n_pairs]
     return -F.logsigmoid(diff).mean()
-
-
-def _near_home_negative_mask(
-    batch: UserBatch, distance_matrix: torch.Tensor, is_home_idx: int, is_near_threshold: int
-) -> torch.Tensor:
-    """Boolean ``[B, N]`` mask of unvisited nodes within ``hard_k`` hops of each user's home.
-
-    Built from the same home-index logic as ``compute_home_hops``. Rows whose near-home
-    pool is empty are left all-False; the caller falls back to all unvisited for those users.
-    """
-    device = batch.x_user_node.device
-    distance_matrix = distance_matrix.to(device)
-
-    node_idx = torch.arange(batch.num_nodes, device=device) - batch.ptr.to(device)[batch.batch]
-    is_home = is_home_node_mask(batch.x_user_node, is_home_idx)
-
-    home_idx_per_graph = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
-    home_idx_per_graph[batch.batch[is_home]] = node_idx[is_home]
-
-    node_distance_to_home = distance_matrix[home_idx_per_graph[batch.batch], node_idx]  # [num_nodes]
-    is_node_near_home = node_distance_to_home <= is_near_threshold
-
-    is_node_near_home_dense, _ = to_dense_batch(is_node_near_home.float(), batch.batch)  # [B, N]
-    return is_node_near_home_dense > 0.5

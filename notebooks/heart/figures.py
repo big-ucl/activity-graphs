@@ -127,14 +127,14 @@ def users_by_visits(per_user: pl.DataFrame) -> list[int]:
     return (
         rows
         .with_columns(n_visited=pl.col("pos_node").list.len())
-        .sort("n_visited", descending=True)["user_id"]
+        .sort("n_visited", descending=True)["user_idx"]
         .to_list()
     )
 
 
-def user_zones(per_user: pl.DataFrame, user_id: int) -> tuple[int, list[int]]:
+def user_zones(per_user: pl.DataFrame, user_idx: int) -> tuple[int, list[int]]:
     """The home node and the visited nodes of one test user."""
-    row = per_user.filter(pl.col("stage") == PER_USER_STAGE, pl.col("user_id") == user_id).row(0, named=True)
+    row = per_user.filter(pl.col("stage") == PER_USER_STAGE, pl.col("user_idx") == user_idx).row(0, named=True)
 
     return int(row["home_node"]), [int(node) for node in row["pos_node"]]
 
@@ -277,7 +277,7 @@ def map_panel(nodes, focus: list[int], home_node: int, colour_bar: bool = False)
 def region_figures(
     nodes,
     score_vectors: pl.DataFrame,
-    user_id: int,
+    user_idx: int,
     home_node: int,
     visited_nodes: list[int],
     path: Path,
@@ -289,7 +289,7 @@ def region_figures(
     The zones are filled in the colour the choropleth of (d) and (e) gives a zone outside its top ranks, and
     the view is the one those panels crop to, so the animation only ever adds to the frame before it.
     """
-    focus = ranking_focus(home_node, [figures.user_scores(score_vectors, model, user_id, seed)])
+    focus = ranking_focus(home_node, [figures.user_scores(score_vectors, model, user_idx, seed)])
 
     def panel(**kwargs):
         _, ax, _ = map_panel(nodes, focus, home_node)
@@ -311,7 +311,7 @@ def region_figures(
 def ranking_figures(
     nodes,
     score_vectors: pl.DataFrame,
-    user_id: int,
+    user_idx: int,
     home_node: int,
     visited_nodes: list[int],
     n_nodes: int,
@@ -328,7 +328,7 @@ def ranking_figures(
     ``figures.MAP_RANK_FLOOR``, so zones ranked below it are drawn white and the whole ramp is spent on the
     ranks a candidate set is drawn from.
     """
-    scores = figures.user_scores(score_vectors, model, user_id, seed)
+    scores = figures.user_scores(score_vectors, model, user_idx, seed)
     prominence = figures.rank_prominence(scores)
     focus = ranking_focus(home_node, [scores], k=max(ks))
     choropleth = {
@@ -420,7 +420,7 @@ def model_panels(nodes, scores: dict[str, np.ndarray], home_node: int, visited_n
 def spatial_vs_flat_figure(
     nodes,
     score_vectors: pl.DataFrame,
-    user_id: int,
+    user_idx: int,
     home_node: int,
     visited_nodes: list[int],
     n_nodes: int,
@@ -439,7 +439,7 @@ def spatial_vs_flat_figure(
     """
     labels = {spec.name: spec.label for spec in figures.DEFAULT_MODELS}
     names = [spatial, flat, factorization]
-    scores = {labels[name]: figures.user_scores(score_vectors, name, user_id, seed) for name in names}
+    scores = {labels[name]: figures.user_scores(score_vectors, name, user_idx, seed) for name in names}
     focus = ranking_focus(home_node, [scores[labels[name]] for name in (spatial, flat)])
     panels = {"fig3a-spatial-vs-flat": len(names) - 1, "fig3b-with-factorization": len(names)}
 
@@ -504,17 +504,17 @@ def main() -> None:
     nodes, edges = read_graph(cfg)
     path = out_dir(cfg)
 
-    user_id = users_by_visits(per_user)[0]
-    home_node, visited_nodes = user_zones(per_user, user_id)
-    print(f"user {user_id}: home node {home_node}, {len(visited_nodes)} visited zones, {n_nodes} zones in the region")
+    user_idx = users_by_visits(per_user)[0]
+    home_node, visited_nodes = user_zones(per_user, user_idx)
+    print(f"user {user_idx}: home node {home_node}, {len(visited_nodes)} visited zones, {n_nodes} zones in the region")
 
     print("figure 1 - graph structure:")
     graph_structure_figures(nodes, edges, home_node, path)
     print("figure 2 - what a ranking looks like:")
-    region_figures(nodes, score_vectors, user_id, home_node, visited_nodes, path)
-    ranking_figures(nodes, score_vectors, user_id, home_node, visited_nodes, n_nodes, path)
+    region_figures(nodes, score_vectors, user_idx, home_node, visited_nodes, path)
+    ranking_figures(nodes, score_vectors, user_idx, home_node, visited_nodes, n_nodes, path)
     print("figure 3 - spatial vs non-spatial:")
-    spatial_vs_flat_figure(nodes, score_vectors, user_id, home_node, visited_nodes, n_nodes, path)
+    spatial_vs_flat_figure(nodes, score_vectors, user_idx, home_node, visited_nodes, n_nodes, path)
     print("figure 4 - recall@k curve:")
     recall_figures(cfg, per_user, n_nodes, path)
     print("figure 5 - performance by distance from home:")

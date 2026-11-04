@@ -30,16 +30,19 @@ def _():
 @app.cell
 def _():
     from activitygraphs.graph import load_graph
-    from activitygraphs.datasets.dataset import VisitDataset
+    from activitygraphs.datasets import Locations, Users
     from activitygraphs.surveys.thats import THATSSurvey, read_tables
-    from activitygraphs.tensors import build_tensors
+    from activitygraphs.tensors import build_tensors, save_tensors, tensors_path
 
     return (
-        VisitDataset,
+        Locations,
         THATSSurvey,
+        Users,
         build_tensors,
         load_graph,
         read_tables,
+        save_tensors,
+        tensors_path,
     )
 
 
@@ -53,11 +56,14 @@ def _():
 
 @app.cell
 def _(
-    VisitDataset,
+    Locations,
     THATSSurvey,
+    Users,
     build_tensors,
     load_graph,
     read_tables,
+    save_tensors,
+    tensors_path,
 ):
     survey = THATSSurvey.load(cfg.data, project_root).with_filter("zone")
     tables = read_tables(cfg.data, project_root)
@@ -66,10 +72,12 @@ def _(
 
     survey_tensors = build_tensors(survey, nodes_gdf, edges_gdf)
 
-    dataset_path = project_root / cfg.data.paths.tensors
+    dataset_path = tensors_path(cfg.data, project_root)
 
-    dataset = VisitDataset(str(dataset_path), lambda: survey_tensors)
-    return dataset, edges_gdf, nodes_gdf, survey, tables
+    save_tensors(dataset_path, *survey_tensors)
+    locations = Locations.from_tensors(survey_tensors[0], None)
+    users = Users.from_tensors(survey_tensors[1], None)
+    return edges_gdf, locations, nodes_gdf, survey, tables, users
 
 
 @app.cell
@@ -81,18 +89,22 @@ def _():
 
 
 @app.cell
-def _(dataset, pyg):
-    batch = next(iter(pyg.loader.DataLoader(dataset, batch_size=64)))
+def _(locations, torch, users):
+    from activitygraphs.datasets import UserBatch, UserDataset
+
+    _first_users = UserDataset(users, list(range(64)))
+    _rows = next(iter(torch.utils.data.DataLoader(_first_users, batch_size=64)))
+    batch = UserBatch.join(_rows, locations)
     batch
     return (batch,)
 
 
 @app.cell
 def _(batch, torch):
-    y = batch.y
+    y = batch.visited.reshape(-1, 1)
 
-    logits = torch.rand_like(batch.y)
-    batch_index = batch.batch
+    logits = torch.rand_like(y)
+    batch_index = torch.arange(batch.num_users).repeat_interleave(batch.num_nodes)
 
     neg_restrict = None
     return batch_index, logits, neg_restrict, y
@@ -193,21 +205,12 @@ def _(survey, pl):
     return
 
 
-@app.cell
-def _(dataset):
-    from torch_geometric.loader import DataLoader
-
-    dataset.num_classes
-    return
-
-
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    The PyG Dataset is composed of three objects:
-    1. graph (PyG) - simple city2graph call on nodes_gdf & edges_gdf
-    2. user spatial features (Tensor, dim N_users x N_nodes x 1) - is_home indicator, to be concatenated with NG.x in dataset
-    3. user features (Tensor, dim N_users x N_features) - socio-demographics about users, can be concatenated with each row of NG.x
+    The survey is composed of two objects:
+    1. `locations` - the graph from a simple city2graph call on nodes_gdf & edges_gdf, with the RWPE and the node-to-node distances
+    2. `users` - the home node (Tensor, dim N_users), from which each batch builds the is_home indicator, to be concatenated with NG.x, the visit labels (Tensor, dim N_users x N_nodes), and the user features (Tensor, dim N_users x N_features) - socio-demographics about users, can be concatenated with each row of NG.x
     """)
     return
 

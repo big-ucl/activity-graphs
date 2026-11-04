@@ -1,19 +1,19 @@
-"""Integration smoke tests for VisitDataModule.
+"""Integration smoke tests for SurveyDataModule.
 
 Marked ``integration`` and skipped automatically when the dataset is not on disk.
 """
 
 import pytest
 
-from activitygraphs.datasets import HouseholdSplit, VisitDataModule
+from activitygraphs.datasets import HouseholdSplit, SurveyDataModule
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")
-def datamodule(load_or_skip) -> VisitDataModule:
-    def build(cfg, root) -> VisitDataModule:
-        dm = VisitDataModule(cfg, HouseholdSplit(val_size=0.2, test_size=0.1), seed=42, batch_size=64, num_workers=0)
+def datamodule(load_or_skip) -> SurveyDataModule:
+    def build(cfg, root) -> SurveyDataModule:
+        dm = SurveyDataModule(cfg, HouseholdSplit(val_size=0.2, test_size=0.1), seed=42, batch_size=64, num_workers=0)
         dm.prepare_data()
         dm.setup()
         return dm
@@ -21,18 +21,18 @@ def datamodule(load_or_skip) -> VisitDataModule:
     return load_or_skip("thats", build)
 
 
-class TestVisitDataModule:
+class TestSurveyDataModule:
     def test_split_covers_all_users(self, datamodule):
-        # Subsets share the full (unsliced) visit_labels tensor, so shape[0] is the total count.
-        total = datamodule.train_dataset.visit_labels.shape[0]
-        n_split = len(datamodule.train_dataset) + len(datamodule.val_dataset) + len(datamodule.test_dataset)
-        assert n_split == total
+        train = datamodule.train_dataset.user_idx.tolist()
+        val = datamodule.val_dataset.user_idx.tolist()
+        test = datamodule.test_dataset.user_idx.tolist()
+        assert sorted(train + val + test) == list(range(len(train) + len(val) + len(test)))
 
     def test_splits_are_disjoint(self, datamodule):
         # Regression guard for the Step 2 leak: the three splits must not share individuals.
-        train = set(datamodule.train_dataset.indices())
-        val = set(datamodule.val_dataset.indices())
-        test = set(datamodule.test_dataset.indices())
+        train = set(datamodule.train_dataset.user_idx.tolist())
+        val = set(datamodule.val_dataset.user_idx.tolist())
+        test = set(datamodule.test_dataset.user_idx.tolist())
         assert train.isdisjoint(val)
         assert train.isdisjoint(test)
         assert val.isdisjoint(test)

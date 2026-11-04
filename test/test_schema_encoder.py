@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 import torch
 
-from activitygraphs.ml.schema_encoder import SchemaEncoder, default_emb_dim
+from activitygraphs.models.schema_encoder import SchemaEncoder, default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 from activitygraphs.tensors.build import encode_categories
 

@@ -185,15 +185,15 @@ def pick_user(per_user: pl.DataFrame, min_positives: int = 4) -> int:
         (pl.col("stage") == PER_USER_STAGE)
         & (pl.col("name") == REFERENCE)
         & (pl.col("pos_node").list.len() >= min_positives)
-    ).sort("user_id")
+    ).sort("user_idx")
 
     if rows.is_empty():
         raise ValueError(f"no test user has {min_positives} positives")
 
-    return int(rows["user_id"][0])
+    return int(rows["user_idx"][0])
 
 
-def example_ranking_figure(k: int = 20, seed: int = 42, user_id: int | None = None) -> None:
+def example_ranking_figure(k: int = 20, seed: int = 42, user_idx: int | None = None) -> None:
     """One CMAP individual's scores under the GNN and the node-level MLP, with the top-k set outlined.
 
     Both panels are coloured by rank prominence rather than by the raw score, so the two models sit on one
@@ -202,12 +202,12 @@ def example_ranking_figure(k: int = 20, seed: int = 42, user_id: int | None = No
     cfg, per_user, scores, _ = load("cmap")
     nodes = figures.node_gdf(gpd.read_parquet(PROJECT_ROOT / cfg.data.paths.processed / "Graph/nodes.parquet"))
 
-    user_id = pick_user(per_user) if user_id is None else user_id
-    row = per_user.filter((pl.col("stage") == PER_USER_STAGE) & (pl.col("user_id") == user_id)).row(0, named=True)
+    user_idx = pick_user(per_user) if user_idx is None else user_idx
+    row = per_user.filter((pl.col("stage") == PER_USER_STAGE) & (pl.col("user_idx") == user_idx)).row(0, named=True)
     home_node, visited = int(row["home_node"]), [int(node) for node in row["pos_node"]]
 
     by_model = {
-        spec.label: figures.rank_prominence(figures.user_scores(scores, spec.name, user_id, seed))
+        spec.label: figures.rank_prominence(figures.user_scores(scores, spec.name, user_idx, seed))
         for spec in (CURVE_MODELS[0], CURVE_MODELS[3])
     }
     top_k = {label: figures.top_k_nodes(values, k) for label, values in by_model.items()}
@@ -236,7 +236,7 @@ def example_ranking_figure(k: int = 20, seed: int = 42, user_id: int | None = No
         )
 
     add_map_key(fig, axes, k, len(nodes))
-    print(f"  user {user_id}: home node {home_node}, {len(visited)} visited nodes")
+    print(f"  user {user_idx}: home node {home_node}, {len(visited)} visited nodes")
     save_figure(fig, "progress-example-ranking")
 
 

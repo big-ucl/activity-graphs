@@ -7,11 +7,13 @@ import lightning as L
 import polars as pl
 
 from activitygraphs.analysis import check_overfit_health
-from activitygraphs.config import Config, DepthSweepConfig
+from activitygraphs.config import Config, DepthSweepConfig, TwoTowerConfig
 from activitygraphs.experiments.results import save_results
 from activitygraphs.experiments.setup import ExperimentSetup, setup_experiment, with_overrides
 from activitygraphs.experiments.training import train_and_evaluate_model
-from activitygraphs.experiments.variants import Variant, build_feature_encoder, build_model
+from activitygraphs.experiments.variants import Variant
+from activitygraphs.models.architectures import build_scorer
+from activitygraphs.models.features import InputFeatures
 
 log = logging.getLogger(__name__)
 
@@ -23,20 +25,19 @@ def run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Dat
     training stochasticity alone rather than split variance.
     """
     cfg = setup.cfg
-    dataset = setup.datamodule.train_dataset
+    locations = setup.datamodule.locations
+    schema = setup.datamodule.schema
     results = []
 
     for train_seed in setup.train_seeds:
         L.seed_everything(train_seed, workers=True)
 
         for variant in variants:
-            encoder = build_feature_encoder(variant, dataset, cfg.train.home_pe)
-            model = build_model(variant, dataset, encoder.out_dim)
+            scorer = build_scorer(variant.model, variant.features, locations, schema, cfg.train.home_pe)
             run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
 
             result_df = train_and_evaluate_model(
-                model=model,
-                feature_encoder=encoder,
+                scorer=scorer,
                 variant=variant,
                 datamodule=setup.datamodule,
                 loss=setup.loss,
@@ -65,14 +66,15 @@ def comparison_experiment(cfg: Config):
 
     variants = [
         Variant(mlp),
-        Variant(mlp, full_info=True),
-        Variant(mlp, full_info=True, use_home_pe=True),
+        Variant(mlp, InputFeatures(full_info=True)),
+        Variant(mlp, InputFeatures(full_info=True, use_home_pe=True)),
         Variant(gat),
-        Variant(gat, full_info=True),
-        Variant(gat, use_home_pe=True),
-        Variant(gat, full_info=True, use_home_pe=True),
-        Variant(gps, use_home_pe=True),
-        Variant(gps, full_info=True, use_home_pe=True),
+        Variant(gat, InputFeatures(full_info=True)),
+        Variant(gat, InputFeatures(use_home_pe=True)),
+        Variant(gat, InputFeatures(full_info=True, use_home_pe=True)),
+        Variant(gps, InputFeatures(use_home_pe=True)),
+        Variant(gps, InputFeatures(full_info=True, use_home_pe=True)),
+        Variant(setup.models["home_zone_mf"]),
     ]
 
     model_results = run_variants(setup, variants)
@@ -84,15 +86,19 @@ def comparison_experiment(cfg: Config):
 
 
 def depth_sweep_experiment(cfg: Config):
-    """Sweep number of message passing layers of the GAT (with HPE and home distance) over ``cfg.experiment.depths``."""
+    """Sweep number of message passing layers of the GAT (with HPE and home distance) over ``cfg.experiment.depths``.
+
+    The depth-0 anchor is the ``NodeMLP`` with the same input features.
+    """
     setup = setup_experiment(cfg)
     gat = setup.models["gat"]
+    features = InputFeatures(full_info=True, use_home_pe=True)
 
-    variants = [Variant(setup.models["mlp"], full_info=True, extra_hyperparams={"depth": 0})]
+    variants = [Variant(setup.models["mlp"], features, extra_hyperparams={"depth": 0})]
 
     for depth in cast(DepthSweepConfig, cfg.experiment).depths:
         gat_at_depth = with_overrides(gat, {"num_gcn_layers": depth})
-        variants.append(Variant(gat_at_depth, full_info=True, use_home_pe=True, extra_hyperparams={"depth": depth}))
+        variants.append(Variant(gat_at_depth, features, extra_hyperparams={"depth": depth}))
 
     model_results = run_variants(setup, variants)
 
@@ -113,8 +119,7 @@ def demographics_ablation_experiment(cfg: Config):
     variants = [
         Variant(
             model,
-            full_info=True,
-            use_demographics=use_demographics,
+            InputFeatures(full_info=True, use_demographics=use_demographics),
             suffix="demo" if use_demographics else "nodemo",
         )
         for model in (setup.models["mlp"], setup.models["gat"])
@@ -133,18 +138,58 @@ def core_experiment(cfg: Config):
     """Compare the core variants beside the baselines, the short run for paired comparisons between code changes.
 
     Trains ``MLP-dist`` with and without the random-walk positional encoding, ``MLP-hpe-dist``, and the GAT and GPS
-    with the same features as ``MLP-hpe-dist``, every one once per training seed. The RWPE-free MLP is the control
-    for whether graph structure helps beyond node features.
+    with the same features as ``MLP-hpe-dist``, and ``HomeZoneMF``, every one once per training seed. The RWPE-free MLP
+    is the control for whether graph structure helps beyond node features.
     """
     setup = setup_experiment(cfg)
     mlp, gat, gps = setup.models["mlp"], setup.models["gat"], setup.models["gps"]
+    mf = setup.models["home_zone_mf"]
 
     variants = [
-        Variant(mlp, full_info=True, use_rwpe=False),
-        Variant(mlp, full_info=True),
-        Variant(mlp, full_info=True, use_home_pe=True),
-        Variant(gat, full_info=True, use_home_pe=True),
-        Variant(gps, full_info=True, use_home_pe=True),
+        Variant(mlp, InputFeatures(full_info=True, use_rwpe=False)),
+        Variant(mlp, InputFeatures(full_info=True)),
+        Variant(mlp, InputFeatures(full_info=True, use_home_pe=True)),
+        Variant(gat, InputFeatures(full_info=True, use_home_pe=True)),
+        Variant(gps, InputFeatures(full_info=True, use_home_pe=True)),
+        Variant(mf),
+    ]
+
+    model_results = run_variants(setup, variants)
+
+    if setup.run_dir is None:
+        return
+
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)
+
+
+def two_tower_ablation_experiment(cfg: Config):
+    """Ablate the inputs of the two-tower model and run its in-city diagnostics, beside ``MLP-hpe-dist`` and the GAT.
+
+    Trains the two-tower model without the pairwise features and the demographics, with each, and with both. With both,
+    it also trains the free per-node bias in place of the location bias, and the node-identity embedding. The GAT has
+    the features of ``MLP-hpe-dist`` and the depth of the two-tower model's node tower. Every model is trained once per
+    training seed.
+    """
+    setup = setup_experiment(cfg)
+    mlp, two_tower = setup.models["mlp"], cast(TwoTowerConfig, setup.models["two_tower"])
+    gat = with_overrides(setup.models["gat"], {"num_gcn_layers": two_tower.num_gcn_layers})
+    node_bias = with_overrides(two_tower, {"bias": "node"})
+    node_embedding = with_overrides(two_tower, {"node_embedding": True})
+
+    bare = InputFeatures(use_demographics=False)
+    pairwise = InputFeatures(full_info=True, use_home_pe=True, use_demographics=False)
+    demographics = InputFeatures()
+    both = InputFeatures(full_info=True, use_home_pe=True)
+
+    variants = [
+        Variant(mlp, both),
+        Variant(gat, both),
+        Variant(two_tower, bare, suffix="nodemo"),
+        Variant(two_tower, pairwise, suffix="nodemo"),
+        Variant(two_tower, demographics),
+        Variant(two_tower, both),
+        Variant(node_bias, both),
+        Variant(node_embedding, both),
     ]
 
     model_results = run_variants(setup, variants)
@@ -172,8 +217,8 @@ def overfit_health_experiment(cfg: Config):
     setup = setup_experiment(cfg, with_baselines=False)
 
     variants = [
-        Variant(setup.models["mlp"], full_info=True),
-        Variant(setup.models["gat"], full_info=True),
+        Variant(setup.models["mlp"], InputFeatures(full_info=True)),
+        Variant(setup.models["gat"], InputFeatures(full_info=True)),
     ]
 
     model_results = run_variants(setup, variants)
@@ -191,13 +236,15 @@ def overfit_health_experiment(cfg: Config):
 
 
 def baselines_experiment(cfg: Config):
-    """Fit and evaluate the baselines alone, with no learned models.
+    """Fit and evaluate the baselines alone, with ``HomeZoneMF`` as the only learned model.
 
     The split is fixed by ``cfg.train.split_seed``, so the per-user rows pair with any learned run of the same dataset.
     """
     setup = setup_experiment(cfg)
 
+    model_results = run_variants(setup, [Variant(setup.models["home_zone_mf"])])
+
     if setup.run_dir is None:
         return
 
-    save_results(setup.run_dir, *setup.baseline_results, setup.home_distances)
+    save_results(setup.run_dir, *model_results, *setup.baseline_results, setup.home_distances)

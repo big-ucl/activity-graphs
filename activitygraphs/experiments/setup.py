@@ -8,15 +8,15 @@ from typing import cast
 import lightning as L
 import polars as pl
 import torch
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from activitygraphs.config import Config, ModelConfig
-from activitygraphs.datasets import HouseholdSplit, VisitDataModule
+from activitygraphs.datasets import HouseholdSplit, SurveyDataModule
 from activitygraphs.experiments.baselines import measure_baselines
 from activitygraphs.experiments.results import create_output_dir, run_config, save_config
 from activitygraphs.experiments.training import WandBParams, home_distance_frame
-from activitygraphs.ml.losses import Loss, build_loss
 from activitygraphs.runs import TIMESTAMP_FORMAT
+from activitygraphs.training.losses import Loss, build_loss
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class ExperimentSetup:
 
     cfg: Config
     run_dir: Path | None
-    datamodule: VisitDataModule
+    datamodule: SurveyDataModule
     loss: Loss
     models: dict[str, ModelConfig]
     baseline_results: list[pl.DataFrame]
@@ -55,11 +55,11 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     create the run directory with the config the run uses.
 
     The architectures and their hyperparameters are read from ``cfg.models``. When ``cfg.trainer.overfit_batches > 0``,
-    every architecture's dropout and weight decay are set to 0 and its learning rate to ``cfg.train.overfit_lr``,
+    every architecture's weight decay is set to 0 (and dropout too if it has some), and its learning rate to ``cfg.train.overfit_lr``,
     unless that is null, and ``cfg.trainer.max_epochs`` is set to ``cfg.train.overfit_epochs``. The split is drawn with ``cfg.train.split_seed`` and is never reseeded, so every model in
     every experiment is scored on the same test users.
 
-    ``with_baselines=False`` skips fitting the frequency baselines.
+    ``with_baselines=False`` skips the baselines.
     """
     started = datetime.now()
     run_dir = create_output_dir(cfg, started)
@@ -71,7 +71,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     L.seed_everything(split_seed, workers=True)
     torch.set_float32_matmul_precision("high")
 
-    datamodule = VisitDataModule(
+    datamodule = SurveyDataModule(
         cfg,
         split,
         seed=split_seed,
@@ -81,21 +81,21 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
     datamodule.prepare_data()
     datamodule.setup()
 
-    train_dataset = datamodule.train_dataset
-
-    home_hop_distance = torch.as_tensor(train_dataset.home_hop_distance, dtype=torch.float)
-    is_home_idx = train_dataset.schema.user_nodes.index_of("is_home")
-    loss = build_loss(cfg.train.loss, home_hop_distance, is_home_idx, cfg.train.max_recall_k)
+    loss = build_loss(cfg.train.loss, cfg.train.max_recall_k)
 
     overfitting = cfg.trainer.overfit_batches > 0
     models = dict(cfg.models)
 
     if overfitting:
         cfg = cast(Config, OmegaConf.merge(cfg, {"trainer": {"max_epochs": cfg.train.overfit_epochs}}))
-        overrides: dict = {"weight_decay": 0.0, "dropout": 0.0}
+        overrides: dict = {"weight_decay": 0.0}
         if cfg.train.overfit_lr is not None:
             overrides["lr"] = cfg.train.overfit_lr
-        models = {key: with_overrides(model, overrides) for key, model in models.items()}
+
+        for key, model in models.items():
+            has_dropout = "dropout" in cast(DictConfig, model)
+            model_overrides = {**overrides, "dropout": 0.0} if has_dropout else overrides
+            models[key] = with_overrides(model, model_overrides)
 
     if run_dir is not None:
         save_config(run_dir, cfg, models)
@@ -111,8 +111,7 @@ def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetu
         run_dir=None if run_dir is None else str(run_dir),
     )
 
-    num_nodes = train_dataset.num_nodes
-    baseline_results = measure_baselines(num_nodes, datamodule, loss, cfg, wandb_params) if with_baselines else []
+    baseline_results = measure_baselines(datamodule, loss, cfg, wandb_params) if with_baselines else []
 
     return ExperimentSetup(
         cfg=cfg,
