@@ -201,6 +201,7 @@ class DataConfig:
     inputs: SurveyPaths
     paths: DataPaths
     distance_bands: list[float]
+    train_batch_fraction: float
 
 
 @dataclass
@@ -266,6 +267,7 @@ class TrainerConfig:
     gradient_clip_val: float
     fast_dev_run: bool
     overfit_batches: int
+    limit_train_batches: float
     enable_progress_bar: bool
     enable_model_summary: bool
 

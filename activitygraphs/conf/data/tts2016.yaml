@@ -32,3 +32,6 @@ paths:
 
 # Upper edges in km of the distance-from-home bands the within-band AUC is read on.
 distance_bands: [ 2, 5, 10, 25 ]
+
+# Share of the training batches run each epoch, drawn from a fresh shuffle of the training users every epoch.
+train_batch_fraction: 0.25

@@ -26,6 +26,8 @@ trainer:
   fast_dev_run: false
   # Number of batches to train on (to test model overfit), disabled when = 0.
   overfit_batches: 0
+  # Share of the training batches run each epoch, set per dataset. Ignored while overfitting.
+  limit_train_batches: ${data.train_batch_fraction}
   enable_progress_bar: true
   enable_model_summary: false
 

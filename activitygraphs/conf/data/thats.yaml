@@ -33,3 +33,6 @@ paths:
   gtfs: ${..paths.external}/gtfs
 
 distance_bands: [ 2, 5, 10, 25 ]
+
+# Share of the training batches run each epoch, drawn from a fresh shuffle of the training users every epoch.
+train_batch_fraction: 1.0
