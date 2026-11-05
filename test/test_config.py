@@ -17,13 +17,20 @@ from activitygraphs.config import (
     MLPConfig,
     THATSDataConfig,
     TPGDataConfig,
+    TTSDataConfig,
     TwoTowerConfig,
 )
 from activitygraphs.utils import get_project_root
 
 CONF_DIR = get_project_root() / "activitygraphs/conf"
 
-DATA_CONFIGS = {"tpg": TPGDataConfig, "cmap": CMAPDataConfig, "thats": THATSDataConfig}
+DATA_CONFIGS = {
+    "tpg": TPGDataConfig,
+    "cmap": CMAPDataConfig,
+    "thats": THATSDataConfig,
+    "tts2016": TTSDataConfig,
+    "tts2022": TTSDataConfig,
+}
 MODEL_CONFIGS = {
     "mlp": MLPConfig,
     "gat": GATConfig,

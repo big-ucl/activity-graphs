@@ -4,13 +4,14 @@ from pathlib import Path
 from typing import Any
 
 from activitygraphs.config import DataConfig
-from activitygraphs.surveys import cmap, thats, tpg
+from activitygraphs.surveys import cmap, thats, tpg, tts
 from activitygraphs.surveys.base import SurveyData, SurveyLoader
 
 REGISTRY: dict[str, SurveyLoader[Any, Any]] = {
     "tpg": tpg.LOADER,
     "thats": thats.LOADER,
     "cmap": cmap.LOADER,
+    "tts": tts.LOADER,
 }
 
 

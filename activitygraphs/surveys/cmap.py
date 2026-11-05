@@ -27,7 +27,7 @@ from activitygraphs.base import (
 from activitygraphs.config import CMAPDataConfig
 from activitygraphs.schema import TensorSchema
 from activitygraphs.surveys.base import NA, DataFrameStore, SurveyData, SurveyLoader, build_special_locations
-from activitygraphs.surveys.demographics import DEMOGRAPHICS_SCHEMA, INCOME_QUARTILES, quantile_bands
+from activitygraphs.surveys.demographics import DEMOGRAPHICS_SCHEMA, INCOME_QUARTILES, quantile_bands, vehicle_band
 from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import (
     add_lon_lat_from_centroid,
@@ -385,7 +385,7 @@ def _build_cmap_users(
         home_loc_id=_census_tract_to_loc_id("home_tract_2020", locations_gdf),
         hh_num_adults=pl.col("num_adults").cast(pl.UInt32),
         hh_num_children=pl.col("num_kids").cast(pl.UInt32),
-        hh_num_vehicles=pl.col("num_vehicles").cast(pl.UInt32),
+        hh_num_vehicles=vehicle_band(pl.col("num_vehicles")),
         income_quartile=pl.col("income_detailed").replace_strict(
             income_quartiles, default=None, return_dtype=pl.String
         ),

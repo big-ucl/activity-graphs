@@ -241,13 +241,14 @@ class SurveyLoader[C: DataConfig, S]:
         load: Loads the survey from the ``processed`` cache, builds and caches it on a cache miss.
         read_statistics: Reads the census statistics that enrich zone features.
         add_statistics: Adds population and job densities to the zone locations.
-        build_extra_edges: Builds edges to add on top of the contiguity graph from its nodes (e.g. island zones); ``None`` adds none.
+        build_extra_edges: Builds edges to add on top of the contiguity graph from its nodes and edges (e.g. island zones);
+            ``None`` adds none.
     """
 
     load: Callable[[C, Path | None], SurveyData]
     read_statistics: Callable[[C, Path | None], S]
     add_statistics: Callable[[gpd.GeoDataFrame, S], gpd.GeoDataFrame]
-    build_extra_edges: Callable[[gpd.GeoDataFrame], gpd.GeoDataFrame] | None = None
+    build_extra_edges: Callable[[gpd.GeoDataFrame, gpd.GeoDataFrame], gpd.GeoDataFrame] | None = None
 
 
 def build_special_locations() -> gpd.GeoDataFrame:

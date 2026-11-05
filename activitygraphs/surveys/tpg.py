@@ -279,8 +279,12 @@ def _add_tpg_population_job_statistics(
 # =========================================
 
 
-def _build_tpg_island_edges(nodes_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def _build_tpg_island_edges(nodes_gdf: gpd.GeoDataFrame, edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Build kNN edges joining the island subsectors, which have no contiguous neighbour, to the mainland.
+
+    Args:
+        nodes_gdf: Nodes of the contiguity graph, indexed by ``loc_id``.
+        edges_gdf: Edges of the contiguity graph. Unused, the island subsectors being listed in ``ISLAND_LOC_IDS``.
 
     Returns:
         Edges indexed by (source ``loc_id``, target ``loc_id``).

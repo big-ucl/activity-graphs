@@ -70,6 +70,15 @@ class CMAPBoundaryPaths:
 
 
 @dataclass
+class TTSBoundaryPaths:
+    """Boundary files of the TTS traffic zones and of the census dissemination areas."""
+
+    directory: str
+    zones: str
+    dissemination_areas: str
+
+
+@dataclass
 class StatsPaths:
     """Base class for census statistics file config."""
 
@@ -97,6 +106,13 @@ class CMAPStatsPaths(StatsPaths):
 
     population: str
     jobs: str
+
+
+@dataclass
+class TTSStatsPaths(StatsPaths):
+    """Census statistics file config for one TTS survey version (the population of each dissemination area)."""
+
+    population: str
 
 
 # ===================================================
@@ -139,6 +155,17 @@ class CMAPPaths(SurveyPaths):
 
     statistics: CMAPStatsPaths
     boundaries: CMAPBoundaryPaths
+
+    raw_person: str
+    raw_household: str
+
+
+@dataclass
+class TTSPaths(SurveyPaths):
+    """Raw file inputs for one survey version of the Transportation Tomorrow Survey."""
+
+    statistics: TTSStatsPaths
+    boundaries: TTSBoundaryPaths
 
     raw_person: str
     raw_household: str
@@ -195,6 +222,14 @@ class CMAPDataConfig(DataConfig):
     """Dataset config for the Chicago CMAP MyDailyTravel 2022 survey."""
 
     inputs: CMAPPaths  # pyrefly: ignore[bad-override-mutable-attribute]
+
+
+@dataclass
+class TTSDataConfig(DataConfig):
+    """Dataset config for a TTS survey version, 2016 or 2022."""
+
+    inputs: TTSPaths  # pyrefly: ignore[bad-override-mutable-attribute]
+    survey_version: int
 
 
 # ===================================================
@@ -460,7 +495,7 @@ class Config:
     analysis: AnalysisConfig
 
 
-VALID_CONFIGS = Literal["tpg", "thats", "cmap"]
+VALID_CONFIGS = Literal["tpg", "thats", "cmap", "tts2016", "tts2022"]
 
 
 def read_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -> Config:
@@ -469,7 +504,7 @@ def read_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -
     Args:
         project_root: Repo root; the config dir is resolved as ``project_root/activitygraphs/conf``.
         verbose: Print the resolved YAML to stdout.
-        data: Dataset name, one of ``cmap``, ``thats``, or ``tpg``.
+        data: Dataset name, one of ``cmap``, ``thats``, ``tpg``, ``tts2016`` or ``tts2022``.
 
     Returns:
         Populated OmegaConf ``Config`` object.

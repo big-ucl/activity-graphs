@@ -35,6 +35,7 @@ from activitygraphs.surveys.demographics import (
     EMPLOYMENT_STATUSES,
     INCOME_QUARTILES,
     STUDENT_STATUSES,
+    VEHICLE_BANDS,
 )
 from activitygraphs.tensors import (
     SurveyTensors,
@@ -108,7 +109,7 @@ def build_users(loc_ids: list[str]) -> pl.DataFrame:
     hh_home = rng.choice(loc_ids, NUM_HOUSEHOLDS)
     hh_adults = rng.integers(1, 4, NUM_HOUSEHOLDS)
     hh_children = rng.integers(0, 3, NUM_HOUSEHOLDS)
-    hh_vehicles = rng.integers(0, 3, NUM_HOUSEHOLDS)
+    hh_vehicles = rng.choice(VEHICLE_BANDS, NUM_HOUSEHOLDS)
     hh_income = rng.choice(INCOME_QUARTILES, NUM_HOUSEHOLDS)
     is_missing = rng.random(NUM_USERS) < 0.2
     employment = rng.choice(EMPLOYMENT_STATUSES, NUM_USERS)
@@ -363,6 +364,7 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
         "student_status",
         "can_drive",
         "has_transit_pass",
+        "hh_num_vehicles",
         "income_quartile",
     ]
     assert users.attributes.shape[-1] == DEMOGRAPHICS_SCHEMA.numeric.width
@@ -389,6 +391,15 @@ def test_a_home_node_outside_the_graph_raises():
 
     with pytest.raises(ValueError, match="1 users have a home node outside the graph"):
         check_tensors(locations, dataclasses.replace(users, home_node=home_node), schema)
+
+
+def test_a_nan_user_attribute_raises():
+    locations, users, schema = build_survey_tensors("cmap")
+    attributes = users.attributes.clone()
+    attributes[0, 0] = float("nan")
+
+    with pytest.raises(ValueError, match="`attributes` tensor holds 1 NaN or infinite values"):
+        check_tensors(locations, dataclasses.replace(users, attributes=attributes), schema)
 
 
 def test_a_graph_without_an_edge_index_raises():

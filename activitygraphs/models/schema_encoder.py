@@ -32,11 +32,12 @@ class SchemaEncoder(torch.nn.Module):
         """
         super().__init__()
         self.embeddings = torch.nn.ModuleList()
+        embedded_width = 0
         for spec in schema.categorical.columns:
             width = emb_dim(spec.cardinality)
             self.embeddings.append(torch.nn.Embedding(spec.cardinality, width))
+            embedded_width += width
 
-        embedded_width = sum(embedding.embedding_dim for embedding in self.embeddings)
         self.out_dim = schema.numeric.width + embedded_width
 
     def forward(self, x_num: Tensor, x_cat: Tensor) -> Tensor:

@@ -14,6 +14,7 @@ EMPLOYMENT_STATUSES = ("full_time", "part_time", "self_employed", "not_employed"
 STUDENT_STATUSES = ("full_time", "part_time", "not_student")
 BOOLEAN_CATEGORIES = ("false", "true")
 INCOME_QUARTILES = ("q1", "q2", "q3", "q4")
+VEHICLE_BANDS = ("0", "1", "2", "3+")
 
 DEMOGRAPHICS_SCHEMA = TensorSchema(
     "user_attributes",
@@ -25,10 +26,18 @@ DEMOGRAPHICS_SCHEMA = TensorSchema(
         ColumnSpec("has_transit_pass", ColumnKind.CATEGORICAL, BOOLEAN_CATEGORIES),
         ColumnSpec("hh_num_adults", ColumnKind.CONTINUOUS),
         ColumnSpec("hh_num_children", ColumnKind.CONTINUOUS),
-        ColumnSpec("hh_num_vehicles", ColumnKind.CONTINUOUS),
+        ColumnSpec("hh_num_vehicles", ColumnKind.CATEGORICAL, VEHICLE_BANDS),
         ColumnSpec("income_quartile", ColumnKind.CATEGORICAL, INCOME_QUARTILES),
     ),
 )
+
+
+def vehicle_band(counts: pl.Expr) -> pl.Expr:
+    """Return the band of ``VEHICLE_BANDS`` that holds each household vehicle count, null where the count is null."""
+    top_count = len(VEHICLE_BANDS) - 1
+    is_top_band = counts >= top_count
+
+    return pl.when(is_top_band).then(pl.lit(VEHICLE_BANDS[-1])).otherwise(counts.cast(pl.String))
 
 
 def quantile_bands(codes: pl.Series, ordered_codes: Sequence[int], quantile_labels: Sequence[str]) -> dict[int, str]:

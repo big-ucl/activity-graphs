@@ -3,7 +3,7 @@
 import polars as pl
 import pytest
 
-from activitygraphs.surveys.demographics import INCOME_QUARTILES, quantile_bands
+from activitygraphs.surveys.demographics import INCOME_QUARTILES, quantile_bands, vehicle_band
 
 TTS_2016_INCOME_HOUSEHOLDS = {1: 6451, 2: 23811, 3: 23093, 4: 33805, 5: 15938, 6: 28306, 7: 31304}
 TTS_2016_INCOME_BANDS = [1, 2, 3, 4, 5, 6]
@@ -45,3 +45,12 @@ class TestQuantileBands:
         bands = quantile_bands(codes, TTS_2016_INCOME_BANDS, INCOME_QUARTILES)
 
         assert bands == {1: "q1", 2: "q1", 3: "q2", 4: "q3", 5: "q3", 6: "q4"}
+
+
+class TestVehicleBand:
+    def test_counts_of_three_and_more_share_the_top_band(self):
+        counts = pl.DataFrame({"n": [0, 1, 2, 3, 7, None]}, schema={"n": pl.UInt32})
+
+        bands = counts.select(band=vehicle_band(pl.col("n")))["band"].to_list()
+
+        assert bands == ["0", "1", "2", "3+", "3+", None]

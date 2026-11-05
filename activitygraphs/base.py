@@ -79,7 +79,7 @@ USER_SCHEMA = pl.Schema({
     "home_loc_id": pl.String,
     "hh_num_adults": pl.UInt32,
     "hh_num_children": pl.UInt32,
-    "hh_num_vehicles": pl.UInt32,
+    "hh_num_vehicles": pl.String,
     "income_quartile": pl.String,
     "age_band": pl.String,
     "employment_status": pl.String,

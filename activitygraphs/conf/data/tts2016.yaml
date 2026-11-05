@@ -1,0 +1,34 @@
+# @package data
+name: TTS2016
+survey: tts
+survey_version: 2016
+
+inputs:
+  raw_journeys: trip.csv
+  raw_person: pers.csv
+  raw_household: hhld.csv
+
+  statistics:
+    directory: ${...paths.external}/statistics/${...name}
+    population: 98-401-X2016044_ONTARIO_eng_CSV/98-401-X2016044_ONTARIO_English_CSV_data.csv
+
+  overture:
+    directory: ${...paths.external}/overture/TTS
+    land_use: land_use.geojson
+    place: place.geojson
+
+  boundaries:
+    directory: ${...paths.external}/boundaries/canada
+
+    zones: tts2022_2006zn_v2_shapefile.zip
+    dissemination_areas: lda_000b16a_e.zip
+
+paths:
+  processed: data/processed/${..name}
+  raw: data/raw/TTS/2016
+
+  external: data/external
+  gtfs: ${..paths.external}/gtfs
+
+# Upper edges in km of the distance-from-home bands the within-band AUC is read on.
+distance_bands: [ 2, 5, 10, 25 ]

@@ -143,7 +143,8 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
 
     Raises:
         ValueError: The tensors and ids disagree on the number of users or nodes, a group's tensors have a different
-            number of numeric or categorical columns than its schema, or a home node is not a node of the graph.
+            number of numeric or categorical columns than its schema, a home node is not a node of the graph, or a
+            feature tensor holds a NaN or infinite value.
     """
     _require_equal_counts(
         "User",
@@ -191,6 +192,13 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
     if num_outside:
         raise ValueError(f"{num_outside} users have a home node outside the graph.")
 
+    _require_finite({
+        "x": locations.x,
+        "edge_attr": locations.edge_attr,
+        "distance_m": locations.distance_m,
+        "attributes": users.attributes,
+    })
+
 
 def _require_equal_counts(count_name: str, counts: dict[str, int]) -> None:
     """Raise unless every count in ``counts`` is the same.
@@ -205,3 +213,18 @@ def _require_equal_counts(count_name: str, counts: dict[str, int]) -> None:
     if len(set(counts.values())) > 1:
         listed = ", ".join(f"{name} {count}" for name, count in counts.items())
         raise ValueError(f"{count_name} count mismatch: {listed}.")
+
+
+def _require_finite(tensors: dict[str, torch.Tensor]) -> None:
+    """Raise unless every value of every tensor in ``tensors`` is finite.
+
+    Args:
+        tensors: The float tensors to check, keyed by the tensor name.
+
+    Raises:
+        ValueError: A tensor holds a NaN or infinite value.
+    """
+    for name, tensor in tensors.items():
+        num_not_finite = int((~torch.isfinite(tensor)).sum())
+        if num_not_finite:
+            raise ValueError(f"The `{name}` tensor holds {num_not_finite} NaN or infinite values.")

@@ -82,7 +82,8 @@ def _build_graph[S](
     nodes_gdf, edges_gdf = c2g.contiguity_graph(zones_gdf, set_point_nodes=True)
 
     if loader.build_extra_edges is not None:
-        edges_gdf = cast(gpd.GeoDataFrame, pd.concat([edges_gdf, loader.build_extra_edges(nodes_gdf)]))
+        extra_edges = loader.build_extra_edges(nodes_gdf, edges_gdf)
+        edges_gdf = cast(gpd.GeoDataFrame, pd.concat([edges_gdf, extra_edges]))
         edges_gdf = c2g.canonicalize_edges(edges_gdf)
 
     return nodes_gdf.to_crs(CRS), edges_gdf.to_crs(CRS)
