@@ -112,12 +112,12 @@ def core_experiment(cfg: Config):
     mf = setup.models["home_zone_mf"]
 
     variants = [
+        Variant(mf),
         Variant(mlp, InputFeatures(full_info=True, use_rwpe=False)),
         Variant(mlp, InputFeatures(full_info=True)),
         Variant(mlp, InputFeatures(full_info=True, use_home_pe=True)),
         Variant(gat, InputFeatures(full_info=True, use_home_pe=True)),
         Variant(gps, InputFeatures(full_info=True, use_home_pe=True)),
-        Variant(mf),
     ]
 
     model_results = _run_variants(setup, variants)
@@ -228,9 +228,8 @@ def _run_variants(setup: ExperimentSetup, variants: list[Variant]) -> list[pl.Da
     results = []
 
     for train_seed in setup.train_seeds:
-        L.seed_everything(train_seed, workers=True)
-
         for variant in variants:
+            L.seed_everything(train_seed, workers=True)
             scorer = build_scorer(variant.model, variant.features, locations, schema, cfg.train.home_pe)
             run_tag = f"seed{train_seed}" if len(setup.train_seeds) > 1 else None
 
