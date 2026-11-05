@@ -1,6 +1,7 @@
 """Hydra entry points: ``main`` launches to the configured experiment, ``report_results`` analyses the results."""
 
 import hydra
+import torch
 
 from activitygraphs.analysis import print_report
 from activitygraphs.config import Config
@@ -31,6 +32,7 @@ def main(cfg: Config):
     if cfg.experiment.name not in EXPERIMENTS:
         raise ValueError(f"experiment.name must be one of {sorted(EXPERIMENTS)}, got {cfg.experiment.name}")
 
+    torch.set_float32_matmul_precision("high")
     experiment = EXPERIMENTS[cfg.experiment.name]
     experiment(cfg)
 
