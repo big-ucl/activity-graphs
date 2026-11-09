@@ -19,7 +19,7 @@ paths:
 # Keyword arguments of the Lightning Trainer of every learned model. Add other Trainer arguments with `+trainer.<arg>=`.
 trainer:
   # Number of training epochs. Replaced by `train.overfit_epochs` while overfitting.
-  max_epochs: 50
+  max_epochs: ${data.max_epochs}
   accelerator: auto
   gradient_clip_val: 1.0
   # Enables Lightning fast-dev-run (no training but all code parts are run).

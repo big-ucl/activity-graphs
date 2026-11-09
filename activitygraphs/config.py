@@ -202,6 +202,7 @@ class DataConfig:
     paths: DataPaths
     distance_bands: list[float]
     train_batch_fraction: float
+    max_epochs: int
 
 
 @dataclass

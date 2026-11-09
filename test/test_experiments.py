@@ -244,11 +244,17 @@ class TestTrainerConfig:
     def test_every_key_is_a_trainer_argument(self, cfg):
         assert set(cfg.trainer) <= set(inspect.signature(L.Trainer.__init__).parameters)
 
-    @pytest.mark.parametrize(("data", "fraction"), [("tts2016", 0.25), ("cmap", 1.0)])
+    @pytest.mark.parametrize(("data", "fraction"), [("tts2016", 0.5), ("cmap", 1.0)])
     def test_the_trainer_gets_the_batch_fraction_of_the_dataset(self, compose_config, data, fraction):
         cfg = compose_config(f"data={data}")
 
         assert _trainer_arguments(cfg)["limit_train_batches"] == fraction
+
+    @pytest.mark.parametrize(("data", "max_epochs"), [("tts2022", 80), ("cmap", 50)])
+    def test_the_trainer_gets_the_epochs_of_the_dataset(self, compose_config, data, max_epochs):
+        cfg = compose_config(f"data={data}")
+
+        assert _trainer_arguments(cfg)["max_epochs"] == max_epochs
 
 
 class TestExperimentConfigs:
