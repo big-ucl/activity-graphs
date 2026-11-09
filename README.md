@@ -6,9 +6,9 @@ into a tractable candidate set of locations the person plausibly considers visit
 input to downstream activity-based travel models. The task is set up as node-level classification/ranking over a spatial
 adjacency graph of census/traffic analysis zones, trained on realised visits.
 
-Datasets: Geneva (TPG) and Chicago (CMAP MyDailyTravel), with Toronto (TTS) coming soon. The Toronto THATS loader is
-kept but no longer used. Survey data is not distributed in this repository, `data/` must be added to the local repo
-clone.
+Datasets: Geneva (TPG), Chicago (CMAP MyDailyTravel), and Toronto (TTS, the 2016 and 2022 survey versions). The
+Toronto THATS loader is kept but no longer used. Survey data is not distributed in this repository, `data/` must be
+added to the local repo clone.
 
 ## Setup
 
@@ -27,7 +27,7 @@ to setup the project and install dependencies.
 
 ```bash
 uv run activity-graphs                       # full comparison run, default dataset (TPG)
-uv run activity-graphs data=cmap             # switch dataset (tpg, cmap, thats)
+uv run activity-graphs data=cmap             # switch dataset (tpg, cmap, tts2016, tts2022, thats)
 
 uv run activity-graphs trainer.fast_dev_run=true    # single batch test run
 uv run activity-graphs train.loss.type=bce          # loss: bpr (default) or bce
@@ -74,7 +74,9 @@ Feature transformations are done as follows:
 - `depth_sweep` sweeps the message-passing depth of the GAT variant,
 - `demographics_ablation` trains the two best variants with and without the demographics,
 - `baselines` fits the baselines alone,
-- `overfit_health` checks that each architecture can memorise a single batch.
+- `overfit_health` checks that each architecture can memorise a single batch,
+- `two_tower_ablation` ablates the inputs of the two-tower model and runs its in-city diagnostics, beside the MLP and
+  the GAT.
 
 Each experiment writes per-epoch metrics to WandB and to a run directory `reports/runs/{name}-{N}-{timestamp}/`
 (`reports/overfit/{name}-{timestamp}/` for overfit runs): the config
@@ -99,7 +101,7 @@ activitygraphs/
   experiments/             # experiment runners, variants, training and baselines
   analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
   schema.py                # column kinds and the tensor schemas
-  surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap) and registry
+  surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap, tts) and registry
   graph/                   # Graph construction
   tensors/                 # pytorch tensor building
   datasets/                # locations, users, splits, feature transforms, Lightning data module

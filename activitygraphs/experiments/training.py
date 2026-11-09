@@ -232,9 +232,7 @@ def train_and_evaluate_model(
 
     # Create trainer and fit
 
-    trainer = L.Trainer(
-        **cast(dict, OmegaConf.to_container(cfg.trainer)), logger=[logger, metrics_logger], callbacks=callbacks
-    )
+    trainer = L.Trainer(**_trainer_arguments(cfg), logger=[logger, metrics_logger], callbacks=callbacks)
 
     trainer.fit(lit_model, datamodule=datamodule)
 
@@ -355,3 +353,8 @@ def _build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: st
         callbacks.append(OverfitDebugCallback())
 
     return callbacks
+
+
+def _trainer_arguments(cfg: Config) -> dict:
+    """Return the keyword arguments of the Lightning ``Trainer`` from ``cfg.trainer``, with interpolations resolved."""
+    return cast(dict, OmegaConf.to_container(cfg.trainer, resolve=True))

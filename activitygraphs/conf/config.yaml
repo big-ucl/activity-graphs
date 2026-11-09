@@ -6,8 +6,8 @@ defaults:
   - model@models.gps: gps
   - model@models.home_zone_mf: home_zone_mf
   - model@models.two_tower: two_tower
-  # The experiment to run, one of `conf/experiment/`: comparison, depth_sweep, demographics_ablation, overfit_health,
-  # baselines.
+  # The experiment to run, one of `conf/experiment/`: comparison, core, depth_sweep, demographics_ablation,
+  # overfit_health, baselines, two_tower_ablation.
   - experiment: comparison
 
 paths:

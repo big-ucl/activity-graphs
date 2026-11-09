@@ -352,7 +352,15 @@ class ExperimentConfig:
         name: Key of the experiment's runner in ``main.EXPERIMENTS``.
     """
 
-    name: Literal["comparison", "core", "depth_sweep", "demographics_ablation", "overfit_health", "baselines"]
+    name: Literal[
+        "comparison",
+        "core",
+        "depth_sweep",
+        "demographics_ablation",
+        "overfit_health",
+        "baselines",
+        "two_tower_ablation",
+    ]
 
 
 @dataclass

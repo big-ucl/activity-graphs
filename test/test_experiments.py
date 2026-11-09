@@ -25,7 +25,7 @@ from activitygraphs.experiments.results import (
 )
 from activitygraphs.experiments.runners import _run_variants
 from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
-from activitygraphs.experiments.training import WandBParams, _build_callbacks
+from activitygraphs.experiments.training import WandBParams, _build_callbacks, _trainer_arguments
 from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.main import EXPERIMENTS
 from activitygraphs.models.architectures import BUILDERS, _lookup_architecture, build_scorer
@@ -244,6 +244,12 @@ class TestTrainerConfig:
     def test_every_key_is_a_trainer_argument(self, cfg):
         assert set(cfg.trainer) <= set(inspect.signature(L.Trainer.__init__).parameters)
 
+    @pytest.mark.parametrize(("data", "fraction"), [("tts2016", 0.25), ("cmap", 1.0)])
+    def test_the_trainer_gets_the_batch_fraction_of_the_dataset(self, compose_config, data, fraction):
+        cfg = compose_config(f"data={data}")
+
+        assert _trainer_arguments(cfg)["limit_train_batches"] == fraction
+
 
 class TestExperimentConfigs:
     @pytest.mark.parametrize("path", EXPERIMENT_CONFIGS, ids=lambda path: path.stem)
@@ -316,6 +322,19 @@ class TestRunVariants:
 
         assert len(built) == 2
         assert built[0] is not built[1]
+
+    def test_every_variant_starts_from_the_seeded_random_state(self, cfg, monkeypatch):
+        record_training(monkeypatch)
+        draws: list[float] = []
+
+        def build(config, features, locations, schema, home_pe_cfg):
+            draws.append(torch.rand(1).item())
+            return torch.nn.Linear(1, 1)
+
+        monkeypatch.setattr(runners, "build_scorer", build)
+        _run_variants(make_setup(cfg, [1]), self._variants(cfg))
+
+        assert draws[0] == draws[1]
 
     def test_run_tag_separates_checkpoints_across_seeds(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)

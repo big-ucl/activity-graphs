@@ -28,7 +28,7 @@ NA, NA_SOURCE, NA_SINK = "NA", "NA_SOURCE", "NA_SINK"
 class SurveyData(ABC):
     """Wrapper around survey DataFrames that provides a cached, filterable view.
 
-    Each dataset (TPG, THATS, CMAP) inherits from this class.
+    Each dataset (TPG, THATS, CMAP, TTS) inherits from this class.
 
     Locations are filtered by ``filters``. It will only show locations that match the `loc_type` provided in the filter.
     Only journeys with both endpoints in filtered locations and users with home locations inside filtered locations will not be shown.
