@@ -10,7 +10,13 @@ from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import RankingModule
 from activitygraphs.training.losses import BCELoss
-from activitygraphs.training.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision
+from activitygraphs.training.metrics import (
+    PerUserRanking,
+    RetrievalAverageRecall,
+    RetrievalRPrecision,
+    UserPairAccuracy,
+    _per_user_pair_accuracy,
+)
 from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_rank_stats
 
 # Path graph 0-1-2-3-4 (both directions): hop distance from node 0 is [0, 1, 2, 3, 4].
@@ -36,6 +42,52 @@ KS = [1, 2]
 DROPPED_USER_PREDS = torch.tensor([0.9, 0.1, 0.2, 0.9, 0.1, 0.3, 0.5, 0.4, 0.2])
 DROPPED_USER_TARGET = torch.tensor([1, 0, 0, 0, 0, 1, 0, 0, 0])
 DROPPED_USER_INDEXES = torch.tensor([0, 0, 0, 1, 1, 1, 2, 2, 2])
+
+
+class TestPerUserPairAccuracy:
+    def test_counts_the_share_of_pairs_with_the_visited_node_above(self):
+        scores = torch.tensor([[0.9, 0.5, 0.1, 0.7], [0.2, 0.8, 0.4, 0.6]])
+        target = torch.tensor([[1, 0, 0, 1], [1, 0, 0, 0]])
+
+        accuracy = _per_user_pair_accuracy(scores, target)
+
+        torch.testing.assert_close(accuracy, torch.tensor([1.0, 0.0]))
+
+    def test_a_tied_pair_counts_as_one_half(self):
+        scores = torch.tensor([[0.5, 0.5, 0.1]])
+        target = torch.tensor([[1, 0, 0]])
+
+        torch.testing.assert_close(_per_user_pair_accuracy(scores, target), torch.tensor([0.75]))
+
+    def test_users_without_both_a_visited_and_an_unvisited_node_are_dropped(self):
+        scores = torch.tensor([[0.9, 0.1], [0.3, 0.4], [0.5, 0.6]])
+        target = torch.tensor([[1, 0], [0, 0], [1, 1]])
+
+        torch.testing.assert_close(_per_user_pair_accuracy(scores, target), torch.tensor([1.0]))
+
+    def test_does_not_depend_on_the_score_scale(self):
+        generator = torch.Generator().manual_seed(0)
+        scores = torch.randn(4, 10, generator=generator)
+        target = (torch.rand(4, 10, generator=generator) < 0.3).long()
+
+        torch.testing.assert_close(
+            _per_user_pair_accuracy(scores, target), _per_user_pair_accuracy(10 * scores, target)
+        )
+
+
+class TestUserPairAccuracy:
+    def test_averages_over_the_users_of_every_batch(self):
+        metric = UserPairAccuracy()
+        metric.update(torch.tensor([[0.9, 0.1]]), torch.tensor([[1, 0]]))
+        metric.update(torch.tensor([[0.1, 0.9], [0.5, 0.5]]), torch.tensor([[1, 0], [1, 0]]))
+
+        assert metric.compute().item() == pytest.approx((1.0 + 0.0 + 0.5) / 3)
+
+    def test_users_without_pairs_do_not_enter_the_mean(self):
+        metric = UserPairAccuracy()
+        metric.update(torch.tensor([[0.9, 0.1], [0.3, 0.4]]), torch.tensor([[1, 0], [0, 0]]))
+
+        assert metric.compute().item() == pytest.approx(1.0)
 
 
 class TestRetrievalRPrecision:

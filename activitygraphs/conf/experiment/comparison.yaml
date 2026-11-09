@@ -2,3 +2,14 @@
 # Comparison between the ML architectures, beside the baselines.
 experiment:
   name: comparison
+  variants:
+    - { model: mlp, features: { use_home_pe: false, use_dist: false } }
+    - { model: mlp, features: { use_home_pe: false } }
+    - { model: mlp }
+    - { model: gat, features: { use_home_pe: false, use_dist: false } }
+    - { model: gat, features: { use_home_pe: false } }
+    - { model: gat, features: { use_dist: false } }
+    - { model: gat }
+    - { model: gps, features: { use_dist: false } }
+    - { model: gps }
+    - { model: home_zone_mf }

@@ -1,5 +1,5 @@
 architecture: gps
-name: GTransformer-${.num_layers}-res
+name: GTransformer-${.num_layers}
 lr: 1e-4
 weight_decay: 1e-4
 

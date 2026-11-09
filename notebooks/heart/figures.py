@@ -24,10 +24,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATASET = "cmap"
 
 # The model, seed and zone counts the exported panels are drawn for; the notebook overrides them per widget.
-MAP_MODEL = "GATSkip-8-res-hpe-dist"
+MAP_MODEL = "GATv2-8"
 MAP_SEED = 42
-SPATIAL_MODEL = "GATSkip-8-res-hpe-dist"
-FLAT_MODEL = "MLP-dist"
+SPATIAL_MODEL = "GATv2-8"
+FLAT_MODEL = "MLP-nohpe"
 MF_MODEL = "HomeZoneMF"
 ZONES_IN_VIEW = 30
 TOP_KS = (5, 10, 20, 50)

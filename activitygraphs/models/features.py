@@ -1,7 +1,7 @@
 """Front end for model inputs. Has one sub-encoder per input source, concatenated by ``FeatureEncoder``."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch
 from torch import Tensor
@@ -18,16 +18,21 @@ class InputFeatures:
     """The input features used by a variant.
 
     Attributes:
-        full_info: Append each node's distance from home to its features.
         use_home_pe: Append the home-anchored positional encoding to each node's features.
+        use_dist: Append each node's distance from home to its features.
         use_demographics: Concatenate the user attributes onto each node's features.
         use_rwpe: Append the random-walk positional encoding to each node's features.
     """
 
-    full_info: bool = False
-    use_home_pe: bool = False
+    use_home_pe: bool = True
+    use_dist: bool = True
     use_demographics: bool = True
     use_rwpe: bool = True
+
+    @property
+    def departures(self) -> list[str]:
+        """Return the names of the flags that differ from their default, in field order."""
+        return [flag.name for flag in fields(self) if getattr(self, flag.name) != flag.default]
 
 
 class FeatureSource(torch.nn.Module):
@@ -55,6 +60,25 @@ class LocationFeatures(FeatureSource):
     def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
         """Return ``locations.x`` for every user, ``[num_users, num_nodes, out_dim]``."""
         return locations.x.expand(batch.num_users, -1, -1)
+
+
+class ProjectedLocationFeatures(FeatureSource):
+    """Projects the location features, ``locations.x``, through a city-specific linear layer, for every user.
+
+    Args:
+        schema: The column schema of the location features.
+        out_dim: Width of the projection.
+    """
+
+    def __init__(self, schema: TensorSchema, out_dim: int):
+        super().__init__()
+        self.schema = schema
+        self.projection = torch.nn.Linear(schema.width, out_dim)
+        self.out_dim = out_dim
+
+    def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
+        """Return the projected location features for every user, ``[num_users, num_nodes, out_dim]``."""
+        return self.projection(locations.x).expand(batch.num_users, -1, -1)
 
 
 class UserNodeFeatures(FeatureSource):
@@ -189,7 +213,7 @@ def build_feature_encoder(
         sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
     if features.use_demographics:
         sources.append(Demographics(schema.user_attributes))
-    if features.full_info:
+    if features.use_dist:
         sources.append(HomeDistance(schema.distances))
 
     return FeatureEncoder(sources)

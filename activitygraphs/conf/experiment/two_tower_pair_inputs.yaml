@@ -1,0 +1,11 @@
+# @package _global_
+# The two-tower model with the location features in its pairwise block, and at wider embeddings. Beside the MLP and
+# the baselines.
+experiment:
+  name: two_tower_pair_inputs
+  variants:
+    - { model: mlp }
+    - { model: two_tower }
+    - { model: two_tower, set: { pair_location_features: true } }
+    # Embedding widths of the two-tower model trained beside the configured one.
+    - { model: two_tower, sweep: { embedding_dim: [ 128 ] } }

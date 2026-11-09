@@ -1,4 +1,6 @@
 # @package _global_
-# The baselines alone, no learned models.
+# The baselines alone, with HomeZoneMF as the only learned model.
 experiment:
   name: baselines
+  variants:
+    - { model: home_zone_mf }

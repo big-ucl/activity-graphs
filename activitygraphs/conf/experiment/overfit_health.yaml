@@ -2,6 +2,9 @@
 # Single-batch fit of each architecture, read off `train_avg_recall@K`. One seed, no baselines.
 experiment:
   name: overfit_health
+  variants:
+    - { model: mlp, features: { use_home_pe: false } }
+    - { model: gat, features: { use_home_pe: false } }
 
 trainer:
   overfit_batches: 1

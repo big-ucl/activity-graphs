@@ -2,3 +2,12 @@
 # use_demographics on/off on the best MLP and GNN, beside the baselines.
 experiment:
   name: demographics_ablation
+  variants:
+    - { model: mlp }
+    - { model: mlp, features: { use_demographics: false } }
+    - { model: gat }
+    - { model: gat, features: { use_demographics: false } }
+
+models:
+  gat:
+    num_gcn_layers: 2

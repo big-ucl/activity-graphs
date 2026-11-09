@@ -16,7 +16,13 @@ from activitygraphs.datasets.batch import UserBatch, UserRows
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.models.scorers import Scorer
 from activitygraphs.training.losses import Loss
-from activitygraphs.training.metrics import PerUserRanking, RetrievalAverageRecall, RetrievalRPrecision, per_user_recall
+from activitygraphs.training.metrics import (
+    PerUserRanking,
+    RetrievalAverageRecall,
+    RetrievalRPrecision,
+    UserPairAccuracy,
+    per_user_recall,
+)
 
 CALIBRATION_BINS = 15
 
@@ -117,6 +123,11 @@ class RankingModule(L.LightningModule):
 
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
+
+        # Metrics over the full grid of every user, home node included, as seen by the loss.
+        grid_metrics = MetricCollection({"pair_accuracy": UserPairAccuracy()})
+        self.val_grid_metrics = grid_metrics.clone(prefix="val_")
+        self.test_grid_metrics = grid_metrics.clone(prefix="test_")
 
         self.log_train_ranking = log_train_ranking
         self.train_avg_recall = MeanMetric() if log_train_ranking else None
@@ -238,13 +249,17 @@ class RankingModule(L.LightningModule):
         return {f"{stage}_{name}": value for name, value in user_counts.items()}
 
     def validation_step(self, batch: UserBatch, batch_idx: int) -> None:
-        """Update the validation ranking, BCE and calibration metrics for one batch."""
+        """Update the validation ranking, grid, BCE and calibration metrics for one batch."""
         eval_tensors = self._common_evaluation_step(batch, "val")
         ranking_tensors = eval_tensors.ranking
 
         # Ranking metrics
         # Feed sigmoid (monotonic, preserves ranking), the same scores the per-user ranking and score vectors hold.
         self.val_metrics.update(ranking_tensors.probs, ranking_tensors.target, indexes=ranking_tensors.users)
+
+        # Grid metrics
+        grid_logits = eval_tensors.logits.reshape(batch.num_users, batch.num_nodes)
+        self.val_grid_metrics.update(grid_logits, batch.visited)
 
         # Calibration metrics
         self.val_calibration.update(eval_tensors.probs, eval_tensors.target.long())
@@ -253,8 +268,10 @@ class RankingModule(L.LightningModule):
     def on_validation_epoch_end(self) -> None:
         """Log and reset the validation metrics."""
         self.log_dict(self.val_metrics.compute())
+        self.log_dict(self.val_grid_metrics.compute())
         self.log_dict(self._num_scored_and_dropped_users("val"))
         self.val_metrics.reset()
+        self.val_grid_metrics.reset()
 
     def test_step(self, batch: UserBatch, batch_idx: int) -> None:
         """Update the test metrics and collect per-user rankings and score vectors for one batch."""
@@ -267,6 +284,10 @@ class RankingModule(L.LightningModule):
         self.test_metrics.update(  # Feed sigmoid (see validation step)
             ranking.probs, ranking.target, indexes=ranking.users
         )
+
+        # Grid metrics
+        grid_logits = eval_tensors.logits.reshape(batch.num_users, batch.num_nodes)
+        self.test_grid_metrics.update(grid_logits, batch.visited)
 
         # Per-user metrics
         self.test_per_user.update(  # All nodes included, drops home node itself instead to allow full per-user comparison
@@ -284,8 +305,10 @@ class RankingModule(L.LightningModule):
     def on_test_epoch_end(self) -> None:
         """Log and reset the test metrics and keep the per-user columns and score vectors."""
         self.log_dict(self.test_metrics.compute())
+        self.log_dict(self.test_grid_metrics.compute())
         self.log_dict(self._num_scored_and_dropped_users("test"))
         self.test_metrics.reset()
+        self.test_grid_metrics.reset()
 
         # Not logged: these are per-user vectors, not scalars. Persisted by `run_experiment`.
         self.per_user_columns = {name: value.cpu().tolist() for name, value in self.test_per_user.columns().items()}

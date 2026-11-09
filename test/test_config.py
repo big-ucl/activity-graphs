@@ -9,7 +9,6 @@ from omegaconf import DictConfig, OmegaConf
 from activitygraphs.config import (
     CMAPDataConfig,
     Config,
-    DepthSweepConfig,
     ExperimentConfig,
     GATConfig,
     GPSConfig,
@@ -38,8 +37,6 @@ MODEL_CONFIGS = {
     "home_zone_mf": HomeZoneMFConfig,
     "two_tower": TwoTowerConfig,
 }
-EXPERIMENT_CONFIGS = {"depth_sweep": DepthSweepConfig}
-
 # Typed by the per-option dataclasses above rather than by the base classes ``Config`` declares.
 OPTION_NODES = {"data", "models", "experiment"}
 
@@ -79,6 +76,4 @@ def test_model_config_matches_its_dataclass(compose_config, path):
 
 @pytest.mark.parametrize("path", sorted((CONF_DIR / "experiment").glob("*.yaml")), ids=lambda path: path.stem)
 def test_experiment_config_matches_its_dataclass(compose_config, path):
-    cls = EXPERIMENT_CONFIGS.get(path.stem, ExperimentConfig)
-
-    assert mismatches(cls, compose_config(f"experiment={path.stem}").experiment, "experiment") == []
+    assert mismatches(ExperimentConfig, compose_config(f"experiment={path.stem}").experiment, "experiment") == []

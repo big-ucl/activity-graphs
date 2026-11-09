@@ -1,5 +1,5 @@
 architecture: two_tower
-name: TwoTower-${.num_gcn_layers}${two_tower_suffix:${.bias},${.node_embedding}}
+name: TwoTower-${.num_gcn_layers}
 lr: 1e-3
 weight_decay: 1e-4
 
@@ -15,4 +15,6 @@ embedding_dim: 64
 num_user_layers: 2
 num_pair_layers: 2
 bias: location
+num_bias_layers: 2
+pair_location_features: false
 node_embedding: false

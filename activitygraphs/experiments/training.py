@@ -328,22 +328,20 @@ def _build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: st
         debug: Flag that adds the ``OverfitDebugCallback``.
 
     Returns:
-        The epoch learning-rate monitor, then the best and last checkpoint when ``run_dir`` is set, early stopping
+        The epoch learning-rate monitor, then the best and the last checkpoint when ``run_dir`` is set, early stopping
         unless its patience is None or the run is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
+        ``best.ckpt`` holds the epoch with the best monitored metric, and ``last.ckpt`` the latest epoch. The best
+        checkpoint comes first, since ``ckpt_path="best"`` reads the first checkpoint callback.
     """
     callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
 
     if run_dir is not None:
-        callbacks.append(
-            ModelCheckpoint(
-                dirpath=str(run_dir / CHECKPOINTS_DIR / run_name),
-                filename="best",
-                save_last=True,
-                save_top_k=1,
-                monitor=loss.monitor,
-                mode=loss.monitor_mode,
-            )
+        checkpoint_dir = str(run_dir / CHECKPOINTS_DIR / run_name)
+        best = ModelCheckpoint(
+            dirpath=checkpoint_dir, filename="best", save_top_k=1, monitor=loss.monitor, mode=loss.monitor_mode
         )
+        last = ModelCheckpoint(dirpath=checkpoint_dir, filename="last", save_top_k=1, monitor=None)
+        callbacks += [best, last]
 
     patience = cfg.train.early_stopping.patience
     if patience is not None and cfg.trainer.overfit_batches == 0:

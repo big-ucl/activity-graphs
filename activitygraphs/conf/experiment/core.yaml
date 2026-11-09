@@ -1,5 +1,12 @@
 # @package _global_
-# MLP-dist with and without the random-walk PE, MLP-hpe-dist, and the GAT and GPS with the home PE and
+# MLP-nohpe with and without the random-walk PE, MLP, and the GAT and GPS with the home PE and
 # the distance, beside the baselines.
 experiment:
   name: core
+  variants:
+    - { model: home_zone_mf }
+    - { model: mlp, features: { use_home_pe: false, use_rwpe: false } }
+    - { model: mlp, features: { use_home_pe: false } }
+    - { model: mlp }
+    - { model: gat }
+    - { model: gps }

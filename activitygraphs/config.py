@@ -1,8 +1,8 @@
 """Hydra/OmegaConf dataclass config tree and ``read_config`` helper."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -346,33 +346,35 @@ class TrainConfig:
 
 
 @dataclass
+class VariantConfig:
+    """Config for one variant in the variant list of an experiment.
+
+    Attributes:
+        model: Key of the architecture in ``cfg.models``.
+        set: Model config fields overridden for this variant.
+        features: Flags of ``InputFeatures`` overridden for this variant. A flag left out keeps its default.
+        sweep: At most one model config field, mapped to the values it is trained at, one variant per value. Empty
+            trains one variant.
+    """
+
+    model: str
+    # Any: the value type depends on the key, and OmegaConf 2.3 rejects a union element type in a list.
+    set: dict[str, Any] = field(default_factory=dict)
+    features: dict[str, bool] = field(default_factory=dict)
+    sweep: dict[str, list[Any]] = field(default_factory=dict)
+
+
+@dataclass
 class ExperimentConfig:
     """Config for the experiment to run, from the ``experiment`` config group.
 
     Attributes:
-        name: Key of the experiment's runner in ``main.EXPERIMENTS``.
+        name: Name of the experiment, which labels its W&B runs.
+        variants: The variants trained by the experiment, in training order.
     """
 
-    name: Literal[
-        "comparison",
-        "core",
-        "depth_sweep",
-        "demographics_ablation",
-        "overfit_health",
-        "baselines",
-        "two_tower_ablation",
-    ]
-
-
-@dataclass
-class DepthSweepConfig(ExperimentConfig):
-    """Config for the GAT depth sweep.
-
-    Attributes:
-        depths: GAT message-passing depths swept.
-    """
-
-    depths: list[int]
+    name: str
+    variants: list[VariantConfig]
 
 
 @dataclass
@@ -456,8 +458,12 @@ class TwoTowerConfig(GATConfig):
         embedding_dim: Width ``d`` of the node and user embeddings.
         num_user_layers: Number of linear layers of the user tower.
         num_pair_layers: Number of linear layers of the pairwise block.
-        bias: The bias of each node. ``location`` is a function of the node embedding, and ``node`` is a free
-            parameter per node, an in-city diagnostic.
+        bias: The bias of each node. ``location`` is a linear function of the node embedding. ``embedding_mlp`` is an
+            MLP of the node embedding. ``feature_mlp`` is an MLP of the location features, through a city-specific
+            projection to width ``d``. ``node`` is a free parameter per node, an in-city diagnostic.
+        num_bias_layers: Number of linear layers of the ``embedding_mlp`` and ``feature_mlp`` biases.
+        pair_location_features: Give the pairwise block the location features, through a city-specific projection
+            to width ``d``.
         node_embedding: Append a learned embedding of each node's identity, of width ``d``, to the node tower's
             input. It is an in-city diagnostic.
     """
@@ -465,7 +471,9 @@ class TwoTowerConfig(GATConfig):
     embedding_dim: int
     num_user_layers: int
     num_pair_layers: int
-    bias: Literal["location", "node"]
+    bias: Literal["location", "embedding_mlp", "feature_mlp", "node"]
+    num_bias_layers: int
+    pair_location_features: bool
     node_embedding: bool
 
 
@@ -529,17 +537,3 @@ def read_config(project_root: Path, verbose=True, data: VALID_CONFIGS = "tpg") -
         print(f"Loaded config file \n{OmegaConf.to_yaml(cfg)}")
 
     return cast(Config, cfg)
-
-
-def _two_tower_name_suffix(bias: str, node_embedding: bool) -> str:
-    """Return the part of a two-tower name that records its in-city diagnostics, empty for the transferable model."""
-    suffix = ""
-    if bias == "node":
-        suffix += "-nodebias"
-    if node_embedding:
-        suffix += "-nodeemb"
-
-    return suffix
-
-
-OmegaConf.register_new_resolver("two_tower_suffix", _two_tower_name_suffix)

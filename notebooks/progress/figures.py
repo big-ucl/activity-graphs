@@ -26,17 +26,17 @@ OUT_DIR = PROJECT_ROOT / "reports/figures/progress"
 RUNS = {"cmap": ("CMAP", 9), "tpg": ("TPG", 5)}
 PANEL_TITLES = {"cmap": "CMAP (Chicago)", "tpg": "TPG (Geneva)"}
 
-GNN = "GATSkip-8-res-hpe-dist"
-MLP = "MLP-dist"
+GNN = "GATv2-8"
+MLP = "MLP-nohpe"
 REFERENCE = "Gravity"
 
 # The five variants of the architecture table plus the three baselines the chapter reads them against.
 CURVE_MODELS: tuple[ModelStyle, ...] = (
     ModelStyle(GNN, "GNN + home PE + dist", "#d1242f", learned=True, dash=SOLID),
-    ModelStyle("GATSkip-8-res-dist", "GNN + dist", "#d1242f", learned=True, dash=DASHED),
-    ModelStyle("GATSkip-8-res", "GNN", "#d1242f", learned=True, dash=DOTTED),
+    ModelStyle("GATv2-8-nohpe", "GNN + dist", "#d1242f", learned=True, dash=DASHED),
+    ModelStyle("GATv2-8-nohpe-nodist", "GNN", "#d1242f", learned=True, dash=DOTTED),
     ModelStyle(MLP, "MLP + dist", "#1f6feb", learned=True, dash=SOLID),
-    ModelStyle("MLP", "MLP", "#1f6feb", learned=True, dash=DOTTED),
+    ModelStyle("MLP-nohpe-nodist", "MLP", "#1f6feb", learned=True, dash=DOTTED),
     ModelStyle(REFERENCE, "Gravity", "#bf8700", learned=False, dash=SOLID),
     ModelStyle("VisitFrequency", "VisitFrequency", "#57606a", learned=False, dash=DASHED),
     ModelStyle("Uniform", "Uniform", "#8c959f", learned=False, dash=DOTTED),

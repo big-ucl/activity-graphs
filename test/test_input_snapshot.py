@@ -59,7 +59,7 @@ USERS_PER_HOUSEHOLD = 2
 NUM_USERS = NUM_HOUSEHOLDS * USERS_PER_HOUSEHOLD
 TRAIN_IDX = list(range(10))
 VISIT_PURPOSES = [Purpose.WORK_MAIN, Purpose.SHOP, Purpose.LEISURE_OTHER, Purpose.STUDY]
-FLAGS = ("full_info", "use_demographics", "use_home_pe", "use_rwpe")
+FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe")
 SURVEYS = ("cmap", "no_demographics")
 HOME_PE = HomePEConfig(bins=8, max_hops=40)
 
@@ -289,7 +289,7 @@ def test_an_item_carries_the_rows_of_one_user(tmp_path):
 def test_each_graph_copy_carries_the_location_and_user_node_features_apart(tmp_path):
     locations, users, schema = build_survey("cmap", tmp_path)
     batch = join_users(locations, users)
-    features = InputFeatures(use_demographics=False, use_rwpe=False)
+    features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False)
     encoder = build_feature_encoder(features, locations, schema, HOME_PE)
     graphs = GraphBatch.expand(encoder(locations, batch), locations)
     num_nodes = locations.num_nodes

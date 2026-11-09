@@ -1,0 +1,8 @@
+# @package _global_
+# The two-tower model with each node bias: linear, MLP of the node embedding, MLP of the location features, and free
+# per node. Beside the MLP and the baselines.
+experiment:
+  name: two_tower_bias_head
+  variants:
+    - { model: mlp }
+    - { model: two_tower, sweep: { bias: [ location, embedding_mlp, feature_mlp, node ] } }

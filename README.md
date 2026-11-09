@@ -37,7 +37,7 @@ uv run activity-graphs train.wandb=false            # disable Weights & Biases l
 uv run activity-graphs train.train_seeds=[1,2,3]    # repeat every model for each training seed
 uv run activity-graphs experiment=core              # the short run for paired comparisons between code changes
 uv run activity-graphs experiment=depth_sweep       # sweep GAT depth instead of comparing architectures
-uv run activity-graphs experiment=depth_sweep experiment.depths=[2,4,8]
+uv run activity-graphs experiment=depth_sweep experiment.variants.1.sweep.num_gcn_layers=[2,4,8]
 ```
 
 Once a run has finished, report its results:
@@ -45,7 +45,7 @@ Once a run has finished, report its results:
 ```bash
 uv run report-results                                     # analyse the latest run of the default dataset
 uv run report-results data=tpg analysis.run=3             # a specific dataset and run number
-uv run report-results analysis.reference_model=MLP-dist   # change reference model for comparisons
+uv run report-results analysis.reference_model=MLP-nohpe  # change reference model for comparisons
 ```
 
 `report-results` reads the result Parquet files and prints:
@@ -66,17 +66,28 @@ Feature transformations are done as follows:
    columns are z-scored, counts (the distances) are log1p then z-scored, and binary columns pass through. Categorical
    columns, such as the demographics, are embedded by the model.
 
-`experiment=<name>` (a file of `activitygraphs/conf/experiment/`) selects what to run:
+`experiment=<name>` (a file of `activitygraphs/conf/experiment/`) selects what to run. Each file lists its variants,
+trained beside the baselines. A variant is named after its model (`MLP`, `GATv2-8`, `TwoTower-4`), followed by a
+suffix for every option and input flag that differs from its default. Every input flag is on by default: `-nohpe`
+drops the home-anchored PE, `-nodist` the distance from home, `-nodemo` the demographics, and `-norwpe` the
+random-walk PE. The two-tower options are `-mlpbias`, `-featbias` and `-nodebias` (the node bias), `-pairloc` (the
+location features in the pairwise block), `-nodeemb` (the node-identity embedding) and `-d<width>` (the embedding
+width).
 
 - `comparison` (default) trains the MLP, GATv2 and GraphTransformer variants against the baselines (popularity and
   distance decay),
 - `core` trains five MLP, GATv2 and GraphTransformer variants. A shorter run for comparisons between code changes,
 - `depth_sweep` sweeps the message-passing depth of the GAT variant,
-- `demographics_ablation` trains the two best variants with and without the demographics,
+- `demographics_ablation` trains `MLP` and `GATv2-2`, with and without the demographics,
 - `baselines` fits the baselines alone,
 - `overfit_health` checks that each architecture can memorise a single batch,
 - `two_tower_ablation` ablates the inputs of the two-tower model and runs its in-city diagnostics, beside the MLP and
-  the GAT.
+  the GAT,
+- `headline` trains `MLP`, `GATv2-2` and `TwoTower-4`,
+- `two_tower_bias_head` trains the two-tower model with each node bias (linear, MLP of the node embedding, MLP of the
+  location features, free per node), beside `MLP`,
+- `two_tower_pair_inputs` trains the two-tower model with the location features in its pairwise block, and at the
+  embedding width 128 (`-d128`), beside `MLP`.
 
 Each experiment writes per-epoch metrics to WandB and to a run directory `reports/runs/{name}-{N}-{timestamp}/`
 (`reports/overfit/{name}-{timestamp}/` for overfit runs): the config
@@ -93,12 +104,23 @@ uv run pytest test/                    # unit tests (no data required)
 uv run pytest test/ -m integration     # integration tests (skip when data is absent)
 ```
 
+## Guides
+
+Step-by-step guides to extending activity-graphs in `guides/`:
+
+- [Adding a dataset](guides/adding-a-dataset.md): a new survey module, its data config, and its tests.
+- [Adding a model](guides/adding-a-model.md): a new network, a scorer with its own inputs, or a fitted baseline.
+- [Adding a feature](guides/adding-a-feature.md): a location feature, an edge feature, a user attribute, or an input
+  source with its flag.
+- [Adding an experiment](guides/adding-an-experiment.md): an experiment config with its variants, and its tests.
+
 ## Layout
 
 ```
+guides/                    # step-by-step guides to adding a dataset, a model, a feature, or an experiment
 activitygraphs/
   main.py                  # Hydra entry points
-  experiments/             # experiment runners, variants, training and baselines
+  experiments/             # the experiment runner, variants and their names, training and baselines
   analysis.py              # Analysis of result Parquet files (seed spread, pairing, hop bands)
   schema.py                # column kinds and the tensor schemas
   surveys/                 # Abstraction for travel data (SurveyData), per-survey loaders (tpg, thats, cmap, tts) and registry

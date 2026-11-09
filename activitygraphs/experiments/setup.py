@@ -15,6 +15,7 @@ from activitygraphs.datasets import HouseholdSplit, SurveyDataModule
 from activitygraphs.experiments.baselines import measure_baselines
 from activitygraphs.experiments.results import create_output_dir, run_config, save_config
 from activitygraphs.experiments.training import WandBParams, home_distance_frame
+from activitygraphs.experiments.variants import with_overrides
 from activitygraphs.runs import TIMESTAMP_FORMAT
 from activitygraphs.training.losses import Loss, build_loss
 
@@ -41,11 +42,6 @@ class ExperimentSetup:
     train_seeds: list[int]
     debug: bool
     wandb_params: WandBParams
-
-
-def with_overrides(model: ModelConfig, overrides: dict) -> ModelConfig:
-    """Return a copy of ``model`` with ``overrides`` merged in; an interpolated name follows the new values."""
-    return cast(ModelConfig, OmegaConf.merge(model, overrides))
 
 
 def setup_experiment(cfg: Config, with_baselines: bool = True) -> ExperimentSetup:

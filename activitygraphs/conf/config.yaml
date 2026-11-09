@@ -7,7 +7,7 @@ defaults:
   - model@models.home_zone_mf: home_zone_mf
   - model@models.two_tower: two_tower
   # The experiment to run, one of `conf/experiment/`: comparison, core, depth_sweep, demographics_ablation,
-  # overfit_health, baselines, two_tower_ablation.
+  # overfit_health, baselines, two_tower_ablation, headline, two_tower_bias_head, two_tower_pair_inputs.
   - experiment: comparison
 
 paths:

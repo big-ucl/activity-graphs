@@ -1,3 +1,14 @@
 # @package _global_
+# The inputs of the two-tower model and its in-city diagnostics, beside the MLP and the GAT at the depth of the node
+# tower, and the baselines.
 experiment:
   name: two_tower_ablation
+  variants:
+    - { model: mlp }
+    - { model: gat, set: { num_gcn_layers: "${models.two_tower.num_gcn_layers}" } }
+    - { model: two_tower, features: { use_home_pe: false, use_dist: false, use_demographics: false } }
+    - { model: two_tower, features: { use_demographics: false } }
+    - { model: two_tower, features: { use_home_pe: false, use_dist: false } }
+    - { model: two_tower }
+    - { model: two_tower, set: { bias: node } }
+    - { model: two_tower, set: { node_embedding: true } }

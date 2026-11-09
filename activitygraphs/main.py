@@ -5,36 +5,14 @@ import torch
 
 from activitygraphs.analysis import print_report
 from activitygraphs.config import Config
-from activitygraphs.experiments import (
-    baselines_experiment,
-    comparison_experiment,
-    core_experiment,
-    demographics_ablation_experiment,
-    depth_sweep_experiment,
-    overfit_health_experiment,
-    two_tower_ablation_experiment,
-)
-
-EXPERIMENTS = {
-    "comparison": comparison_experiment,
-    "core": core_experiment,
-    "depth_sweep": depth_sweep_experiment,
-    "demographics_ablation": demographics_ablation_experiment,
-    "overfit_health": overfit_health_experiment,
-    "baselines": baselines_experiment,
-    "two_tower_ablation": two_tower_ablation_experiment,
-}
+from activitygraphs.experiments import run_experiment
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: Config):
-    """Run the experiment selected by ``experiment.name``."""
-    if cfg.experiment.name not in EXPERIMENTS:
-        raise ValueError(f"experiment.name must be one of {sorted(EXPERIMENTS)}, got {cfg.experiment.name}")
-
+    """Run the experiment selected by the ``experiment`` config group."""
     torch.set_float32_matmul_precision("high")
-    experiment = EXPERIMENTS[cfg.experiment.name]
-    experiment(cfg)
+    run_experiment(cfg)
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="report")

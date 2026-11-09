@@ -23,12 +23,13 @@ from activitygraphs.models.features import (
     HomeAnchoredPE,
     HomeDistance,
     InputFeatures,
+    ProjectedLocationFeatures,
     build_feature_encoder,
 )
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.schema_encoder import SchemaEncoder
 from activitygraphs.models.scorers import EncodedScorer, GraphScorer, NodeScorer, Scorer
-from activitygraphs.models.two_tower import LocationBias, NodeBias, NodeTower, TwoTowerScorer, UserTower
+from activitygraphs.models.two_tower import LocationBias, MLPBias, NodeBias, NodeTower, TwoTowerScorer, UserTower
 from activitygraphs.schema import DatasetSchema
 
 type ScorerBuilder = Callable[[ModelConfig, InputFeatures, Locations, DatasetSchema, HomePEConfig], Scorer]
@@ -48,6 +49,8 @@ class NetworkSizes:
     out_channels: int
     edge_dim: int
 
+
+TWO_TOWER_BIASES = ("location", "embedding_mlp", "feature_mlp", "node")
 
 NORMS: dict[str, Callable[[int], torch.nn.Module]] = {
     "layer_norm": torch.nn.LayerNorm,
@@ -188,11 +191,11 @@ def _build_two_tower(
     """Instantiate a ``TwoTowerScorer`` for the input ``features``.
 
     ``use_rwpe`` appends the random-walk PE to the node tower's input, ``use_demographics`` gives the user attributes
-    to the user tower, and ``use_home_pe`` and ``full_info`` give the home-anchored PE and the distance from home to
+    to the user tower, and ``use_home_pe`` and ``use_dist`` give the home-anchored PE and the distance from home to
     the pairwise block.
 
     Raises:
-        ValueError: If ``config.bias`` is neither ``location`` nor ``node``.
+        ValueError: If ``config.bias`` is not one of ``TWO_TOWER_BIASES``.
     """
     two_tower = cast(TwoTowerConfig, config)
     embedding_dim = two_tower.embedding_dim
@@ -200,8 +203,8 @@ def _build_two_tower(
     dropout = two_tower.dropout
     num_nodes = locations.num_nodes
 
-    if two_tower.bias not in ("location", "node"):
-        raise ValueError(f"The two-tower bias is `location` or `node`, got {two_tower.bias!r}")
+    if two_tower.bias not in TWO_TOWER_BIASES:
+        raise ValueError(f"The two-tower bias is one of {TWO_TOWER_BIASES}, got {two_tower.bias!r}")
 
     num_rwpe_features = locations.num_rwpe_features if features.use_rwpe else None
     node_embedding = torch.nn.Embedding(num_nodes, embedding_dim) if two_tower.node_embedding else None
@@ -223,18 +226,43 @@ def _build_two_tower(
     user_tower = UserTower(user_network, attributes)
 
     pair_sources: list[FeatureSource] = []
+    if two_tower.pair_location_features:
+        pair_sources.append(ProjectedLocationFeatures(schema.locations, embedding_dim))
     if features.use_home_pe:
         pair_sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
-    if features.full_info:
+    if features.use_dist:
         pair_sources.append(HomeDistance(schema.distances))
 
     pair_encoder = FeatureEncoder(pair_sources) if pair_sources else None
     pair_in_channels = 2 * embedding_dim + (0 if pair_encoder is None else pair_encoder.out_dim)
     pair_network = NodeMLP(two_tower.num_pair_layers, pair_in_channels, hidden_channels, 1, dropout)
 
-    bias = LocationBias(embedding_dim) if two_tower.bias == "location" else NodeBias(num_nodes)
+    bias = _build_two_tower_bias(two_tower, schema, num_nodes)
 
     return TwoTowerScorer(node_tower, user_tower, pair_encoder, pair_network, bias)
+
+
+def _build_two_tower_bias(
+    config: TwoTowerConfig, schema: DatasetSchema, num_nodes: int
+) -> LocationBias | MLPBias | NodeBias:
+    """Instantiate the node bias of the two-tower model selected by ``config.bias``.
+
+    Args:
+        config: The two-tower config, whose ``bias`` names one of ``TWO_TOWER_BIASES``.
+        schema: The column schema of each tensor group, read for the width of the location features.
+        num_nodes: Number of nodes of the location graph.
+    """
+    embedding_dim = config.embedding_dim
+
+    if config.bias == "location":
+        return LocationBias(embedding_dim)
+    if config.bias == "node":
+        return NodeBias(num_nodes)
+
+    network = NodeMLP(config.num_bias_layers, embedding_dim, config.hidden_channels, 1, config.dropout)
+    projection = torch.nn.Linear(schema.locations.width, embedding_dim) if config.bias == "feature_mlp" else None
+
+    return MLPBias(network, projection)
 
 
 def _lookup_architecture(config: ModelConfig) -> ScorerBuilder:

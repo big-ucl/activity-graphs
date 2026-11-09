@@ -358,14 +358,14 @@ def _(mo):
 
 @app.cell
 def _(analysis, paired_comparison, per_user_results):
-    paired_metrics_mlp = paired_comparison(per_user_results, reference_model="MLP-dist", metric=analysis.per_user_metric)
+    paired_metrics_mlp = paired_comparison(per_user_results, reference_model="MLP-nohpe", metric=analysis.per_user_metric)
     paired_metrics_mlp
     return (paired_metrics_mlp,)
 
 
 @app.cell
 def _(analysis, paired_metrics_mlp, plot_paired_comparison):
-    plot_paired_comparison(paired_metrics_mlp, analysis.per_user_metric, "MLP-dist")
+    plot_paired_comparison(paired_metrics_mlp, analysis.per_user_metric, "MLP-nohpe")
     return
 
 

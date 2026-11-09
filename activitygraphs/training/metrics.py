@@ -141,6 +141,37 @@ class RetrievalRPrecision(Metric):
         return self.score_sum / self.n_users.clamp(min=1)
 
 
+class UserPairAccuracy(Metric):
+    """Mean over users of the share of each user's (visited, unvisited) node pairs in which the visited node scores higher.
+
+    Every node is a candidate, the home node included, as in the BPR loss. A tied pair counts as one half. Users without
+    both a visited and an unvisited node are left out of the mean.
+    """
+
+    higher_is_better = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.add_state("score_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("n_users", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, scores: torch.Tensor, target: torch.Tensor) -> None:
+        """Accumulate the pair accuracy of every user of a batch.
+
+        Args:
+            scores: Score of every node for every user, ``[n_users, n_nodes]``.
+            target: Binary labels aligned with ``scores``.
+        """
+        accuracy = _per_user_pair_accuracy(scores, target)
+
+        self.score_sum = self.score_sum + accuracy.sum()
+        self.n_users = self.n_users + accuracy.numel()
+
+    def compute(self) -> torch.Tensor:
+        """Return the mean pair accuracy over the users with pairs."""
+        return self.score_sum / self.n_users.clamp(min=1)
+
+
 class PerUserRanking(Metric):
     """Ranking scores for each test user, disaggregate.
 
@@ -331,3 +362,35 @@ def _top_r(scores: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) -> t
     in_top_r = (rank < n_pos[:, None]) & valid
 
     return n_pos, in_top_r
+
+
+@torch.no_grad()
+def _per_user_pair_accuracy(scores: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Compute each user's share of (visited, unvisited) node pairs in which the visited node scores higher.
+
+    Every node is a candidate, the home node included, as in the BPR loss. A tied pair counts as one half.
+
+    Args:
+        scores: Score of every node for every user, ``[n_users, n_nodes]``.
+        target: Binary labels aligned with ``scores``.
+
+    Returns:
+        ``[n_users_with_pairs]``, for the users with at least one visited and one unvisited node.
+    """
+    positive = target.bool()
+    negative = ~positive
+    rows, cols = positive.nonzero(as_tuple=True)
+
+    positive_scores = scores[rows, cols].unsqueeze(1)
+    row_scores = scores[rows]
+    row_negative = negative[rows]
+
+    n_lower = ((row_scores < positive_scores) & row_negative).sum(dim=1)
+    n_tied = ((row_scores == positive_scores) & row_negative).sum(dim=1)
+    n_ordered = n_lower.float() + 0.5 * n_tied.float()
+    n_ordered_per_user = torch.zeros(len(scores), device=scores.device).index_add_(0, rows, n_ordered)
+
+    n_pairs = positive.sum(dim=1) * negative.sum(dim=1)
+    has_pairs = n_pairs > 0
+
+    return n_ordered_per_user[has_pairs] / n_pairs[has_pairs].float()

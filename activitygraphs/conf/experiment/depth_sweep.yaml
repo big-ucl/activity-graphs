@@ -1,6 +1,8 @@
 # @package _global_
-# GAT receptive-field sweep over `experiment.depths`, beside the baselines.
+# GAT receptive-field sweep, beside the MLP as the depth-0 anchor and the baselines.
 experiment:
   name: depth_sweep
-  # GAT message-passing depths (a NodeMLP depth-0 anchor is always included).
-  depths: [ 1, 2, 4, 8 ]
+  variants:
+    - { model: mlp }
+    # GAT message-passing depths swept.
+    - { model: gat, sweep: { num_gcn_layers: [ 1, 2, 4, 8 ] } }

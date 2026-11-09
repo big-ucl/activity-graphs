@@ -1,5 +1,6 @@
 """Tests for the variants, the seed loop and the aggregate / per-user result split."""
 
+import dataclasses
 import inspect
 import types
 from datetime import datetime
@@ -10,8 +11,10 @@ import polars as pl
 import pytest
 import torch
 from encoders import continuous_schema
-from lightning.pytorch.callbacks import EarlyStopping
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.demos.boring_classes import BoringModel
 from omegaconf import OmegaConf
+from omegaconf.errors import ConfigKeyError
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, HomePEConfig, read_config
@@ -24,17 +27,22 @@ from activitygraphs.experiments.results import (
     save_results,
 )
 from activitygraphs.experiments.runners import _run_variants
-from activitygraphs.experiments.setup import ExperimentSetup, with_overrides
+from activitygraphs.experiments.setup import ExperimentSetup
 from activitygraphs.experiments.training import WandBParams, _build_callbacks, _trainer_arguments
-from activitygraphs.experiments.variants import Variant, variant_hyperparams
-from activitygraphs.main import EXPERIMENTS
+from activitygraphs.experiments.variants import (
+    FEATURE_SUFFIXES,
+    Variant,
+    build_variants,
+    variant_hyperparams,
+    with_overrides,
+)
 from activitygraphs.models.architectures import BUILDERS, _lookup_architecture, build_scorer
 from activitygraphs.models.baselines import HomeZoneMFBaseline
 from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.models.two_tower import TwoTowerScorer
-from activitygraphs.runs import CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
+from activitygraphs.runs import CHECKPOINTS_DIR, CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.training.losses import BCELoss
@@ -140,25 +148,96 @@ def make_model_frame(name: str, seed: int | None = 42) -> pl.DataFrame:
 
 
 class TestVariant:
-    def test_name_appends_the_feature_flags_in_order(self, cfg):
-        gat = cfg.models.gat
+    def test_the_models_as_configured_have_no_suffixes(self, cfg):
+        names = [Variant(cfg.models[key]).name for key in ["mlp", "gat", "gps", "two_tower", "home_zone_mf"]]
 
-        assert Variant(gat).name == "GATv2-8"
-        assert Variant(gat, InputFeatures(full_info=True)).name == "GATv2-8-dist"
-        assert Variant(gat, InputFeatures(use_home_pe=True)).name == "GATv2-8-hpe"
-        assert Variant(gat, InputFeatures(full_info=True, use_home_pe=True)).name == "GATv2-8-hpe-dist"
+        assert names == ["MLP", "GATv2-8", "GTransformer-2", "TwoTower-4", "HomeZoneMF"]
 
-    def test_suffix_comes_last(self, cfg):
-        assert Variant(cfg.models.mlp, InputFeatures(full_info=True), suffix="nodemo").name == "MLP-dist-nodemo"
+    @pytest.mark.parametrize(("flag", "suffix"), FEATURE_SUFFIXES.items())
+    def test_a_flag_off_its_default_adds_its_suffix(self, cfg, flag, suffix):
+        assert Variant(cfg.models.mlp, InputFeatures(**{flag: False})).name == f"MLP-{suffix}"
 
-    def test_rwpe_free_variant_is_named_norwpe(self, cfg):
-        assert Variant(cfg.models.mlp, InputFeatures(full_info=True, use_rwpe=False)).name == "MLP-dist-norwpe"
+    def test_every_flag_has_a_suffix(self):
+        assert set(FEATURE_SUFFIXES) == {flag.name for flag in dataclasses.fields(InputFeatures)}
+
+    def test_the_flag_suffixes_follow_the_field_order(self, cfg):
+        features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False)
+
+        assert Variant(cfg.models.mlp, features).name == "MLP-nohpe-nodist-nodemo-norwpe"
+
+    def test_departures_list_the_flags_off_their_default(self):
+        assert InputFeatures(use_dist=False, use_rwpe=False).departures == ["use_dist", "use_rwpe"]
+        assert InputFeatures().departures == []
+
+    def test_the_option_suffixes_come_before_the_flag_suffixes(self, cfg):
+        overrides = {"bias": "node", "pair_location_features": True, "node_embedding": True, "embedding_dim": 128}
+        two_tower = with_overrides(cfg.models.two_tower, overrides)
+
+        name = Variant(two_tower, InputFeatures(use_demographics=False)).name
+
+        assert name == "TwoTower-4-nodebias-pairloc-nodeemb-d128-nodemo"
+
+    @pytest.mark.parametrize(
+        ("bias", "name"),
+        [("location", "TwoTower-4"), ("embedding_mlp", "TwoTower-4-mlpbias"), ("feature_mlp", "TwoTower-4-featbias")],
+    )
+    def test_each_bias_has_its_suffix(self, cfg, bias, name):
+        assert Variant(with_overrides(cfg.models.two_tower, {"bias": bias})).name == name
 
     def test_name_follows_an_overridden_depth(self, cfg):
         gat = with_overrides(cfg.models.gat, {"num_gcn_layers": 4})
 
         assert Variant(gat).name == "GATv2-4"
         assert cfg.models.gat.name == "GATv2-8"
+
+
+def variant_names(cfg, *entries: dict) -> list[str]:
+    """Names of the variants that ``entries``, written as in an experiment yaml, expand to over ``cfg.models``."""
+    variants = build_variants(cast(list, list(entries)), dict(cfg.models))
+    return [variant.name for variant in variants]
+
+
+class TestBuildVariants:
+    def test_an_entry_sets_the_model_and_the_features(self, cfg):
+        entry = {"model": "two_tower", "set": {"bias": "node"}, "features": {"use_rwpe": False}}
+        (variant,) = build_variants(cast(list, [entry]), dict(cfg.models))
+
+        assert variant.model.bias == "node"
+        assert variant.features == InputFeatures(use_rwpe=False)
+        assert variant.name == "TwoTower-4-nodebias-norwpe"
+
+    def test_a_sweep_gives_one_variant_per_value_on_top_of_the_set_fields(self, cfg):
+        entry = {"model": "two_tower", "set": {"node_embedding": True}, "sweep": {"embedding_dim": [32, 128]}}
+
+        assert variant_names(cfg, entry) == ["TwoTower-4-nodeemb-d32", "TwoTower-4-nodeemb-d128"]
+
+    def test_the_variants_keep_the_order_of_the_entries(self, cfg):
+        names = variant_names(cfg, {"model": "gat"}, {"model": "mlp", "features": {"use_home_pe": False}})
+
+        assert names == ["GATv2-8", "MLP-nohpe"]
+
+    def test_setting_a_field_to_its_configured_value_is_allowed(self, cfg):
+        assert variant_names(cfg, {"model": "two_tower", "set": {"bias": "location"}}) == ["TwoTower-4"]
+
+    def test_an_unknown_key_raises(self, cfg):
+        with pytest.raises(ConfigKeyError, match="sweeps"):
+            variant_names(cfg, {"model": "mlp", "sweeps": {}})
+
+    def test_an_unknown_flag_raises(self, cfg):
+        with pytest.raises(TypeError, match="use_hpe"):
+            variant_names(cfg, {"model": "mlp", "features": {"use_hpe": False}})
+
+    def test_a_field_that_leaves_the_name_unchanged_raises(self, cfg):
+        with pytest.raises(ValueError, match="hidden_channels"):
+            variant_names(cfg, {"model": "mlp", "set": {"hidden_channels": 256}})
+
+    def test_a_sweep_of_two_fields_raises(self, cfg):
+        with pytest.raises(ValueError, match="one field"):
+            variant_names(cfg, {"model": "two_tower", "sweep": {"embedding_dim": [32], "num_gcn_layers": [2]}})
+
+    def test_two_variants_with_one_name_raise(self, cfg):
+        with pytest.raises(ValueError, match="MLP"):
+            variant_names(cfg, {"model": "mlp"}, {"model": "mlp", "features": {}})
 
 
 def scorer_of(model, features: InputFeatures = DEFAULT_FEATURES, schema: DatasetSchema | None = None):
@@ -175,23 +254,24 @@ class TestBuildScorer:
 
     def test_input_width_follows_the_variant_features(self, cfg):
         locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
-        plain = build_feature_encoder(InputFeatures(use_demographics=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
-        dist = build_feature_encoder(InputFeatures(full_info=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        plain_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False)
+        plain = build_feature_encoder(plain_features, locations, schema, HOME_PE)  # type: ignore[arg-type]
+        dist = build_feature_encoder(InputFeatures(use_home_pe=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert plain.out_dim == 5 + 1 + 2
         assert dist.out_dim == 5 + 1 + 2 + 3 + 1
 
     def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
         locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
-        features = InputFeatures(full_info=True, use_rwpe=False)
+        features = InputFeatures(use_home_pe=False, use_rwpe=False)
         encoder = build_feature_encoder(features, locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert encoder.out_dim == 5 + 1 + 3 + 1
 
     def test_home_pe_adds_its_bins(self, cfg):
         locations, schema = make_locations(), make_schema()
-        plain = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
-        with_pe = build_feature_encoder(InputFeatures(use_home_pe=True), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        plain = build_feature_encoder(InputFeatures(use_home_pe=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        with_pe = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert with_pe.out_dim - plain.out_dim == HOME_PE.bins
 
@@ -237,30 +317,71 @@ class TestBuildScorer:
 
     def test_home_zone_mf_rejects_input_features(self, cfg):
         with pytest.raises(ValueError, match="HomeZoneMF"):
-            scorer_of(cfg.models.home_zone_mf, InputFeatures(full_info=True))
+            scorer_of(cfg.models.home_zone_mf, InputFeatures(use_dist=False))
 
 
 class TestTrainerConfig:
     def test_every_key_is_a_trainer_argument(self, cfg):
         assert set(cfg.trainer) <= set(inspect.signature(L.Trainer.__init__).parameters)
 
-    @pytest.mark.parametrize(("data", "fraction"), [("tts2016", 0.5), ("cmap", 1.0)])
+    @pytest.mark.parametrize(("data", "fraction"), [("tts2016", 1.0), ("cmap", 1.0)])
     def test_the_trainer_gets_the_batch_fraction_of_the_dataset(self, compose_config, data, fraction):
         cfg = compose_config(f"data={data}")
 
         assert _trainer_arguments(cfg)["limit_train_batches"] == fraction
 
-    @pytest.mark.parametrize(("data", "max_epochs"), [("tts2022", 80), ("cmap", 50)])
+    @pytest.mark.parametrize(("data", "max_epochs"), [("tts2022", 50), ("cmap", 50)])
     def test_the_trainer_gets_the_epochs_of_the_dataset(self, compose_config, data, max_epochs):
         cfg = compose_config(f"data={data}")
 
         assert _trainer_arguments(cfg)["max_epochs"] == max_epochs
 
 
+EXPECTED_VARIANTS = {
+    "baselines": ["HomeZoneMF"],
+    "comparison": [
+        "MLP-nohpe-nodist",
+        "MLP-nohpe",
+        "MLP",
+        "GATv2-8-nohpe-nodist",
+        "GATv2-8-nohpe",
+        "GATv2-8-nodist",
+        "GATv2-8",
+        "GTransformer-2-nodist",
+        "GTransformer-2",
+        "HomeZoneMF",
+    ],
+    "core": ["HomeZoneMF", "MLP-nohpe-norwpe", "MLP-nohpe", "MLP", "GATv2-8", "GTransformer-2"],
+    "demographics_ablation": ["MLP", "MLP-nodemo", "GATv2-2", "GATv2-2-nodemo"],
+    "depth_sweep": ["MLP", "GATv2-1", "GATv2-2", "GATv2-4", "GATv2-8"],
+    "headline": ["MLP", "GATv2-2", "TwoTower-4"],
+    "overfit_health": ["MLP-nohpe", "GATv2-8-nohpe"],
+    "two_tower_ablation": [
+        "MLP",
+        "GATv2-4",
+        "TwoTower-4-nohpe-nodist-nodemo",
+        "TwoTower-4-nodemo",
+        "TwoTower-4-nohpe-nodist",
+        "TwoTower-4",
+        "TwoTower-4-nodebias",
+        "TwoTower-4-nodeemb",
+    ],
+    "two_tower_bias_head": ["MLP", "TwoTower-4", "TwoTower-4-mlpbias", "TwoTower-4-featbias", "TwoTower-4-nodebias"],
+    "two_tower_pair_inputs": ["MLP", "TwoTower-4", "TwoTower-4-pairloc", "TwoTower-4-d128"],
+}
+
+
+def experiment_variant_names(cfg: Config) -> list[str]:
+    """Names of the variants of the experiment of ``cfg``, in training order."""
+    return [variant.name for variant in build_variants(cfg.experiment.variants, dict(cfg.models))]
+
+
 class TestExperimentConfigs:
     @pytest.mark.parametrize("path", EXPERIMENT_CONFIGS, ids=lambda path: path.stem)
-    def test_every_experiment_config_names_a_runner(self, path):
-        assert OmegaConf.load(path).experiment.name in EXPERIMENTS
+    def test_every_experiment_trains_its_variants(self, compose_config, path):
+        cfg = compose_config(f"experiment={path.stem}")
+
+        assert experiment_variant_names(cfg) == EXPECTED_VARIANTS[path.stem]
 
     def test_comparison_is_the_default(self, cfg):
         assert cfg.experiment.name == "comparison"
@@ -273,17 +394,27 @@ class TestExperimentConfigs:
         assert cfg.train.log_train_ranking is True
         assert len(cfg.train.train_seeds) == 1
 
-    def test_the_command_line_overrides_an_experiment_setting(self, compose_config):
-        cfg = compose_config("experiment=depth_sweep", "experiment.depths=[3]")
+    def test_the_command_line_overrides_a_sweep(self, compose_config):
+        cfg = compose_config("experiment=depth_sweep", "experiment.variants.1.sweep.num_gcn_layers=[3]")
 
-        assert cfg.experiment.depths == [3]
+        assert experiment_variant_names(cfg) == ["MLP", "GATv2-3"]
 
-    def test_overfit_health_rejects_a_run_that_does_not_overfit(self, compose_config, monkeypatch):
-        cfg = compose_config("experiment=overfit_health", "trainer.overfit_batches=0")
-        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: pytest.fail("set up a run"))
+    @pytest.mark.parametrize("experiment", ["headline", "demographics_ablation"])
+    def test_the_gat_trains_at_depth_two(self, compose_config, experiment):
+        cfg = compose_config(f"experiment={experiment}")
 
-        with pytest.raises(ValueError, match="overfit_batches"):
-            runners.overfit_health_experiment(cfg)
+        assert cfg.models.gat.num_gcn_layers == 2
+        assert cfg.models.gat.name == "GATv2-2"
+
+    def test_the_command_line_overrides_the_gat_depth_of_an_experiment(self, compose_config):
+        cfg = compose_config("experiment=headline", "models.gat.num_gcn_layers=8")
+
+        assert cfg.models.gat.num_gcn_layers == 8
+
+    def test_the_gat_of_the_two_tower_ablation_follows_the_node_tower(self, compose_config):
+        cfg = compose_config("experiment=two_tower_ablation", "models.two_tower.num_gcn_layers=2")
+
+        assert {"GATv2-2", "TwoTower-2"} <= set(experiment_variant_names(cfg))
 
 
 class TestArchitectureRegistry:
@@ -300,14 +431,14 @@ class TestArchitectureRegistry:
 
 class TestRunVariants:
     def _variants(self, cfg) -> list[Variant]:
-        return [Variant(cfg.models.mlp), Variant(cfg.models.gat, InputFeatures(full_info=True))]
+        return [Variant(cfg.models.mlp), Variant(cfg.models.gat, InputFeatures(use_home_pe=False))]
 
     def test_trains_every_variant_once_per_seed(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
         frames = _run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
 
         assert len(frames) == 4
-        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-8-dist", "MLP", "GATv2-8-dist"]
+        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-8-nohpe", "MLP", "GATv2-8-nohpe"]
 
     def test_tags_each_frame_with_its_training_seed(self, cfg, monkeypatch):
         record_training(monkeypatch)
@@ -363,10 +494,10 @@ class TestRunVariants:
 
 class TestVariantHyperparams:
     def test_logs_the_architecture_and_flags(self, cfg):
-        hyperparams = variant_hyperparams(Variant(cfg.models.gat, InputFeatures(full_info=True)))
+        hyperparams = variant_hyperparams(Variant(cfg.models.gat, InputFeatures(use_dist=False)))
 
         assert hyperparams["architecture"]["num_gcn_layers"] == cfg.models.gat.num_gcn_layers
-        assert hyperparams["full_info"] is True
+        assert hyperparams["use_dist"] is False
 
 
 class TestDropEmptyColumns:
@@ -381,108 +512,45 @@ class TestDropEmptyColumns:
         assert _drop_empty_columns(df).columns == ["a", "b"]
 
 
-class TestDemographicsAblation:
-    """The ablation must run both arms of `use_demographics` for each retained architecture."""
-
-    def _recorded(self, cfg, monkeypatch) -> list[dict]:
+class TestRunExperiment:
+    def _run(self, compose_config, monkeypatch, *overrides: str) -> tuple[list[dict], list[bool]]:
+        """Run ``run_experiment`` with stubs; return the training calls and whether each setup fitted the baselines."""
+        cfg = compose_config(*overrides)
         calls = record_training(monkeypatch, frame=make_model_frame)
-        setup = make_setup(cfg, [42, 43])
-        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
+        baselines_fitted: list[bool] = []
+
+        def setup_experiment(cfg, with_baselines: bool = True):
+            baselines_fitted.append(with_baselines)
+            return make_setup(cfg, [42, 43])
+
+        monkeypatch.setattr(runners, "setup_experiment", setup_experiment)
         monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
 
-        run_cfg = types.SimpleNamespace(
-            train=types.SimpleNamespace(),
-            paths=types.SimpleNamespace(reports="reports"),
-            data=types.SimpleNamespace(name="CMAP"),
-        )
-        runners.demographics_ablation_experiment(run_cfg)  # type: ignore[arg-type]
+        runners.run_experiment(cfg)
 
-        return calls
+        return calls, baselines_fitted
 
-    def test_runs_both_arms_of_each_architecture(self, cfg, monkeypatch):
-        names = {call["variant"].name for call in self._recorded(cfg, monkeypatch)}
+    def test_trains_every_variant_once_per_seed_in_order(self, compose_config, monkeypatch):
+        calls, _ = self._run(compose_config, monkeypatch, "experiment=headline")
 
-        assert names == {"MLP-dist-demo", "MLP-dist-nodemo", "GATv2-8-dist-demo", "GATv2-8-dist-nodemo"}
+        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-2", "TwoTower-4"] * 2
 
-    def test_the_arms_differ_only_in_use_demographics(self, cfg, monkeypatch):
-        variants = {call["variant"].name: call["variant"] for call in self._recorded(cfg, monkeypatch)}
+    def test_fits_the_baselines(self, compose_config, monkeypatch):
+        _, with_baselines = self._run(compose_config, monkeypatch, "experiment=core")
 
-        assert variants["MLP-dist-demo"].features.use_demographics is True
-        assert variants["MLP-dist-nodemo"].features.use_demographics is False
-        assert all(variant.features.full_info for variant in variants.values())
+        assert with_baselines == [True]
 
-    def test_every_arm_runs_once_per_seed(self, cfg, monkeypatch):
-        assert len(self._recorded(cfg, monkeypatch)) == 8  # 2 architectures x 2 arms x 2 seeds
+    def test_an_overfitting_run_skips_the_baselines(self, compose_config, monkeypatch):
+        _, with_baselines = self._run(compose_config, monkeypatch, "experiment=overfit_health")
 
+        assert with_baselines == [False]
 
-class TestTwoTowerAblation:
-    def _recorded(self, cfg, monkeypatch) -> list[dict]:
-        calls = record_training(monkeypatch, frame=make_model_frame)
-        setup = make_setup(cfg, [42, 43])
-        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
-        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
+    def test_an_overfitting_run_needs_the_training_ranking(self, compose_config, monkeypatch):
+        cfg = compose_config("experiment=overfit_health", "train.log_train_ranking=false")
+        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: pytest.fail("set up a run"))
 
-        run_cfg = types.SimpleNamespace(
-            paths=types.SimpleNamespace(reports="reports"), data=types.SimpleNamespace(name="CMAP")
-        )
-        runners.two_tower_ablation_experiment(run_cfg)  # type: ignore[arg-type]
-
-        return calls
-
-    def test_trains_every_ablation_and_diagnostic_beside_the_mlp_and_the_gat(self, cfg, monkeypatch):
-        names = [call["variant"].name for call in self._recorded(cfg, monkeypatch)]
-
-        assert names[:8] == [
-            "MLP-hpe-dist",
-            "GATv2-4-hpe-dist",
-            "TwoTower-4-nodemo",
-            "TwoTower-4-hpe-dist-nodemo",
-            "TwoTower-4",
-            "TwoTower-4-hpe-dist",
-            "TwoTower-4-nodebias-hpe-dist",
-            "TwoTower-4-nodeemb-hpe-dist",
-        ]
-
-    def test_the_gat_follows_the_depth_of_the_node_tower(self, cfg, monkeypatch):
-        shallow = cast(Config, OmegaConf.merge(cfg, {"models": {"two_tower": {"num_gcn_layers": 2}}}))
-        names = {call["variant"].name for call in self._recorded(shallow, monkeypatch)}
-
-        assert {"GATv2-2-hpe-dist", "TwoTower-2-hpe-dist"} <= names
-
-    def test_every_variant_runs_once_per_seed(self, cfg, monkeypatch):
-        assert len(self._recorded(cfg, monkeypatch)) == 16  # 8 variants x 2 seeds
-
-
-class TestCore:
-    """The core experiment trains the RWPE control and every architecture at the features of ``MLP-hpe-dist``."""
-
-    def _recorded(self, cfg, monkeypatch) -> list[dict]:
-        calls = record_training(monkeypatch, frame=make_model_frame)
-        setup = make_setup(cfg, [42, 43])
-        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
-        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
-
-        run_cfg = types.SimpleNamespace(
-            paths=types.SimpleNamespace(reports="reports"), data=types.SimpleNamespace(name="CMAP")
-        )
-        runners.core_experiment(run_cfg)  # type: ignore[arg-type]
-
-        return calls
-
-    def test_trains_the_core_variants(self, cfg, monkeypatch):
-        names = {call["variant"].name for call in self._recorded(cfg, monkeypatch)}
-
-        assert names == {
-            "MLP-dist-norwpe",
-            "MLP-dist",
-            "MLP-hpe-dist",
-            "GATv2-8-hpe-dist",
-            "GTransformer-2-res-hpe-dist",
-            "HomeZoneMF",
-        }
-
-    def test_every_variant_runs_once_per_seed(self, cfg, monkeypatch):
-        assert len(self._recorded(cfg, monkeypatch)) == 12  # 6 variants x 2 seeds
+        with pytest.raises(ValueError, match="log_train_ranking"):
+            runners.run_experiment(cfg)
 
 
 class TestBuildCallbacks:
@@ -507,40 +575,25 @@ class TestBuildCallbacks:
     def test_overfitting_turns_early_stopping_off(self, cfg):
         assert self._early_stopping(cfg, trainer={"overfit_batches": 1}) == []
 
-
-class TestDepthSweep:
-    """Depth survives only inside the model name unless it is logged, so grouping by it must be possible."""
-
-    def _recorded(self, cfg, monkeypatch, depths: list[int]) -> list[dict]:
-        calls = record_training(monkeypatch, frame=make_model_frame)
-        setup = make_setup(cfg, [42])
-        monkeypatch.setattr(runners, "setup_experiment", lambda cfg, **kw: setup)
-        monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
-
-        run_cfg = types.SimpleNamespace(
-            experiment=types.SimpleNamespace(depths=depths),
-            paths=types.SimpleNamespace(reports="reports"),
-            data=types.SimpleNamespace(name="CMAP"),
+    def test_the_best_checkpoint_holds_the_best_epoch_and_the_last_the_final_epoch(self, cfg, tmp_path):
+        callbacks = _build_callbacks(BCELoss, cfg, run_dir=tmp_path, run_name="MLP", debug=False)
+        checkpoints = [callback for callback in callbacks if isinstance(callback, ModelCheckpoint)]
+        trainer = L.Trainer(
+            max_epochs=4,
+            accelerator="cpu",
+            logger=False,
+            callbacks=checkpoints,
+            enable_progress_bar=False,
+            enable_model_summary=False,
         )
-        runners.depth_sweep_experiment(run_cfg)  # type: ignore[arg-type]
 
-        return calls
+        trainer.fit(_WorseningModel())
 
-    def test_every_run_logs_its_depth(self, cfg, monkeypatch):
-        calls = self._recorded(cfg, monkeypatch, [2, 4, 8])
-
-        assert [variant_hyperparams(call["variant"])["depth"] for call in calls] == [0, 2, 4, 8]
-
-    def test_the_mlp_anchor_is_depth_zero(self, cfg, monkeypatch):
-        anchor = self._recorded(cfg, monkeypatch, [2])[0]
-
-        assert anchor["variant"].name == "MLP-hpe-dist"
-        assert variant_hyperparams(anchor["variant"])["depth"] == 0
-
-    def test_each_depth_is_named_after_it(self, cfg, monkeypatch):
-        names = [call["variant"].name for call in self._recorded(cfg, monkeypatch, [2, 4])]
-
-        assert names == ["MLP-hpe-dist", "GATv2-2-hpe-dist", "GATv2-4-hpe-dist"]
+        checkpoint_dir = tmp_path / CHECKPOINTS_DIR / "MLP"
+        assert torch.load(checkpoint_dir / "best.ckpt", weights_only=False)["epoch"] == 0
+        assert torch.load(checkpoint_dir / "last.ckpt", weights_only=False)["epoch"] == 3
+        assert sorted(path.name for path in checkpoint_dir.iterdir()) == ["best.ckpt", "last.ckpt"]
+        assert trainer.checkpoint_callback.best_model_path == str(checkpoint_dir / "best.ckpt")
 
 
 class TestWandBParams:
@@ -668,3 +721,10 @@ class TestRunRecord:
 
         assert "models" not in config
         assert config["train"]["loss"]["type"] == cfg.train.loss.type
+
+
+class _WorseningModel(BoringModel):
+    """A model whose logged ``val_bce`` rises every epoch, so its best epoch is the first."""
+
+    def validation_step(self, batch, batch_idx):
+        self.log("val_bce", float(self.current_epoch))

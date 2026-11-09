@@ -88,9 +88,36 @@ class LocationBias(torch.nn.Module):
         super().__init__()
         self.linear = torch.nn.Linear(embedding_dim, 1)
 
-    def forward(self, node_embedding: Tensor) -> Tensor:
+    def forward(self, locations: Locations, node_embedding: Tensor) -> Tensor:
         """Return the bias of every node, ``[num_nodes]``, from the node embeddings, ``[num_nodes, d]``."""
         return self.linear(node_embedding).squeeze(-1)
+
+
+class MLPBias(torch.nn.Module):
+    """The bias of each node, an MLP of either the node's embedding or the node's projected location features.
+
+    Args:
+        network: Maps the input of each node, ``[num_nodes, in_dim]``, to the node's bias, ``[num_nodes, 1]``, such
+            as ``NodeMLP``.
+        projection: City-specific projection of the location features, ``locations.x``, to the input of
+            ``network``. None gives ``network`` the node embeddings.
+    """
+
+    def __init__(self, network: torch.nn.Module, projection: torch.nn.Linear | None):
+        super().__init__()
+        self.network = network
+        self.projection = projection
+
+    def forward(self, locations: Locations, node_embedding: Tensor) -> Tensor:
+        """Return the bias of every node, ``[num_nodes]``.
+
+        Args:
+            locations: The location graph, whose features are read when ``projection`` is set.
+            node_embedding: The node embeddings, ``[num_nodes, d]``, read when ``projection`` is None.
+        """
+        x = node_embedding if self.projection is None else self.projection(locations.x)
+
+        return self.network(x, None).squeeze(-1)
 
 
 class NodeBias(torch.nn.Module):
@@ -106,8 +133,8 @@ class NodeBias(torch.nn.Module):
         super().__init__()
         self.bias = torch.nn.Parameter(torch.zeros(num_nodes))
 
-    def forward(self, node_embedding: Tensor) -> Tensor:
-        """Return the bias of every node, ``[num_nodes]``. The node embeddings, ``[num_nodes, d]``, are not read."""
+    def forward(self, locations: Locations, node_embedding: Tensor) -> Tensor:
+        """Return the bias of every node, ``[num_nodes]``. The locations and the node embeddings are not read."""
         return self.bias
 
 
@@ -123,7 +150,7 @@ class TwoTowerScorer(Scorer):
             None gives the pairwise block the two embeddings alone.
         pair_network: Maps the pairwise input of each pair, ``[num_pairs, 2 * d + pair_encoder.out_dim]``, to its
             logit, ``[num_pairs, 1]``, such as ``NodeMLP``.
-        bias: The bias of every node, from the node embeddings, such as ``LocationBias`` or ``NodeBias``.
+        bias: The bias of every node, such as ``LocationBias``, ``MLPBias`` or ``NodeBias``.
     """
 
     def __init__(
@@ -132,7 +159,7 @@ class TwoTowerScorer(Scorer):
         user_tower: UserTower,
         pair_encoder: FeatureEncoder | None,
         pair_network: torch.nn.Module,
-        bias: LocationBias | NodeBias,
+        bias: LocationBias | MLPBias | NodeBias,
     ):
         super().__init__()
         self.node_tower = node_tower
@@ -167,6 +194,6 @@ class TwoTowerScorer(Scorer):
         flat_pair_x = pair_x.reshape(num_users * num_nodes, -1)
         pair_logits = self.pair_network(flat_pair_x, None).reshape(num_users, num_nodes)
 
-        bias = self.bias(node_embedding)
+        bias = self.bias(locations, node_embedding)
 
         return interaction + pair_logits + bias

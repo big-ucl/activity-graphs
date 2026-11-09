@@ -15,6 +15,7 @@ from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import RankingModule
 from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.metrics import _per_user_pair_accuracy
 
 MAX_RECALL_K = 50
 LR_SCHEDULER = {"factor": 0.5, "patience": 5}
@@ -172,6 +173,7 @@ class TestValidationStep:
             f"val_avg_recall@{MAX_RECALL_K}",
             *(f"val_recall@{k}" for k in RECALL_KS),
             "val_calibration_l1",
+            "val_pair_accuracy",
         }
         assert expected.issubset(logged.keys())
         assert all(torch.as_tensor(logged[key]).isfinite() for key in expected)
@@ -210,6 +212,22 @@ class TestValidationStep:
 
         for key, expected in ref.items():
             torch.testing.assert_close(actual[key].item(), expected, rtol=1e-5, atol=1e-6)
+
+    def test_the_pair_accuracy_covers_every_node_of_every_user(self, monkeypatch):
+        """The pair accuracy is read over the full grid, home node included, as the BPR loss sees it."""
+        module = make_module()
+        batch = make_batch(num_graphs=4, num_nodes=8, seed=5)
+        force_positive_per_graph(batch)
+        logged = capture_logs(module, monkeypatch)
+
+        module.eval()
+        with torch.no_grad():
+            out = module.compute_logits(batch)
+            module.validation_step(batch, 0)
+        module.on_validation_epoch_end()
+
+        expected = _per_user_pair_accuracy(out, batch.visited).mean()
+        torch.testing.assert_close(torch.as_tensor(logged["val_pair_accuracy"]), expected)
 
     def test_metrics_reset_between_epochs(self, monkeypatch):
         """on_validation_epoch_end must reset metric state, so a repeated epoch gives identical numbers."""
@@ -255,6 +273,7 @@ class TestTestStep:
             "test_n_scored_users",
             "test_n_dropped_users",
             "test_calibration_l1",
+            "test_pair_accuracy",
         }
         assert set(logged.keys()) == expected
 
