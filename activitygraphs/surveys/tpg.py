@@ -23,7 +23,7 @@ from activitygraphs import utils
 from activitygraphs.base import CRS, LOCATIONS_COLUMNS, LOCATIONS_SCHEMA, USER_JOURNEY_SCHEMA, Mode, Purpose
 from activitygraphs.config import TPGDataConfig
 from activitygraphs.surveys.base import DataFrameStore, SurveyData, SurveyLoader, build_special_locations
-from activitygraphs.surveys.gtfs import GTFSTables
+from activitygraphs.surveys.gtfs import GTFSTables, read_gtfs
 from activitygraphs.surveys.statistics import normalise_statistics
 from activitygraphs.utils import add_lon_lat_from_centroid, check_schema, get_project_root
 
@@ -151,10 +151,6 @@ class TPGSurvey(SurveyData, DataFrameStore):
 
 def read_tables(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTables:
     """Read all raw TPG files (journeys, boundaries, GTFS) into a ``TPGTables`` container."""
-
-    def parse_gtfs_date(*cols: str) -> pl.Expr:
-        return pl.col(*cols).cast(pl.String).str.to_date("%Y%m%d")
-
     project_root = project_root if project_root is not None else Path(".")
 
     raw_path = project_root / cfg.paths.raw
@@ -162,8 +158,7 @@ def read_tables(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTabl
     boundaries_path = project_root / cfg.inputs.boundaries.directory
     boundaries_files = cfg.inputs.boundaries
 
-    gtfs_path = project_root / cfg.paths.gtfs
-    gtfs_files = cfg.inputs.gtfs
+    gtfs_dir = project_root / cfg.paths.gtfs
 
     raw_journeys_df = pl.read_parquet(raw_path / cfg.inputs.raw_journeys)
 
@@ -173,40 +168,7 @@ def read_tables(cfg: TPGDataConfig, project_root: Path | None = None) -> TPGTabl
     boundaries_gdf = gpd.read_file(boundaries_path / boundaries_files.swiss_boundaries).to_crs(CRS)
     french_gdf = gpd.read_file(boundaries_path / boundaries_files.french_postcodes).to_crs(CRS)
 
-    stops_df = pl.read_csv(
-        gtfs_path / gtfs_files.stops,
-        schema={
-            "stop_id": pl.String,
-            "stop_name": pl.String,
-            "stop_lat": pl.Float32,
-            "stop_lon": pl.Float32,
-            "location_type": pl.Categorical(),
-            "parent_station": pl.String,
-        },
-    ).with_columns(loc_id=pl.when(pl.col("parent_station") == "").then("stop_id").otherwise("parent_station"))
-
-    stop_id_to_loc_id = stops_df.select("stop_id", "loc_id").lazy()
-    stop_times_df = pl.scan_csv(gtfs_path / gtfs_files.stop_times).join(stop_id_to_loc_id, on="stop_id", how="left")
-    trips_df = pl.scan_csv(gtfs_path / gtfs_files.trips)
-    routes_df = pl.read_csv(gtfs_path / gtfs_files.routes)
-    agency_df = pl.read_csv(gtfs_path / gtfs_files.agency)
-    calendar_df = pl.read_csv(gtfs_path / gtfs_files.calendar).with_columns(parse_gtfs_date("start_date", "end_date"))
-    calendar_dates_df = pl.read_csv(gtfs_path / gtfs_files.calendar_dates).with_columns(parse_gtfs_date("date"))
-
-    transfers_df = pl.read_csv(
-        gtfs_path / gtfs_files.transfers,
-        schema={
-            "from_stop_id": pl.String,
-            "to_stop_id": pl.String,
-            "transfer_type": pl.Categorical(),
-            "min_transfer_time": pl.Int64,
-            # All other fields are empty in the 2022 Swiss GTFS timetable, and `transfer_type` is always 2
-        },
-    )
-
-    gtfs = GTFSTables(
-        stops_df, stop_times_df, trips_df, routes_df, agency_df, calendar_df, calendar_dates_df, transfers_df
-    )
+    gtfs = read_gtfs(cfg.inputs.gtfs, gtfs_dir)
 
     return TPGTables(raw_journeys_df, subsectors_gdf, postcodes_gdf, localities_gdf, boundaries_gdf, french_gdf, gtfs)
 
@@ -502,30 +464,42 @@ def _match_loc_ids(user_journeys_df: pl.DataFrame, locations_df: pl.DataFrame, s
 
 
 def _build_stop_names_to_loc_id_mapping(stops_df: pl.DataFrame) -> pl.DataFrame:
-    """Return a ``(loc_name, loc_id)`` DataFrame mapping stop names to their parent station IDs."""
-    df = stops_df.with_columns(
-        pl
-        .when(pl.col("stop_id").str.starts_with("Parent"))
-        .then("stop_id")
-        .otherwise("parent_station")
-        .alias("parent_station")
-    )
+    """Return a ``(loc_name, loc_id)`` DataFrame mapping each stop name to one parent station ID.
+
+    Names are compared case-insensitively. Where several IDs share a name, a parent station is kept over a stop
+    without one, then the shortest ID, then the first ID in sort order.
+    """
+    is_station = pl.col("location_type").eq_missing(1)
+    df = stops_df.with_columns(pl.when(is_station).then("stop_id").otherwise("parent_station").alias("parent_station"))
 
     with_parents = (
         df
-        .filter(pl.col("parent_station") != "")
-        .group_by("parent_station")
+        .filter(pl.col("parent_station").is_not_null())
+        .group_by("parent_station", maintain_order=True)
         .agg(pl.col("stop_name").first().alias("loc_name"))
         .rename({"parent_station": "loc_id"})
-        .select("loc_name", "loc_id")
+        .select("loc_name", "loc_id", is_parent=pl.lit(True))
     )
 
-    without_parents = df.filter(pl.col("parent_station") == "", ~pl.col("stop_id").str.starts_with("Parent")).select(
+    without_parents = df.filter(pl.col("parent_station").is_null(), ~is_station).select(
         pl.col("stop_name").alias("loc_name"),
         pl.col("stop_id").alias("loc_id"),
+        is_parent=pl.lit(False),
     )
 
-    return pl.concat([with_parents, without_parents])
+    candidates = pl.concat([with_parents, without_parents]).with_columns(name_key=pl.col("loc_name").str.to_lowercase())
+    id_length = pl.col("loc_id").str.len_chars()
+
+    kept = (
+        candidates
+        .sort("name_key", "is_parent", id_length, "loc_id", descending=[False, True, False, False])
+        .unique(subset="name_key", keep="first")
+        .select("name_key", "loc_id")
+    )
+
+    return candidates.join(kept, on=["name_key", "loc_id"], how="semi", maintain_order="left").select(
+        "loc_name", "loc_id"
+    )
 
 
 def _manual_patch_stop_names(user_journeys_df: pl.DataFrame, *stop_name_cols: str) -> pl.DataFrame:

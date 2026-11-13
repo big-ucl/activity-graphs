@@ -24,16 +24,9 @@ inputs:
     swiss_boundaries: swissboundaries3d_2025-04_2056_5728.shp/swissBOUNDARIES3D_1_5_TLM_HOHEITSGEBIET.shp
 
   gtfs:
-    directory: gtfs_2022_switzerland
-
-    stops: ${..gtfs.directory}/stops.txt
-    stop_times: ${..gtfs.directory}/stop_times.txt
-    trips: ${..gtfs.directory}/trips.txt
-    routes: ${..gtfs.directory}/routes.txt
-    agency: ${..gtfs.directory}/agency.txt
-    calendar: ${..gtfs.directory}/calendar.txt
-    calendar_dates: ${..gtfs.directory}/calendar_dates.txt
-    transfers: ${..gtfs.directory}/transfers.txt
+    service_date: "2022-05-18"
+    feeds:
+      swiss: gtfs_2022_switzerland
 
 paths:
   processed: data/processed/${..name}

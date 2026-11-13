@@ -23,6 +23,21 @@ inputs:
     zones: tts2022_2006zn_v2_shapefile.zip
     dissemination_areas: lda_000b21a_e.zip
 
+  gtfs:
+    service_date: "2022-10-19"
+    feeds:
+      ttc: TTS2022/TTC/tl-7a424234e95b.zip
+      go: TTS2022/GO/mdb-727-20221015.zip
+      up: TTS2022/UP/mdb-731-20220930.zip
+      miway: TTS2022/MiWay/tl-aa5a65bb43f4.zip
+      brampton: TTS2022/Brampton/mdb-729-20220810.zip
+      yrt: TTS2022/YRT/mdb-728-20221014.zip
+      drt: TTS2022/DRT/mdb-726-20220928.zip
+      hsr: TTS2022/HSR/mdb-723-20220831.zip
+      burlington: TTS2022/Burlington/tl-2ba5d0c10e53.zip
+      oakville: TTS2022/Oakville/mdb-725-20220830.zip
+      milton: TTS2022/Milton/tl-bc7aeaf89152.zip
+
 paths:
   processed: data/processed/${..name}
   raw: data/raw/TTS/2022

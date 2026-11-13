@@ -13,19 +13,16 @@ from omegaconf import OmegaConf
 
 
 @dataclass
-class GTFSPaths:
-    """File names for a GTFS feed directory."""
+class GTFSFeeds:
+    """GTFS feeds of a dataset and corresponding service date from which to read timetable data.
 
-    directory: str
+    Attributes:
+        service_date: An ISO date, a weekday within the survey start and end dates.
+        feeds: Path to each GTFS, as a directory or a zip file, keyed by feed name.
+    """
 
-    stops: str
-    stop_times: str
-    trips: str
-    routes: str
-    agency: str
-    calendar: str
-    calendar_dates: str
-    transfers: str
+    service_date: str
+    feeds: dict[str, str]
 
 
 @dataclass
@@ -134,7 +131,7 @@ class TPGPaths(SurveyPaths):
 
     statistics: TPGStatsPaths
     boundaries: TPGBoundaryPaths
-    gtfs: GTFSPaths
+    gtfs: GTFSFeeds
 
 
 @dataclass
@@ -155,6 +152,7 @@ class CMAPPaths(SurveyPaths):
 
     statistics: CMAPStatsPaths
     boundaries: CMAPBoundaryPaths
+    gtfs: GTFSFeeds
 
     raw_person: str
     raw_household: str
@@ -166,6 +164,7 @@ class TTSPaths(SurveyPaths):
 
     statistics: TTSStatsPaths
     boundaries: TTSBoundaryPaths
+    gtfs: GTFSFeeds
 
     raw_person: str
     raw_household: str

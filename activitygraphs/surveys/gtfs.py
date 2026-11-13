@@ -1,262 +1,272 @@
-"""GTFS feed parser for building public-transport edge lists."""
+"""GTFS reader: the feeds of a dataset, read into one set of tables with every id prefixed by its feed."""
 
+import io
+import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
+from enum import StrEnum
+from pathlib import Path
 
 import polars as pl
-import polars.selectors as cs
 
-from activitygraphs.base import PT_EDGE_LIST_SCHEMA, TRANSFER_EDGE_LIST_SCHEMA, Mode, PTNodeType
-from activitygraphs.utils import check_schema
+from activitygraphs.config import GTFSFeeds
 
-PARENT_STOP_ROUTE_ID = "parent"
-DEFAULT_TRANSFER_TIME_MIN = 2
+
+class PTMode(StrEnum):
+    """Public transport mode of a GTFS route."""
+
+    METRO = "metro"
+    RAIL = "rail"
+    TRAM = "tram"
+    BUS = "bus"
+    FERRY = "ferry"
+    OTHER = "other"
+
+
+PT_MODE_DTYPE = pl.Enum([mode.value for mode in PTMode])
+
+BASIC_ROUTE_TYPE_MODES = {
+    0: PTMode.TRAM,
+    1: PTMode.METRO,
+    2: PTMode.RAIL,
+    3: PTMode.BUS,
+    4: PTMode.FERRY,
+    5: PTMode.OTHER,
+    6: PTMode.OTHER,
+    7: PTMode.OTHER,
+    11: PTMode.BUS,
+    12: PTMode.METRO,
+}
+
+# Hundreds prefix of extended route type (route_type // 100), see https://developers.google.com/transit/gtfs/reference/extended-route-types
+EXTENDED_ROUTE_TYPE_MODES_BY_HUNDRED = {
+    1: PTMode.RAIL,
+    2: PTMode.BUS,
+    3: PTMode.RAIL,
+    4: PTMode.METRO,
+    5: PTMode.METRO,
+    6: PTMode.METRO,
+    7: PTMode.BUS,
+    8: PTMode.BUS,
+    9: PTMode.TRAM,
+    10: PTMode.FERRY,
+    11: PTMode.OTHER,
+    12: PTMode.FERRY,
+    13: PTMode.OTHER,
+    14: PTMode.OTHER,
+    15: PTMode.OTHER,
+    16: PTMode.OTHER,
+    17: PTMode.OTHER,
+}
+
+ROUTE_TYPE_MODES = {
+    **{route_type: mode.value for route_type, mode in BASIC_ROUTE_TYPE_MODES.items()},
+    **{route_type: EXTENDED_ROUTE_TYPE_MODES_BY_HUNDRED[route_type // 100].value for route_type in range(100, 1800)},
+}
+"""Maps GTFS basic and extended route types to ``PTMode`` enum"""
+
+ID_COLUMNS = {"stop_id", "parent_station", "route_id", "trip_id", "service_id"}
+TIME_COLUMNS = {"arrival_time", "departure_time"}
+DATE_COLUMNS = {"start_date", "end_date", "date"}
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+TABLE_COLUMNS: dict[str, dict[str, pl.DataType]] = {
+    "stops": {
+        "stop_id": pl.String(),
+        "stop_name": pl.String(),
+        "stop_lat": pl.Float64(),
+        "stop_lon": pl.Float64(),
+        "location_type": pl.Int8(),
+        "parent_station": pl.String(),
+    },
+    "routes": {
+        "route_id": pl.String(),
+        "route_short_name": pl.String(),
+        "route_long_name": pl.String(),
+        "route_type": pl.Int32(),
+    },
+    "trips": {"trip_id": pl.String(), "route_id": pl.String(), "service_id": pl.String()},
+    "stop_times": {
+        "trip_id": pl.String(),
+        "stop_id": pl.String(),
+        "stop_sequence": pl.Int32(),
+        "arrival_time": pl.Int32(),
+        "departure_time": pl.Int32(),
+    },
+    "calendar": {
+        "service_id": pl.String(),
+        **{weekday: pl.Boolean() for weekday in WEEKDAYS},
+        "start_date": pl.Date(),
+        "end_date": pl.Date(),
+    },
+    "calendar_dates": {"service_id": pl.String(), "date": pl.Date(), "exception_type": pl.Int8()},
+}
+OPTIONAL_COLUMNS = {
+    "stops": {"location_type", "parent_station"},
+    "routes": {"route_short_name", "route_long_name"},
+}
+OPTIONAL_TABLES = {"calendar", "calendar_dates"}
 
 
 @dataclass(frozen=True)
 class GTFSTables:
-    """Parsed GTFS tables for a single feed (stops, stop times, trips, routes, agency, calendar, transfers)."""
+    """GTFS tables of the feeds of one dataset, and the service date read from them.
 
+    Every table has a ``feed`` column. Each id column is prefixed by its feed name and a colon.
+
+    Attributes:
+        service_date: The weekday on which the timetables are read.
+        stops_df: One row per stop, station or entrance.
+        routes_df: One row per route, with its ``mode`` from its route type.
+        trips_df: One row per trip.
+        stop_times_df: One row per call of a trip at a stop. Times are seconds after midnight of the
+            service day, and can exceed 24 hours.
+        calendar_df: The weekly services and their date ranges.
+        calendar_dates_df: The services added (``exception_type`` 1) or removed (2) on single dates.
+    """
+
+    service_date: date
     stops_df: pl.DataFrame
-    stop_times_df: pl.LazyFrame
-    trips_df: pl.LazyFrame
     routes_df: pl.DataFrame
-    agency_df: pl.DataFrame
+    trips_df: pl.LazyFrame
+    stop_times_df: pl.LazyFrame
     calendar_df: pl.DataFrame
     calendar_dates_df: pl.DataFrame
-    transfers_df: pl.DataFrame
+
+    def trips_on_service_date(self) -> pl.LazyFrame:
+        """Return the trips that run on ``service_date``."""
+        weekday = WEEKDAYS[self.service_date.weekday()]
+        in_range = (pl.col("start_date") <= self.service_date) & (pl.col("end_date") >= self.service_date)
+        weekly = self.calendar_df.filter(in_range & pl.col(weekday)).select("service_id")
+
+        exceptions = self.calendar_dates_df.filter(pl.col("date") == self.service_date)
+        added = exceptions.filter(pl.col("exception_type") == 1).select("service_id")
+        removed = exceptions.filter(pl.col("exception_type") == 2).select("service_id")
+
+        services = pl.concat([weekly, added]).unique().join(removed, on="service_id", how="anti")
+        return self.trips_df.join(services.lazy(), on="service_id")
 
 
-ROUTE_TYPE_TO_MODE_MAP = {
-    101: Mode.TRAIN,
-    102: Mode.TRAIN,
-    103: Mode.TRAIN,
-    106: Mode.TRAIN,
-    109: Mode.TRAIN,
-    117: Mode.TRAIN,
-    700: Mode.BUS,
-    900: Mode.TRAMWAY,
-    1000: Mode.BOAT,
-}
-
-AGENCY_NAME_MAP = {
-    "Schweizerische Bundesbahnen SBB": "SBB",
-    "Schweizerische Südostbahn (sob)": "SOB",
-    "Transports Publics Genevois": "TPG",
-    "BLS AG (bls)": "BLS",
-    "Transports publics fribourgeois": "TPF",
-    "Transports Publics de l'agglomération d'Annemasse": "TAC",
-}
-
-MODE_TO_SHORT_NAME_MAP = {
-    Mode.TRAIN: "Train : ",
-    Mode.TRAMWAY: "Tram  : ",
-    Mode.BUS: "Bus  : ",
-    Mode.BOAT: "Boat : ",
-}
-
-
-SAMPLE_DATE = pl.date(2022, 5, 18)
-SAMPLE_WEEKDAY = "wednesday"
-SAMPLE_DAY_START = pl.time(6, 0, 0)
-SAMPLE_DAY_END = pl.time(21, 0, 0)
-
-
-def build_pt_layer_edges(
-    locations_df: pl.DataFrame,
-    gtfs: GTFSTables,
-    pt_node_type: PTNodeType,
-    drop_null_headways: bool = False,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Build PT and transfer edge DataFrames from a GTFS feed for the given locations.
+def read_gtfs(gtfs_feeds: GTFSFeeds, gtfs_dir: Path) -> GTFSTables:
+    """Read and combine all GTFS feeds of a dataset into one set of ``GTFSTables``. A feed is a directory or a zip file.
 
     Args:
-        locations_df: Active location IDs; only stops within this set are included.
-        gtfs: Parsed GTFS tables.
-        pt_node_type: Whether to create one node per route (``ONE_PER_ROUTE``) or per stop (``ONE_PER_STOP``).
-        drop_null_headways: If True, remove PT edges with no computed headway.
+        gtfs_feeds: The list of paths to the feeds within ``gtfs_dir`` and the desired service date.
+        gtfs_dir: Root directory of the GTFS feed paths.
 
     Returns:
-        Tuple ``(pt_edge_df, transfer_edge_df)`` conforming to ``PT_EDGE_LIST_SCHEMA``
-        and ``TRANSFER_EDGE_LIST_SCHEMA`` respectively.
+        The concatenated tables of all the feeds.
+
+    Raises:
+        ValueError: If a feed lacks a required column or has a route type outside the GTFS route types.
     """
-    edge_ids = (
-        ["route_id", "orig_loc_id", "dest_loc_id"]
-        if pt_node_type == PTNodeType.ONE_PER_ROUTE
-        else ["orig_loc_id", "dest_loc_id"]
-    )
+    all_tables: dict[str, list[pl.LazyFrame]] = {table: [] for table in TABLE_COLUMNS}
 
-    active_stop_times = _filter_active_stop_times(locations_df, gtfs)
-    pt_trips = _build_pt_trip_df(active_stop_times)
-    headways_df = _compute_avg_headways(pt_trips, gtfs, edge_ids)
+    for feed_name, path in gtfs_feeds.feeds.items():
+        feed_path = gtfs_dir / path
+        feed_tables = _read_feed(feed_name, feed_path).items()
 
-    pt_edge_df = pt_trips.group_by(edge_ids).agg(
-        first_departure_time=pl.col("orig_departure_time").min(),
-        last_departure_time=pl.col("orig_departure_time").max(),
-        avg_dwell_time_min=pl.col("orig_dwell_time_min").mean(),
-        travel_time_min=pl.col("travel_time_min").mean(),
-    )
+        for table_name, table_frame in feed_tables:
+            all_tables[table_name].append(table_frame)
 
-    if pt_node_type == PTNodeType.ONE_PER_STOP:
-        pt_edge_df = pt_edge_df.with_columns(route_id=pl.lit(PARENT_STOP_ROUTE_ID))
+    combined_tables = {table: pl.concat(frames) for table, frames in all_tables.items()}
 
-    pt_edge_df = pt_edge_df.join(headways_df, on=edge_ids, how="left").collect()
-    pt_edge_df = _add_route_attributes_to_edges(pt_edge_df, gtfs, pt_node_type)
-    pt_edge_df = pt_edge_df.select(PT_EDGE_LIST_SCHEMA.keys())
+    route_mode_to_enum_expr = pl.col("route_type").replace_strict(ROUTE_TYPE_MODES, return_dtype=PT_MODE_DTYPE)
+    try:
+        routes_df = combined_tables["routes"].with_columns(mode=route_mode_to_enum_expr).collect()
+    except pl.exceptions.InvalidOperationError as error:
+        raise ValueError(f"route type outside the GTFS route types: {error}") from error
 
-    if drop_null_headways:
-        pt_edge_df = pt_edge_df.drop_nulls("avg_headway_min")
-
-    transfer_edge_df = _build_transfer_edges(pt_edge_df, locations_df, gtfs)
-
-    return check_schema(pt_edge_df, PT_EDGE_LIST_SCHEMA), check_schema(transfer_edge_df, TRANSFER_EDGE_LIST_SCHEMA)
-
-
-def _filter_active_stop_times(locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl.LazyFrame:
-    """Filter GTFS stop times to trips that visit at least two active locations."""
-    # Filter out all stops not in the list of active locations
-    # Only keep trips that connect at least 2 active locations
-    return (
-        gtfs.stop_times_df
-        .filter(pl.col("loc_id").is_in(locations_df["loc_id"].implode()))
-        .filter((pl.len() >= 2).over("trip_id"))
-        .with_columns(pl.col("stop_sequence").rank("dense").over("trip_id", order_by="stop_sequence"))
-        .join(gtfs.trips_df.select("route_id", "service_id", "trip_id"), on="trip_id")
+    return GTFSTables(
+        service_date=date.fromisoformat(gtfs_feeds.service_date),
+        stops_df=combined_tables["stops"].collect(),
+        routes_df=routes_df,
+        trips_df=combined_tables["trips"],
+        stop_times_df=combined_tables["stop_times"],
+        calendar_df=combined_tables["calendar"].collect(),
+        calendar_dates_df=combined_tables["calendar_dates"].collect(),
     )
 
 
-def _build_pt_trip_df(active_stop_times: pl.LazyFrame) -> pl.LazyFrame:
-    """Join consecutive stop-time pairs into origin-destination trip segments with dwell and travel times."""
-    join_cols = ["trip_id", "service_id", "route_id"]
-    departures = active_stop_times.select(*join_cols, pl.exclude(join_cols).name.prefix("orig_"))
-    arrivals = active_stop_times.select(*join_cols, pl.exclude(join_cols).name.prefix("dest_"))
+def _read_feed(feed_name: str, feed_path: Path) -> dict[str, pl.LazyFrame]:
+    """Read the GTFS tables of one feed (directory or zip file) with typed columns and prefixed ids."""
+    table_reader = _build_dir_reader(feed_path) if feed_path.is_dir() else _build_archive_reader(feed_path)
 
-    return (
-        departures
-        .join(
-            arrivals,
-            left_on=[*join_cols, pl.col("orig_stop_sequence")],
-            right_on=[*join_cols, pl.col("dest_stop_sequence") - 1],
-        )
-        .drop("trip_id_right", "service_id_right", "route_id_right")
-        .with_columns(cs.ends_with("time").str.to_time("%T", strict=False))
-        .drop_nulls()
-        .with_columns(
-            orig_dwell_time_min=(pl.col("orig_departure_time") - pl.col("orig_arrival_time")).dt.total_minutes(
-                fractional=True
-            ),
-            travel_time_min=(pl.col("dest_arrival_time") - pl.col("orig_departure_time")).dt.total_minutes(
-                fractional=True
-            ),
-        )
-    )
+    tables = {}
+    for table_name, table_columns in TABLE_COLUMNS.items():
+        table_source = table_reader(table_name)
+
+        if table_source is None and table_name not in OPTIONAL_TABLES:
+            raise FileNotFoundError(f"{feed_path} has no {table_name} table")
+        if table_source is None:
+            tables[table_name] = pl.LazyFrame(schema={"feed": pl.String(), **table_columns})
+            continue
+
+        raw_table = pl.scan_csv(table_source, infer_schema=False).rename(lambda name: name.strip().lstrip("﻿"))
+        typed_table = _typed_table(raw_table, feed_name, table_name, table_columns)
+
+        tables[table_name] = typed_table
+
+    return tables
 
 
-def _compute_avg_headways(pt_trips: pl.LazyFrame, gtfs: GTFSTables, edge_id: list[str]) -> pl.LazyFrame:
-    """Compute daily trip count and average headway for each edge on the sample weekday (Wednesday 2022-05-18)."""
-    exceptions = gtfs.calendar_dates_df.filter(date=SAMPLE_DATE)
-    services_added = exceptions.filter(exception_type=1).select("service_id")
-    services_removed = exceptions.filter(exception_type=2).select("service_id")
+def _build_archive_reader(path: Path) -> Callable[[str], Path | io.BytesIO | None]:
+    """Return a function that reads a feed table from a ``.zip`` GTFS feed."""
+    archive = zipfile.ZipFile(path)
+    members = {Path(name).name: name for name in archive.namelist()}
 
-    sample_services = (
-        gtfs.calendar_df
-        .filter(pl.col(SAMPLE_WEEKDAY) == 1)
-        .select("service_id")
-        .join(services_added, on="service_id", how="left")
-        .join(services_removed, on="service_id", how="anti")
-    )
+    def _reader(table_name: str) -> io.BytesIO | None:
+        file_name = f"{table_name}.txt"
+        return io.BytesIO(archive.read(members[file_name])) if file_name in members else None
 
-    return (
-        pt_trips
-        .join(sample_services.lazy(), on="service_id")
-        .filter((SAMPLE_DAY_START <= pl.col("orig_departure_time")) & (pl.col("orig_departure_time") <= SAMPLE_DAY_END))
-        .group_by(edge_id)
-        .agg(
-            daily_trip_count=pl.len(),
-            avg_headway_min=pl
-            .col("orig_departure_time")
-            .sort()
-            .diff(null_behavior="drop")
-            .dt.total_minutes(fractional=True)
-            .mean(),
-        )
-    )
+    return _reader
 
 
-def _add_route_attributes_to_edges(edge_df: pl.DataFrame, gtfs: GTFSTables, pt_node_type: PTNodeType) -> pl.DataFrame:
-    """Add route mode and name onto the PT edge DataFrame."""
-    if pt_node_type == PTNodeType.ONE_PER_STOP:
-        return edge_df.with_columns(
-            route_mode=pl.lit(Mode.UNKNOWN).cast(pl.Categorical), route_name=pl.lit(PARENT_STOP_ROUTE_ID)
-        )
+def _build_dir_reader(path: Path) -> Callable[[str], Path | io.BytesIO | None]:
+    """Return a function that reads a feed table from  GTFS feed."""
 
-    agencies = gtfs.agency_df.select("agency_id", "agency_name")
+    def _reader(table_name: str) -> Path | None:
+        file_path = path / f"{table_name}.txt"
+        return file_path if file_path.exists() else None
 
-    route_mode = pl.col("route_type").replace_strict(
-        ROUTE_TYPE_TO_MODE_MAP, default=Mode.UNKNOWN, return_dtype=pl.Categorical
-    )
-    route_mode_desc = pl.col("route_mode").cast(pl.String).replace(MODE_TO_SHORT_NAME_MAP)
-    agency_name = pl.lit("  (") + pl.col("agency_name").replace(AGENCY_NAME_MAP) + pl.lit(")")
-    route_name = pl.col("route_mode_desc") + pl.col("route_short_name") + agency_name
-
-    active_routes_df = (
-        gtfs.routes_df
-        .join(agencies, on="agency_id")
-        .with_columns(route_mode=route_mode)
-        .with_columns(route_mode_desc=route_mode_desc)
-        .select("route_id", "route_mode", route_name=route_name)
-    )
-
-    return edge_df.join(active_routes_df, on="route_id")
+    return _reader
 
 
-def _build_transfer_edges(pt_edge_df: pl.DataFrame, locations_df: pl.DataFrame, gtfs: GTFSTables) -> pl.DataFrame:
-    """Build transfer edges within PT stops (route-to-route) and between PT stops (transfer-node to transfer-node) from GTFS transfer times."""
-    transfer_route_id = PARENT_STOP_ROUTE_ID
+def _typed_table(
+    raw_table: pl.LazyFrame, feed_name: str, table: str, required_columns: dict[str, pl.DataType]
+) -> pl.LazyFrame:
+    """Select and type the columns of a raw table, padding the absent optional columns with nulls."""
+    present_cols = set(raw_table.collect_schema().names())
+    optional_cols = OPTIONAL_COLUMNS.get(table, set())
 
-    # Include only stops appearing in the edge list
-    loc_ids = locations_df.select("loc_id")
-    stops = gtfs.stops_df.join(loc_ids, on="loc_id")
+    selected_cols = [pl.lit(feed_name).alias("feed")]
+    for col_name, dtype in required_columns.items():
+        if col_name not in present_cols and col_name not in optional_cols:
+            raise ValueError(f"{feed_name} {table}.txt has no column {col_name}")
+        if col_name not in present_cols:
+            selected_cols.append(pl.lit(None, dtype=dtype).alias(col_name))
+            continue
 
-    # Compute average transfer time in minutes between loc_ids
-    gtfs_transfers = (
-        gtfs.transfers_df
-        .join(stops.select("stop_id", orig_loc_id="loc_id"), left_on="from_stop_id", right_on="stop_id")
-        .join(stops.select("stop_id", dest_loc_id="loc_id"), left_on="to_stop_id", right_on="stop_id")
-        .group_by("orig_loc_id", "dest_loc_id")
-        .agg(pl.col("min_transfer_time").unique())
-        .with_columns(travel_time_min=pl.col("min_transfer_time").list.mean() / 60)
-        .select("orig_loc_id", "dest_loc_id", "travel_time_min")
-    )
+        stripped_col_expr = pl.col(col_name).str.strip_chars()
+        empty_stripped_to_null_expr = pl.when(stripped_col_expr != "").then(stripped_col_expr)
+        cast_col = _cast(empty_stripped_to_null_expr, col_name, dtype, feed_name)
 
-    # For every (route_id, loc_id) pair, add an incoming edge from the pair to the central (transfer_route_id, loc_id) node
-    # The incoming edge has a transfer time defined in the GTFS or the default transfer time if not defined
-    pt_nodes_df = pl.concat([
-        pt_edge_df.select("route_id", loc_id="orig_loc_id"),
-        pt_edge_df.select("route_id", loc_id="dest_loc_id"),
-    ]).unique()
+        selected_cols.append(cast_col.alias(col_name))
 
-    incoming_transfers = pt_nodes_df.select(
-        orig_loc_id="loc_id", orig_route_id="route_id", dest_loc_id="loc_id", dest_route_id=pl.lit(transfer_route_id)
-    )
-    incoming_transfers = incoming_transfers.join(
-        gtfs_transfers, on=["orig_loc_id", "dest_loc_id"], how="left"
-    ).with_columns(pl.col("travel_time_min").fill_null(DEFAULT_TRANSFER_TIME_MIN))
+    return raw_table.select(selected_cols)
 
-    # Similarly, an outgoing edge from the central (transfer_route_id, loc_id) node to the (route_id, loc_id) pair, with no travel time
-    outgoing_transfers = pt_nodes_df.select(
-        orig_loc_id="loc_id",
-        orig_route_id=pl.lit(transfer_route_id),
-        dest_loc_id="loc_id",
-        dest_route_id="route_id",
-        travel_time_min=0.0,
-    )
 
-    # Add the GTFS transfers between different loc_ids
-    inter_loc_transfers = (
-        gtfs_transfers
-        .filter(pl.col("orig_loc_id") != pl.col("dest_loc_id"))
-        .with_columns(orig_route_id=pl.lit(transfer_route_id), dest_route_id=pl.lit(transfer_route_id))
-        .select(incoming_transfers.columns)
-    )
+def _cast(expr: pl.Expr, col_name: str, dtype: pl.DataType, feed: str) -> pl.Expr:
+    """Convert a stripped string column to a GTFS type."""
+    if col_name in ID_COLUMNS:
+        return pl.lit(f"{feed}:") + expr
+    if col_name in TIME_COLUMNS:  # Convert manually since GTFS times can go beyond 24 hrs.
+        parts = expr.str.split(":").list.eval(pl.element().cast(pl.Int32))
+        return parts.list.get(0) * 3600 + parts.list.get(1) * 60 + parts.list.get(2)
+    if col_name in DATE_COLUMNS:
+        return expr.str.to_date("%Y%m%d")
+    if dtype == pl.Boolean():
+        return expr.cast(pl.Int8).cast(pl.Boolean)
 
-    return pl.concat([inter_loc_transfers, incoming_transfers, outgoing_transfers])
+    return expr.cast(dtype)

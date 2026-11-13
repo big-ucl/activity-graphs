@@ -10,8 +10,6 @@ from shapely import LineString
 from activitygraphs.base import (
     CRS,
     LOCATIONS_SCHEMA,
-    PT_EDGE_LIST_SCHEMA,
-    TRANSFER_EDGE_LIST_SCHEMA,
     USER_JOURNEY_SCHEMA,
     WALK_EDGE_LIST_SCHEMA,
     Mode,
@@ -105,50 +103,6 @@ def explore_locations_by_affluence(
     )
 
 
-def explore_pt_edges_by_mode(
-    pt_edge_df: pl.DataFrame, locations_gdf: gpd.GeoDataFrame, m: folium.Map | None = None, tiles: str = TILES
-):
-    """Plot public-transport edges on a folium map, coloured by mode."""
-    pt_edge_df = check_schema(pt_edge_df, PT_EDGE_LIST_SCHEMA)
-    locations_gdf = check_schema(locations_gdf, LOCATIONS_SCHEMA)
-
-    formatted_routes_expr = pl.format(
-        "{} (T={} min / N={} / H={} min) - {}",
-        pl.element().struct.field("route_name"),
-        pl.element().struct.field("travel_time_min").round(1),
-        pl.element().struct.field("daily_trip_count"),
-        pl.element().struct.field("avg_headway_min").round(1),
-        pl.element().struct.field("route_id"),
-    )
-
-    _map_edges = (
-        pt_edge_df
-        .group_by("orig_loc_id", "dest_loc_id", "route_mode")
-        .agg(
-            travel_time_min=pl.col("travel_time_min").mean(),
-            route_attrs=pl.struct([
-                "route_id",
-                "route_name",
-                "travel_time_min",
-                "daily_trip_count",
-                "avg_headway_min",
-            ]).unique(),
-        )
-        .with_columns(pl.col("route_attrs").list.eval(formatted_routes_expr).list.join("<br />"))
-    )
-
-    map_edges_gdf = _add_line_geometry_to_edge_df(_map_edges, locations_gdf)
-    route_mode_colors = map_edges_gdf["route_mode"].map(ROUTE_MODE_COLOUR_MAP).astype(str)
-
-    return map_edges_gdf.explore(
-        m=m,
-        tiles=tiles,
-        color=route_mode_colors,
-        tooltip=["route_mode", "travel_time_min", "route_attrs"],  # pyrefly: ignore[bad-argument-type]
-        style_kwds={"weight": 3, "opacity": 0.5},
-    )
-
-
 def explore_walk_edges(
     walk_edge_df: pl.DataFrame,
     locations_gdf: gpd.GeoDataFrame,
@@ -177,44 +131,6 @@ def explore_link_edges(
 ) -> folium.Map:
     """Plot link edges on a folium map in the link colour."""
     return explore_walk_edges(walk_edge_df, locations_gdf, m=m, tiles=tiles, walk_color=link_color)
-
-
-def explore_transfer_edges(
-    transfer_edge_df: pl.DataFrame,
-    locations_gdf: gpd.GeoDataFrame,
-    show_locations: bool = False,
-    m: folium.Map | None = None,
-    tiles: str = TILES,
-) -> folium.Map:
-    """Plot transfer edges between distinct locations on a folium map."""
-    check_schema(transfer_edge_df, TRANSFER_EDGE_LIST_SCHEMA)
-    check_schema(locations_gdf, LOCATIONS_SCHEMA)
-
-    external_transfers_df = transfer_edge_df.filter(pl.col("orig_loc_id") != pl.col("dest_loc_id")).select(
-        "orig_loc_id", "dest_loc_id", "travel_time_min"
-    )
-
-    walk_color = ROUTE_MODE_COLOUR_MAP[Mode.WALK]
-    m = explore_walk_edges(external_transfers_df, locations_gdf, m=m, tiles=tiles, walk_color=walk_color)
-
-    if not show_locations:
-        return m
-
-    internal_transfers = transfer_edge_df.filter(
-        pl.col("orig_loc_id") == pl.col("dest_loc_id"), dest_route_id="transfer_route"
-    )
-
-    route_transfer_locs_df = (
-        internal_transfers
-        .rename({"orig_loc_id": "loc_id"})
-        .group_by("loc_id")
-        .agg(pl.col("travel_time_min").first(), num_transfers=pl.len())
-    )
-    route_transfer_locs_df = locations_gdf.merge(route_transfer_locs_df.to_pandas(), on="loc_id")
-
-    m = route_transfer_locs_df.explore(m=m, tiles=tiles, color=walk_color)
-
-    return m
 
 
 def add_legend_pane_to_map(m: folium.Map, legends: dict[str, tuple[str, dict[str, str]]]):

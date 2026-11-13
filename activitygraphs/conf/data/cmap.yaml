@@ -22,6 +22,14 @@ inputs:
 
     census_tracts: tl_2020_17_tract.zip
 
+  gtfs:
+    service_date: "2018-10-17"
+    feeds:
+      cta: CMAP/CTA/mdb-389-20181006.zip
+      metra: CMAP/Metra/tl-d947944218cb.zip
+      pace: CMAP/Pace/tfs-171-20181017.zip
+      southshore: CMAP/SouthShore/mdb-585-20170701.zip
+
 paths:
   processed: data/processed/${..name}
   raw: data/raw/${..name}

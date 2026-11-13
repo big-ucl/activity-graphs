@@ -5,13 +5,6 @@ from enum import StrEnum
 import polars as pl
 
 
-class PTNodeType(StrEnum):
-    """Type of node for PT graph nodes: one node per route or one per stop."""
-
-    ONE_PER_ROUTE = "ONE_PER_ROUTE"
-    ONE_PER_STOP = "ONE_PER_STOP"
-
-
 class Mode(StrEnum):
     """Travel modes used as categorical values in journey legs."""
 
@@ -97,27 +90,6 @@ EDGE_LIST_SCHEMA = pl.Schema({
 WALK_EDGE_LIST_SCHEMA = EDGE_LIST_SCHEMA
 LINK_EDGE_LIST_SCHEMA = EDGE_LIST_SCHEMA
 
-PT_EDGE_LIST_SCHEMA = pl.Schema({
-    "orig_loc_id": pl.String,
-    "route_id": pl.String,
-    "dest_loc_id": pl.String,
-    "first_departure_time": pl.Time,
-    "last_departure_time": pl.Time,
-    "avg_dwell_time_min": pl.Float64,
-    "travel_time_min": pl.Float64,
-    "daily_trip_count": pl.UInt32,
-    "avg_headway_min": pl.Float64,
-    "route_mode": pl.Categorical(),
-    "route_name": pl.String,
-})
-
-TRANSFER_EDGE_LIST_SCHEMA = pl.Schema({
-    "orig_loc_id": pl.String,
-    "orig_route_id": pl.String,
-    "dest_loc_id": pl.String,
-    "dest_route_id": pl.String,
-    "travel_time_min": pl.Float64,
-})
 CRS = "EPSG:4326"
 
 PER_USER_STAGE = "test_user"
