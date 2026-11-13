@@ -1,11 +1,13 @@
 # @package _global_
-# The MLP, the GAT and the two-tower model, every one with the home PE and the distance, beside the baselines.
+# The MLP, the GAT and the two-tower model, every one with the home PE and the distance, and HomeZoneMF, beside the
+# baselines.
 experiment:
   name: headline
   variants:
     - { model: mlp }
     - { model: gat }
     - { model: two_tower }
+    - { model: home_zone_mf }
 
 models:
   gat:

@@ -354,7 +354,7 @@ EXPECTED_VARIANTS = {
     "core": ["HomeZoneMF", "MLP-nohpe-norwpe", "MLP-nohpe", "MLP", "GATv2-8", "GTransformer-2"],
     "demographics_ablation": ["MLP", "MLP-nodemo", "GATv2-2", "GATv2-2-nodemo"],
     "depth_sweep": ["MLP", "GATv2-1", "GATv2-2", "GATv2-4", "GATv2-8"],
-    "headline": ["MLP", "GATv2-2", "TwoTower-4"],
+    "headline": ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"],
     "overfit_health": ["MLP-nohpe", "GATv2-8-nohpe"],
     "two_tower_ablation": [
         "MLP",
@@ -533,7 +533,7 @@ class TestRunExperiment:
     def test_trains_every_variant_once_per_seed_in_order(self, compose_config, monkeypatch):
         calls, _ = self._run(compose_config, monkeypatch, "experiment=headline")
 
-        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-2", "TwoTower-4"] * 2
+        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"] * 2
 
     def test_fits_the_baselines(self, compose_config, monkeypatch):
         _, with_baselines = self._run(compose_config, monkeypatch, "experiment=core")
