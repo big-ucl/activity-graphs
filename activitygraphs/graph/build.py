@@ -8,8 +8,10 @@ import geopandas as gpd
 import pandas as pd
 
 from activitygraphs.base import CRS
-from activitygraphs.config import DataConfig
+from activitygraphs.config import DataConfig, PTPaths
+from activitygraphs.graph.access import add_access_features, read_motorway_junctions
 from activitygraphs.surveys.base import SurveyData, SurveyLoader
+from activitygraphs.surveys.gtfs import GTFSTables, read_gtfs
 from activitygraphs.surveys.overture import Overture
 from activitygraphs.surveys.registry import survey_loader
 from activitygraphs.utils import get_project_root
@@ -45,7 +47,11 @@ def load_graph(
     overture = Overture.load(zones_gdf, cfg.inputs.overture, root)
     statistics = loader.read_statistics(cfg, root)
 
-    nodes_gdf, edges_gdf = _build_graph(zones_gdf, overture, statistics, loader)
+    pt_inputs = cast(PTPaths, cfg.inputs)
+    gtfs = read_gtfs(pt_inputs.gtfs, root / cfg.paths.gtfs)
+    junctions = read_motorway_junctions(root / cfg.paths.osm / pt_inputs.osm_extract)
+
+    nodes_gdf, edges_gdf = _build_graph(zones_gdf, overture, statistics, loader, gtfs, junctions)
 
     graph_path.mkdir(parents=True, exist_ok=True)
     nodes_gdf.to_parquet(nodes_path)
@@ -59,14 +65,18 @@ def _build_graph[S](
     overture: Overture,
     statistics: S,
     loader: SurveyLoader[Any, S],
+    gtfs: GTFSTables,
+    junctions: gpd.GeoSeries,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Build the spatial contiguity graph over ``zones_gdf``, enriched with census stats, POIs, and land uses.
+    """Build the spatial contiguity graph over ``zones_gdf``, enriched with census stats, POIs, land uses and access.
 
     Args:
         zones_gdf: Zone locations, with polygon geometry and a ``loc_id`` column.
         overture: Overture POIs and land uses covering the zones.
         statistics: Census statistics from ``loader.read_statistics``.
         loader: The survey's loader, which adds the statistics and any extra edges.
+        gtfs: The GTFS feeds of the dataset, read for the rail stations and the peak departures.
+        junctions: The motorway junctions around the zones.
 
     Returns:
         Tuple ``(nodes_gdf, edges_gdf)``: nodes indexed by ``loc_id``, edges by (source, target) ``loc_id``.
@@ -85,5 +95,7 @@ def _build_graph[S](
         extra_edges = loader.build_extra_edges(nodes_gdf, edges_gdf)
         edges_gdf = cast(gpd.GeoDataFrame, pd.concat([edges_gdf, extra_edges]))
         edges_gdf = c2g.canonicalize_edges(edges_gdf)
+
+    nodes_gdf = add_access_features(nodes_gdf, gtfs, junctions)
 
     return nodes_gdf.to_crs(CRS), edges_gdf.to_crs(CRS)

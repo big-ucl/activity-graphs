@@ -149,6 +149,7 @@ class DatasetSchema:
 
     Attributes:
         locations: Location node features.
+        access: Accessibility features of the location nodes.
         edges: Edge features.
         user_nodes: Per-user node features.
         user_attributes: Per-user attributes.
@@ -160,6 +161,7 @@ class DatasetSchema:
     """
 
     locations: TensorSchema
+    access: TensorSchema
     edges: TensorSchema
     user_nodes: TensorSchema
     user_attributes: TensorSchema

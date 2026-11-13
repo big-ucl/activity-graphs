@@ -59,7 +59,7 @@ USERS_PER_HOUSEHOLD = 2
 NUM_USERS = NUM_HOUSEHOLDS * USERS_PER_HOUSEHOLD
 TRAIN_IDX = list(range(10))
 VISIT_PURPOSES = [Purpose.WORK_MAIN, Purpose.SHOP, Purpose.LEISURE_OTHER, Purpose.STUDY]
-FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe")
+FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe", "use_access")
 SURVEYS = ("cmap", "no_demographics")
 HOME_PE = HomePEConfig(bins=8, max_hops=40)
 
@@ -90,12 +90,16 @@ def build_zones() -> gpd.GeoDataFrame:
 
 
 def build_graph(zones: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Return the contiguity graph over ``zones`` with density and land-use columns, built as ``graph/build.py`` does."""
+    """Return the contiguity graph over ``zones`` with density, land-use and access columns, as ``graph/build.py`` does."""
     rng = np.random.default_rng(0)
     projected = zones.to_crs(zones.estimate_utm_crs())
     projected["pop_density"] = rng.lognormal(-6.0, 1.0, len(zones))
     projected["poi_shop"] = rng.lognormal(-9.0, 1.5, len(zones))
     projected["land_use_residential"] = rng.uniform(0.0, 1.0, len(zones))
+    projected["has_rail_station"] = rng.integers(0, 2, len(zones))
+    projected["rail_station_distance_m"] = rng.uniform(100.0, 5000.0, len(zones))
+    projected["peak_departures_per_hour"] = rng.poisson(20.0, len(zones)).astype(float)
+    projected["motorway_junction_distance_m"] = rng.uniform(100.0, 10000.0, len(zones))
     nodes_gdf, edges_gdf = c2g.contiguity_graph(projected.set_index("loc_id"), set_point_nodes=True)
 
     # city2graph's edge order depends on the hash seed.
@@ -298,7 +302,8 @@ def test_each_graph_copy_carries_the_location_and_user_node_features_apart(tmp_p
     is_home = torch.zeros(num_nodes, 1)
     is_home[users.home_node[3]] = 1.0
 
-    torch.testing.assert_close(graphs.x[third_copy], torch.cat([locations.x, is_home], dim=-1))
+    expected_x = torch.cat([locations.x, locations.access, is_home], dim=-1)
+    torch.testing.assert_close(graphs.x[third_copy], expected_x)
     assert graphs.x.shape[0] == NUM_USERS * num_nodes
 
 
@@ -407,7 +412,7 @@ def test_a_graph_without_an_edge_index_raises():
     graph = pyg.data.Data(x=locations.x, edge_attr=locations.edge_attr)
 
     with pytest.raises(ValueError, match="no edge index"):
-        _build_location_tensors(graph, locations.distance_m, locations.node_ids)
+        _build_location_tensors(graph, locations.access, locations.distance_m, locations.node_ids)
 
 
 def test_tensors_that_disagree_on_the_number_of_users_raise():

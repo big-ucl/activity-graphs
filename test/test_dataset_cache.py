@@ -34,6 +34,7 @@ def make_group(group: str, width: int, kind: ColumnKind = ColumnKind.CONTINUOUS)
 def make_schema(n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
     return DatasetSchema(
         locations=make_group("locations", 0),
+        access=make_group("access", 0),
         edges=make_group("edges", 0),
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=make_group("user_attributes", n_demo, demo_kind),
@@ -62,6 +63,7 @@ def make_dataset(
 
     locations = LocationTensors(
         x=torch.zeros((n_nodes, 0)),
+        access=torch.zeros((n_nodes, 0)),
         edge_index=torch.zeros((2, 0), dtype=torch.long),
         edge_attr=torch.zeros((0, 0)),
         distance_m=torch.zeros((n_nodes, n_nodes)),

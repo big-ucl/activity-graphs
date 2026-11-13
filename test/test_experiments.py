@@ -38,7 +38,14 @@ from activitygraphs.experiments.variants import (
 )
 from activitygraphs.models.architectures import BUILDERS, _lookup_architecture, build_scorer
 from activitygraphs.models.baselines import HomeZoneMFBaseline
-from activitygraphs.models.features import InputFeatures, build_feature_encoder
+from activitygraphs.models.features import (
+    AccessFeatures,
+    InputFeatures,
+    LocationFeatures,
+    RandomWalkPE,
+    build_feature_encoder,
+    build_node_feature_encoder,
+)
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.models.two_tower import TwoTowerScorer
@@ -75,10 +82,13 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
     )
 
 
-def make_schema(num_location_features: int = 5, num_attributes: int = 3, num_edge_features: int = 2) -> DatasetSchema:
-    """The schema of a survey with continuous location, edge and user attribute columns."""
+def make_schema(
+    num_location_features: int = 5, num_attributes: int = 3, num_edge_features: int = 2, num_access_features: int = 4
+) -> DatasetSchema:
+    """The schema of a survey with continuous location, access, edge and user attribute columns."""
     return DatasetSchema(
         locations=continuous_schema("locations", num_location_features),
+        access=continuous_schema("access", num_access_features),
         edges=continuous_schema("edges", num_edge_features),
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", num_attributes),
@@ -253,20 +263,43 @@ class TestBuildScorer:
         assert isinstance(scorer_of(cfg.models[key]), torch.nn.Module)
 
     def test_input_width_follows_the_variant_features(self, cfg):
-        locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
+        locations = make_locations()
+        schema = make_schema(num_location_features=5, num_attributes=3, num_access_features=4)
         plain_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False)
         plain = build_feature_encoder(plain_features, locations, schema, HOME_PE)  # type: ignore[arg-type]
         dist = build_feature_encoder(InputFeatures(use_home_pe=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
-        assert plain.out_dim == 5 + 1 + 2
-        assert dist.out_dim == 5 + 1 + 2 + 3 + 1
+        assert plain.out_dim == 5 + 4 + 1 + 2
+        assert dist.out_dim == 5 + 4 + 1 + 2 + 3 + 1
 
     def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
-        locations, schema = make_locations(), make_schema(num_location_features=5, num_attributes=3)
+        locations = make_locations()
+        schema = make_schema(num_location_features=5, num_attributes=3, num_access_features=4)
         features = InputFeatures(use_home_pe=False, use_rwpe=False)
         encoder = build_feature_encoder(features, locations, schema, HOME_PE)  # type: ignore[arg-type]
 
-        assert encoder.out_dim == 5 + 1 + 3 + 1
+        assert encoder.out_dim == 5 + 4 + 1 + 3 + 1
+
+    def test_the_access_flag_adds_the_access_columns(self, cfg):
+        locations, schema = make_locations(), make_schema(num_access_features=4)
+        without_access = build_feature_encoder(InputFeatures(use_access=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        with_access = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
+
+        assert with_access.out_dim - without_access.out_dim == 4
+
+    @pytest.mark.parametrize(
+        ("features", "source_types"),
+        [
+            (InputFeatures(), [LocationFeatures, AccessFeatures, RandomWalkPE]),
+            (InputFeatures(use_access=False), [LocationFeatures, RandomWalkPE]),
+            (InputFeatures(use_rwpe=False), [LocationFeatures, AccessFeatures]),
+            (InputFeatures(use_access=False, use_rwpe=False), [LocationFeatures]),
+        ],
+    )
+    def test_the_node_sources_follow_the_flags(self, features, source_types):
+        encoder = build_node_feature_encoder(features, make_locations(), make_schema(), None)  # type: ignore[arg-type]
+
+        assert [type(source) for source in encoder.sources] == source_types
 
     def test_home_pe_adds_its_bins(self, cfg):
         locations, schema = make_locations(), make_schema()

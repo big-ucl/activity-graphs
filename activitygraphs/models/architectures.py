@@ -25,6 +25,7 @@ from activitygraphs.models.features import (
     InputFeatures,
     ProjectedLocationFeatures,
     build_feature_encoder,
+    build_node_feature_encoder,
 )
 from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.schema_encoder import SchemaEncoder
@@ -190,9 +191,10 @@ def _build_two_tower(
 ) -> TwoTowerScorer:
     """Instantiate a ``TwoTowerScorer`` for the input ``features``.
 
-    ``use_rwpe`` appends the random-walk PE to the node tower's input, ``use_demographics`` gives the user attributes
-    to the user tower, and ``use_home_pe`` and ``use_dist`` give the home-anchored PE and the distance from home to
-    the pairwise block.
+    Features inputs are given to the model components as follows:
+    - Node tower: accessibility features (``use_access``) and random-walk PE (``use_rwpe``).
+    - User tower: user attributes (``use_demographics``)
+    - Pairwise block: home-anchored PE (``use_home_pe``) and distance from home (``use_dist``).
 
     Raises:
         ValueError: If ``config.bias`` is not one of ``TWO_TOWER_BIASES``.
@@ -206,19 +208,16 @@ def _build_two_tower(
     if two_tower.bias not in TWO_TOWER_BIASES:
         raise ValueError(f"The two-tower bias is one of {TWO_TOWER_BIASES}, got {two_tower.bias!r}")
 
-    num_rwpe_features = locations.num_rwpe_features if features.use_rwpe else None
-    node_embedding = torch.nn.Embedding(num_nodes, embedding_dim) if two_tower.node_embedding else None
-    node_in_channels = schema.locations.width + (num_rwpe_features or 0)
-    if node_embedding is not None:
-        node_in_channels += embedding_dim
+    node_embedding_dim = embedding_dim if two_tower.node_embedding else None
+    node_encoder = build_node_feature_encoder(features, locations, schema, node_embedding_dim)
 
     node_sizes = NetworkSizes(
-        in_channels=node_in_channels,
+        in_channels=node_encoder.out_dim,
         out_channels=embedding_dim,
         edge_dim=schema.edges.width,
     )
     node_network = _build_gat(two_tower, node_sizes)
-    node_tower = NodeTower(node_network, num_rwpe_features, node_embedding)
+    node_tower = NodeTower(node_encoder, node_network)
 
     attributes = SchemaEncoder(schema.user_attributes) if features.use_demographics else None
     user_in_channels = embedding_dim + (0 if attributes is None else attributes.out_dim)

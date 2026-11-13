@@ -23,6 +23,7 @@ class Locations:
 
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
+        access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
         edge_index: Edge list, ``[2, num_edges]``.
         edge_attr: Edge features, ``[num_edges, num_edge_features]``.
         random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, num_rwpe_features]``.
@@ -35,6 +36,7 @@ class Locations:
     """
 
     x: torch.Tensor
+    access: torch.Tensor
     edge_index: torch.Tensor
     edge_attr: torch.Tensor
     random_walk_pe: torch.Tensor
@@ -53,19 +55,20 @@ class Locations:
         """
         graph = pyg.data.Data(edge_index=tensors.edge_index, num_nodes=tensors.num_nodes)
         random_walk_pe = T.AddRandomWalkPE(walk_length=RWPE_WALK_LENGTH)(graph).random_walk_pe
-        # T.AddLaplacianEigenvectorPE(k=8, attr_name=None), # Removed due to instability on different graphs.
         hop_distance = _compute_hop_distance(tensors.edge_index, tensors.num_nodes)
 
         if transforms is None:
-            x, edge_attr, distance = tensors.x, tensors.edge_attr, tensors.distance_m
+            x, access, edge_attr, distance = tensors.x, tensors.access, tensors.edge_attr, tensors.distance_m
         else:
             distance_m = tensors.distance_m.unsqueeze(-1)
             x = transforms.groups["locations"].apply(tensors.x)
+            access = transforms.groups["access"].apply(tensors.access)
             edge_attr = transforms.groups["edges"].apply(tensors.edge_attr)
             distance = transforms.groups["distances"].apply(distance_m).squeeze(-1)
 
         return cls(
             x=x,
+            access=access,
             edge_index=tensors.edge_index,
             edge_attr=edge_attr,
             random_walk_pe=random_walk_pe,

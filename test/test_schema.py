@@ -31,6 +31,7 @@ def user_attributes() -> TensorSchema:
 def dataset_schema() -> DatasetSchema:
     return DatasetSchema(
         locations=TensorSchema("locations", (ColumnSpec("pop_density", CONTINUOUS),)),
+        access=TensorSchema("access", (ColumnSpec("has_rail_station", BINARY),)),
         edges=TensorSchema("edges", (ColumnSpec("weight", CONTINUOUS),)),
         user_nodes=TensorSchema("user_nodes", (ColumnSpec("is_home", BINARY),)),
         user_attributes=user_attributes(),
@@ -134,6 +135,7 @@ class TestDatasetSchema:
 
         assert [schema.group for schema in feature_groups] == [
             "locations",
+            "access",
             "edges",
             "user_nodes",
             "user_attributes",

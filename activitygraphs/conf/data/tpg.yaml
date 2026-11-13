@@ -23,6 +23,8 @@ inputs:
     swiss_localities: ortschaftenverzeichnis_plz_2056.shp/AMTOVZ_SHP_LV95/AMTOVZ_LOCALITY.shp
     swiss_boundaries: swissboundaries3d_2025-04_2056_5728.shp/swissBOUNDARIES3D_1_5_TLM_HOHEITSGEBIET.shp
 
+  osm_extract: tpg-220101-clipped.osm.pbf
+
   gtfs:
     service_date: "2022-05-18"
     feeds:
@@ -34,6 +36,7 @@ paths:
 
   external: data/external
   gtfs: ${..paths.external}/gtfs
+  osm: ${..paths.external}/osm
 
 # Upper edges in km of the distance-from-home bands the within-band AUC is read on.
 distance_bands: [ 1, 2.5, 5, 10 ]

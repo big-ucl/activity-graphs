@@ -14,6 +14,7 @@ import torch_geometric as pyg
 from activitygraphs.base import Purpose
 from activitygraphs.config import Config, DataConfig
 from activitygraphs.graph import load_graph
+from activitygraphs.graph.access import ACCESS_SCHEMA
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema, infer_schema
 from activitygraphs.surveys.base import SurveyData
 from activitygraphs.surveys.registry import load_survey
@@ -95,6 +96,12 @@ def _build_user_node_indicator(survey: SurveyData, indicator_df: pl.DataFrame, c
     return torch.tensor(indicators[col_name].to_numpy(), dtype=torch.float32).reshape(
         len(survey.user_ids), len(locations)
     )
+
+
+def _build_access(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
+    """Return the ``ACCESS_SCHEMA`` columns of the nodes, in node order, ``[n_nodes, n_access_features]``."""
+    access_values = nodes_gdf[ACCESS_SCHEMA.names].to_numpy(dtype=np.float32)
+    return torch.from_numpy(access_values)
 
 
 def _build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
@@ -198,7 +205,8 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
     Raises:
         ValueError: The graph has no edge index, or the tensors fail ``check_tensors``.
     """
-    node_feature_cols = [col for col in nodes_gdf.columns if col not in COLS_EXCLUDED_FROM_FEATURES]
+    excluded_cols = [*COLS_EXCLUDED_FROM_FEATURES, *ACCESS_SCHEMA.names]
+    node_feature_cols = [col for col in nodes_gdf.columns if col not in excluded_cols]
 
     pyg_graph = c2g.gdf_to_pyg(
         nodes_gdf,
@@ -209,9 +217,10 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
         device="cpu",
     )
 
+    access = _build_access(nodes_gdf)
     distance_m = _build_node_distances(nodes_gdf)
     node_ids = _build_node_ids(survey, nodes_gdf)
-    locations = _build_location_tensors(cast(pyg.data.Data, pyg_graph), distance_m, node_ids)
+    locations = _build_location_tensors(cast(pyg.data.Data, pyg_graph), access, distance_m, node_ids)
 
     attributes, attributes_cat = _build_user_attributes(survey)
     users = UserTensors(
@@ -283,6 +292,7 @@ def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_
 
     return DatasetSchema(
         locations=locations_schema,
+        access=ACCESS_SCHEMA,
         edges=EDGE_SCHEMA,
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=survey.demographics_schema,
@@ -292,7 +302,7 @@ def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_
 
 
 def _build_location_tensors(
-    pyg_graph: pyg.data.Data, distance_m: torch.Tensor, node_ids: pl.DataFrame
+    pyg_graph: pyg.data.Data, access: torch.Tensor, distance_m: torch.Tensor, node_ids: pl.DataFrame
 ) -> LocationTensors:
     """Return the location tensors of the PyG graph built by city2graph.
 
@@ -304,6 +314,7 @@ def _build_location_tensors(
 
     return LocationTensors(
         x=cast(torch.Tensor, pyg_graph.x),
+        access=access,
         edge_index=pyg_graph.edge_index,
         edge_attr=cast(torch.Tensor, pyg_graph.edge_attr),
         distance_m=distance_m,

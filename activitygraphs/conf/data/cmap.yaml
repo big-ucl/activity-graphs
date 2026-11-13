@@ -22,6 +22,8 @@ inputs:
 
     census_tracts: tl_2020_17_tract.zip
 
+  osm_extract: cmap-190101-clipped.osm.pbf
+
   gtfs:
     service_date: "2018-10-17"
     feeds:
@@ -36,6 +38,7 @@ paths:
 
   external: data/external
   gtfs: ${..paths.external}/gtfs
+  osm: ${..paths.external}/osm
 
 # Upper edges in km of the distance-from-home bands the within-band AUC is read on.
 distance_bands: [ 2, 5, 10, 25 ]

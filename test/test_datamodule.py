@@ -13,12 +13,13 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(scope="module")
 def datamodule(load_or_skip) -> SurveyDataModule:
     def build(cfg, root) -> SurveyDataModule:
-        dm = SurveyDataModule(cfg, HouseholdSplit(val_size=0.2, test_size=0.1), seed=42, batch_size=64, num_workers=0)
+        split = HouseholdSplit(val_size=cfg.train.val_size, test_size=cfg.train.test_size)
+        dm = SurveyDataModule(cfg, split, seed=cfg.train.split_seed, batch_size=64, num_workers=0)
         dm.prepare_data()
         dm.setup()
         return dm
 
-    return load_or_skip("thats", build)
+    return load_or_skip("tpg", build)
 
 
 class TestSurveyDataModule:

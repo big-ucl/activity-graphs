@@ -13,7 +13,7 @@ from activitygraphs.config import HomePEConfig, LossConfig, read_config
 from activitygraphs.datasets import Locations, Users
 from activitygraphs.experiments.variants import Variant
 from activitygraphs.models.architectures import build_scorer
-from activitygraphs.models.features import InputFeatures
+from activitygraphs.models.features import InputFeatures, NodeEmbedding
 from activitygraphs.models.two_tower import LocationBias, MLPBias, NodeBias, TwoTowerScorer
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
@@ -26,9 +26,10 @@ NUM_USERS = 4
 NUM_LOCATION_FEATURES = 3
 NUM_EDGE_FEATURES = 2
 NUM_RWPE_FEATURES = 4
+NUM_ACCESS_FEATURES = 2
 NUM_ATTRIBUTES = 2
 HOME_PE = HomePEConfig(bins=4, max_hops=5)
-FLAGS = ["use_dist", "use_home_pe", "use_demographics", "use_rwpe"]
+FLAGS = ["use_dist", "use_home_pe", "use_demographics", "use_rwpe", "use_access"]
 
 
 @pytest.fixture(scope="module")
@@ -44,6 +45,7 @@ def make_schema() -> DatasetSchema:
     """The schema of a survey with continuous location, edge and user attribute columns."""
     return DatasetSchema(
         locations=continuous_schema("locations", NUM_LOCATION_FEATURES),
+        access=continuous_schema("access", NUM_ACCESS_FEATURES),
         edges=continuous_schema("edges", NUM_EDGE_FEATURES),
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", NUM_ATTRIBUTES),
@@ -60,11 +62,12 @@ def make_survey() -> tuple[Locations, Users]:
     edge_attr = torch.rand(edge_index.shape[1], NUM_EDGE_FEATURES, generator=generator)
     random_walk_pe = torch.rand(NUM_NODES, NUM_RWPE_FEATURES, generator=generator)
     distance_m = torch.rand(NUM_NODES, NUM_NODES, generator=generator) * 1000.0
-    locations = make_locations(x, edge_index, edge_attr, random_walk_pe, distance_m)
 
     visited = (torch.rand(NUM_USERS, NUM_NODES, generator=generator) < 0.5).float()
     home_node = torch.tensor([0, 2, 2, 5])
     attributes = torch.rand(NUM_USERS, NUM_ATTRIBUTES, generator=generator)
+    access = torch.rand(NUM_NODES, NUM_ACCESS_FEATURES, generator=generator)
+    locations = make_locations(x, edge_index, edge_attr, random_walk_pe, distance_m, access)
 
     return locations, make_users(visited, home_node, attributes)
 
@@ -76,7 +79,8 @@ def scorer_of(config, features: InputFeatures, locations: Locations) -> TwoTower
 
 
 ALL_FEATURES = [
-    InputFeatures(**dict(zip(FLAGS, active, strict=True))) for active in itertools.product([False, True], repeat=4)
+    InputFeatures(**dict(zip(FLAGS, active, strict=True)))
+    for active in itertools.product([False, True], repeat=len(FLAGS))
 ]
 
 
@@ -121,12 +125,15 @@ class TestTwoTowerScorer:
     def test_the_input_widths_follow_the_features(self, config):
         locations, _ = make_survey()
         embedding_dim = config.embedding_dim
-        bare_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False)
+        bare_features = InputFeatures(
+            use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False, use_access=False
+        )
         bare = scorer_of(config, bare_features, locations)
         full = scorer_of(config, InputFeatures(use_dist=True, use_home_pe=True), locations)
 
         assert bare.node_tower.network.pre_lin.lins[0].in_features == NUM_LOCATION_FEATURES
-        assert full.node_tower.network.pre_lin.lins[0].in_features == NUM_LOCATION_FEATURES + NUM_RWPE_FEATURES
+        full_node_width = NUM_LOCATION_FEATURES + NUM_ACCESS_FEATURES + NUM_RWPE_FEATURES
+        assert full.node_tower.network.pre_lin.lins[0].in_features == full_node_width
         assert bare.user_tower.network.lins[0].in_features == embedding_dim
         assert full.user_tower.network.lins[0].in_features == embedding_dim + NUM_ATTRIBUTES
         assert bare.pair_encoder is None
@@ -189,11 +196,18 @@ class TestInCityDiagnostics:
         plain = scorer_of(config, features, locations)
         embedded = scorer_of(OmegaConf.merge(config, {"node_embedding": True}), features, locations)
 
-        assert plain.node_tower.node_embedding is None
-        assert embedded.node_tower.node_embedding is not None
-        assert embedded.node_tower.node_embedding.weight.shape == (NUM_NODES, config.embedding_dim)
+        plain_embeddings = [
+            source for source in plain.node_tower.node_encoder.sources if isinstance(source, NodeEmbedding)
+        ]
+        embeddings = [
+            source for source in embedded.node_tower.node_encoder.sources if isinstance(source, NodeEmbedding)
+        ]
+
+        assert plain_embeddings == []
+        assert len(embeddings) == 1
+        assert embeddings[0].embedding.weight.shape == (NUM_NODES, config.embedding_dim)
         width = embedded.node_tower.network.pre_lin.lins[0].in_features
-        assert width == NUM_LOCATION_FEATURES + config.embedding_dim
+        assert width == NUM_LOCATION_FEATURES + NUM_ACCESS_FEATURES + config.embedding_dim
         assert embedded(locations, join_users(locations, users)).shape == (NUM_USERS, NUM_NODES)
 
     @pytest.mark.parametrize(

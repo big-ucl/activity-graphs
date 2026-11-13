@@ -126,12 +126,24 @@ class SurveyPaths:
 
 
 @dataclass
-class TPGPaths(SurveyPaths):
+class PTPaths(SurveyPaths):
+    """Base class for the raw-file inputs of a dataset with public transport feeds and an OSM extract.
+
+    Attributes:
+        gtfs: The GTFS feeds of the dataset and assoc. service date.
+        osm_extract: File name of the OSM extract clipped to the zones, in ``paths.osm``.
+    """
+
+    gtfs: GTFSFeeds
+    osm_extract: str
+
+
+@dataclass
+class TPGPaths(PTPaths):
     """Raw file paths for the TPG survey."""
 
     statistics: TPGStatsPaths
     boundaries: TPGBoundaryPaths
-    gtfs: GTFSFeeds
 
 
 @dataclass
@@ -147,24 +159,22 @@ class THATSPaths(SurveyPaths):
 
 
 @dataclass
-class CMAPPaths(SurveyPaths):
+class CMAPPaths(PTPaths):
     """Raw file inputs for the CMAP MyDailyTravel survey."""
 
     statistics: CMAPStatsPaths
     boundaries: CMAPBoundaryPaths
-    gtfs: GTFSFeeds
 
     raw_person: str
     raw_household: str
 
 
 @dataclass
-class TTSPaths(SurveyPaths):
+class TTSPaths(PTPaths):
     """Raw file inputs for one survey version of the Transportation Tomorrow Survey."""
 
     statistics: TTSStatsPaths
     boundaries: TTSBoundaryPaths
-    gtfs: GTFSFeeds
 
     raw_person: str
     raw_household: str
@@ -184,6 +194,7 @@ class DataPaths:
 
     external: Path
     gtfs: Path
+    osm: Path
 
 
 # ===================================================

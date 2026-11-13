@@ -15,6 +15,7 @@ class LocationFile(StrEnum):
     """Names of the files of a ``LocationTensors`` bundle, in its cache directory."""
 
     X = "x.pt"
+    ACCESS = "access.pt"
     EDGE_INDEX = "edge_index.pt"
     EDGE_ATTR = "edge_attr.pt"
     DISTANCE_M = "distance_m.pt"
@@ -38,6 +39,7 @@ class LocationTensors:
 
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
+        access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
         edge_index: Edge list, ``[2, num_edges]``.
         edge_attr: Edge features, ``[num_edges, num_edge_features]``.
         distance_m: Distance between the centroids of every pair of nodes in metres, ``[num_nodes, num_nodes]``.
@@ -46,6 +48,7 @@ class LocationTensors:
     """
 
     x: torch.Tensor
+    access: torch.Tensor
     edge_index: torch.Tensor
     edge_attr: torch.Tensor
     distance_m: torch.Tensor
@@ -61,6 +64,7 @@ class LocationTensors:
         directory.mkdir(parents=True, exist_ok=True)
         tensor_files = {
             LocationFile.X: self.x,
+            LocationFile.ACCESS: self.access,
             LocationFile.EDGE_INDEX: self.edge_index,
             LocationFile.EDGE_ATTR: self.edge_attr,
             LocationFile.DISTANCE_M: self.distance_m,
@@ -75,6 +79,7 @@ class LocationTensors:
         """Read the tensors written by ``save`` to ``directory``."""
         return cls(
             x=torch.load(directory / LocationFile.X, weights_only=True),
+            access=torch.load(directory / LocationFile.ACCESS, weights_only=True),
             edge_index=torch.load(directory / LocationFile.EDGE_INDEX, weights_only=True),
             edge_attr=torch.load(directory / LocationFile.EDGE_ATTR, weights_only=True),
             distance_m=torch.load(directory / LocationFile.DISTANCE_M, weights_only=True),
@@ -161,6 +166,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
         "Node",
         {
             "x": locations.x.shape[0],
+            "access": locations.access.shape[0],
             "visited": users.visited.shape[1],
             "distance_m (rows)": locations.distance_m.shape[0],
             "distance_m (columns)": locations.distance_m.shape[1],
@@ -170,6 +176,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
 
     numeric_and_categorical_widths = {
         "locations": (locations.x.shape[-1], 0),
+        "access": (locations.access.shape[-1], 0),
         "edges": (locations.edge_attr.shape[-1], 0),
         "user_attributes": (users.attributes.shape[-1], users.attributes_cat.shape[-1]),
         "distances": (1, 0),
@@ -194,6 +201,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
 
     _require_finite({
         "x": locations.x,
+        "access": locations.access,
         "edge_attr": locations.edge_attr,
         "distance_m": locations.distance_m,
         "attributes": users.attributes,

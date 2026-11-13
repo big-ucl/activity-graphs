@@ -9,7 +9,7 @@ from torch import Tensor
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.models.features import FeatureEncoder
+from activitygraphs.models.features import FeatureEncoder, NodeFeatureEncoder
 from activitygraphs.models.schema_encoder import SchemaEncoder
 from activitygraphs.models.scorers import Scorer
 
@@ -18,33 +18,18 @@ class NodeTower(torch.nn.Module):
     """Embeds every node of the location graph from its features, with no information about any user.
 
     Args:
+        node_encoder: Encodes the node-level input of every node.
         network: A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_nodes, d]``, such as ``GAT``.
-        num_rwpe_features: Width of the random-walk positional encoding appended to the location features, through a
-            batch norm of each column. None leaves the encoding out.
-        node_embedding: Learned embedding of each node's identity, appended after the encoding. None leaves it out.
     """
 
-    def __init__(
-        self,
-        network: torch.nn.Module,
-        num_rwpe_features: int | None,
-        node_embedding: torch.nn.Embedding | None,
-    ):
+    def __init__(self, node_encoder: NodeFeatureEncoder, network: torch.nn.Module):
         super().__init__()
+        self.node_encoder = node_encoder
         self.network = network
-        self.rwpe_norm = None if num_rwpe_features is None else torch.nn.BatchNorm1d(num_rwpe_features)
-        self.node_embedding = node_embedding
 
     def forward(self, locations: Locations) -> Tensor:
         """Return the embedding of every node, ``[num_nodes, d]``."""
-        inputs = [locations.x]
-        if self.rwpe_norm is not None:
-            inputs.append(self.rwpe_norm(locations.random_walk_pe))
-        if self.node_embedding is not None:
-            inputs.append(self.node_embedding.weight)
-
-        x = torch.cat(inputs, dim=-1)
-
+        x = self.node_encoder(locations)
         return self.network(x, locations.edge_index, locations.edge_attr, None)
 
 

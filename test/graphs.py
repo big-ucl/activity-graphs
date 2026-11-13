@@ -21,10 +21,11 @@ def make_locations(
     edge_attr: torch.Tensor | None = None,
     random_walk_pe: torch.Tensor | None = None,
     distance_m: torch.Tensor | None = None,
+    access: torch.Tensor | None = None,
 ) -> Locations:
     """Return the locations over ``x`` and ``edge_index``, with the hop distances computed from the edges.
 
-    A missing ``edge_attr`` or ``random_walk_pe`` has no columns, and a missing ``distance_m`` puts every node at 0 m
+    A missing ``edge_attr``, ``random_walk_pe`` or ``access`` has no columns, and a missing ``distance_m`` puts every node at 0 m
     from every node. The scaled ``distance`` equals ``distance_m``.
     """
     num_nodes = x.shape[0]
@@ -34,9 +35,12 @@ def make_locations(
         random_walk_pe = torch.zeros(num_nodes, 0)
     if distance_m is None:
         distance_m = torch.zeros(num_nodes, num_nodes)
+    if access is None:
+        access = torch.zeros(num_nodes, 0)
 
     return Locations(
         x=x,
+        access=access,
         edge_index=edge_index,
         edge_attr=edge_attr,
         random_walk_pe=random_walk_pe,

@@ -170,6 +170,7 @@ def fit_transforms(
     # Location and edge features: no need to separate between train and test, the graph is the same.
     values = {
         "locations": locations.x,
+        "access": locations.access,
         "edges": locations.edge_attr,
         "user_attributes": users.attributes[train_idx],
         "distances": locations.distance_m[train_homes].unsqueeze(-1),

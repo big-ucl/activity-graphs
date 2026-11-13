@@ -17,6 +17,7 @@ FEATURE_SUFFIXES = {
     "use_dist": "nodist",
     "use_demographics": "nodemo",
     "use_rwpe": "norwpe",
+    "use_access": "noacc",
 }
 """The suffix of each ``InputFeatures`` flag that differs from its default."""
 
@@ -95,6 +96,7 @@ def variant_hyperparams(variant: Variant) -> dict:
         "use_home_pe": features.use_home_pe,
         "use_demographics": features.use_demographics,
         "use_rwpe": features.use_rwpe,
+        "use_access": features.use_access,
     }
 
 
