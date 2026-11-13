@@ -384,6 +384,7 @@ EXPECTED_VARIANTS = {
         "GTransformer-2",
         "HomeZoneMF",
     ],
+    "access_ablation": ["MLP", "MLP-noacc", "GATv2-2", "GATv2-2-noacc", "TwoTower-4", "TwoTower-4-noacc"],
     "core": ["HomeZoneMF", "MLP-nohpe-norwpe", "MLP-nohpe", "MLP", "GATv2-8", "GTransformer-2"],
     "demographics_ablation": ["MLP", "MLP-nodemo", "GATv2-2", "GATv2-2-nodemo"],
     "depth_sweep": ["MLP", "GATv2-1", "GATv2-2", "GATv2-4", "GATv2-8"],

@@ -1,0 +1,15 @@
+# @package _global_
+# The MLP, the GAT and the two-tower model, each with and without the accessibility features, beside the baselines.
+experiment:
+  name: access_ablation
+  variants:
+    - { model: mlp }
+    - { model: mlp, features: { use_access: false } }
+    - { model: gat }
+    - { model: gat, features: { use_access: false } }
+    - { model: two_tower }
+    - { model: two_tower, features: { use_access: false } }
+
+models:
+  gat:
+    num_gcn_layers: 2
