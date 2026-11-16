@@ -12,14 +12,16 @@ from shapely.geometry import Point, box
 
 from activitygraphs.base import CRS
 from activitygraphs.config import GTFSFeeds
+from activitygraphs.graph.osrm import _duration_table, _foot_profile, _unlinked_rows
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES
 from activitygraphs.graph.travel_times import (
     MAX_TRAVEL_TIME,
+    WALK_SPEED_KMH,
     _is_walkable,
-    _nearest_walkable_points,
     _pt_time_table,
     _replace_pairs,
     _unlinked_zone_ids,
+    nearest_walkable_points,
 )
 from activitygraphs.surveys.gtfs import write_feed_subsets
 
@@ -191,7 +193,7 @@ class TestNearestWalkablePoints:
         osm_path.write_text(OSM_XML)
         points = gpd.GeoSeries([Point(6.1000, 46.2000)], index=["zone"], crs=CRS)
 
-        moved, distance_m = _nearest_walkable_points(points, osm_path)
+        moved, distance_m = nearest_walkable_points(points, osm_path)
 
         assert moved.index.tolist() == ["zone"]
         assert moved.iloc[0].y == pytest.approx(46.2010, abs=1e-6)
@@ -211,3 +213,29 @@ class TestNearestWalkablePoints:
     )
     def test_motorways_and_ways_closed_to_walking_are_not_walkable(self, tags, walkable):
         assert _is_walkable(tags) == walkable
+
+
+class TestOSRMTables:
+    def test_durations_become_minutes_capped_and_flagged(self):
+        max_time_s = MAX_TRAVEL_TIME.total_seconds()
+        durations_s = np.array([[0.0, 600.0], [np.nan, max_time_s + 60.0]])
+
+        times = _duration_table(durations_s, np.array(["a", "b"]), "car")
+
+        assert times.index.tolist() == [("a", "a"), ("a", "b"), ("b", "a"), ("b", "b")]
+        assert times["car_time_min"].tolist() == [0.0, 10.0, 180.0, 180.0]
+        assert times["car_reachable"].tolist() == [True, True, False, False]
+
+    def test_the_foot_profile_walks_at_the_r5_walking_speed(self):
+        profile = "function setup()\n  local walking_speed = 5\nend\n"
+
+        assert f"local walking_speed = {WALK_SPEED_KMH}" in _foot_profile(profile)
+
+    def test_a_foot_profile_without_the_speed_line_raises(self):
+        with pytest.raises(ValueError):
+            _foot_profile("function setup()\n  local walking_speed = 6\nend\n")
+
+    def test_a_zone_that_reaches_no_other_zone_is_an_unlinked_row(self):
+        durations_s = np.array([[0.0, 60.0, np.nan], [np.nan, 0.0, np.nan], [30.0, np.nan, 0.0]])
+
+        assert _unlinked_rows(durations_s).tolist() == [1]

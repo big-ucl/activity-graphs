@@ -92,7 +92,7 @@ def build_pt_travel_times(
 
     if unlinked_ids:
         unlinked_centroids = nodes_gdf.loc[unlinked_ids].geometry.to_crs(CRS)
-        moved_geometry, moved_distance_m = _nearest_walkable_points(unlinked_centroids, osm_path)
+        moved_geometry, moved_distance_m = nearest_walkable_points(unlinked_centroids, osm_path)
         moved_distance_list = np.round(moved_distance_m).astype(int).tolist()
         moved_distances = dict(zip(unlinked_ids, moved_distance_list, strict=True))
         log.info("Zone points moved to the nearest walkable OSM way, in metres: %s", moved_distances)
@@ -108,6 +108,42 @@ def build_pt_travel_times(
         log.warning("Some zones cannot reach any other zone by public transport or on foot: %s", still_unlinked_ids)
 
     return travel_times
+
+
+def nearest_walkable_points(points: gpd.GeoSeries, osm_path: Path) -> tuple[gpd.GeoSeries, np.ndarray]:
+    """For each point in ``points``, return the nearest point on a walkable OSM way, and the distance to it in metres.
+
+    Points with no walkable way within ``WALKABLE_SEARCH_RADIUS_DEG`` does not move.
+
+    Args:
+        points: Points in ``CRS``.
+        osm_path: The OSM extract read for the ways.
+
+    Returns:
+        Tuple ``(nearest_points, distance_m)``: the nearest points in ``CRS``, in the order of ``points``, and the
+        distance from each point to its nearest point.
+    """
+    point_x = points.x.to_numpy()
+    point_y = points.y.to_numpy()
+    radius = WALKABLE_SEARCH_RADIUS_DEG
+    search_boxes = shapely.box(point_x - radius, point_y - radius, point_x + radius, point_y + radius)
+    search_area = shapely.union_all(search_boxes)
+    walkable_ways = gpd.GeoSeries(_read_walkable_ways(osm_path, search_area), crs=CRS)
+
+    utm_crs = points.estimate_utm_crs()
+    utm_points = points.to_crs(utm_crs)
+    nearest_points = utm_points.copy()
+
+    if len(walkable_ways) > 0:
+        utm_ways = walkable_ways.to_crs(utm_crs)
+        nearest_way_idx = utm_ways.sindex.nearest(utm_points, return_all=False)[1]
+        nearest_ways = utm_ways.iloc[nearest_way_idx].to_numpy()
+        shortest_lines = shapely.shortest_line(utm_points.to_numpy(), nearest_ways)
+        nearest_points = gpd.GeoSeries(shapely.get_point(shortest_lines, -1), index=points.index, crs=utm_crs)
+
+    distance_m = utm_points.distance(nearest_points).to_numpy()
+
+    return nearest_points.to_crs(CRS), distance_m
 
 
 def _route(
@@ -142,42 +178,6 @@ def _unlinked_zone_ids(travel_times: pd.DataFrame) -> list[str]:
     reaches_any = other_pairs["pt_reachable"].groupby(level="source", sort=False).any()
 
     return reaches_any[~reaches_any].index.tolist()
-
-
-def _nearest_walkable_points(points: gpd.GeoSeries, osm_path: Path) -> tuple[gpd.GeoSeries, np.ndarray]:
-    """For each point in ``points``, return the nearest point on a walkable OSM way, and the distance to it in metres.
-
-    Points with no walkable way within ``WALKABLE_SEARCH_RADIUS_DEG`` does not move.
-
-    Args:
-        points: Points in ``CRS``.
-        osm_path: The OSM extract read for the ways.
-
-    Returns:
-        Tuple ``(nearest_points, distance_m)``: the nearest points in ``CRS``, in the order of ``points``, and the
-        distance from each point to its nearest point.
-    """
-    point_x = points.x.to_numpy()
-    point_y = points.y.to_numpy()
-    radius = WALKABLE_SEARCH_RADIUS_DEG
-    search_boxes = shapely.box(point_x - radius, point_y - radius, point_x + radius, point_y + radius)
-    search_area = shapely.union_all(search_boxes)
-    walkable_ways = gpd.GeoSeries(_read_walkable_ways(osm_path, search_area), crs=CRS)
-
-    utm_crs = points.estimate_utm_crs()
-    utm_points = points.to_crs(utm_crs)
-    nearest_points = utm_points.copy()
-
-    if len(walkable_ways) > 0:
-        utm_ways = walkable_ways.to_crs(utm_crs)
-        nearest_way_idx = utm_ways.sindex.nearest(utm_points, return_all=False)[1]
-        nearest_ways = utm_ways.iloc[nearest_way_idx].to_numpy()
-        shortest_lines = shapely.shortest_line(utm_points.to_numpy(), nearest_ways)
-        nearest_points = gpd.GeoSeries(shapely.get_point(shortest_lines, -1), index=points.index, crs=utm_crs)
-
-    distance_m = utm_points.distance(nearest_points).to_numpy()
-
-    return nearest_points.to_crs(CRS), distance_m
 
 
 def _read_walkable_ways(osm_path: Path, search_area: shapely.Geometry) -> list[shapely.LineString]:
