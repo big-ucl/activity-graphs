@@ -24,6 +24,7 @@ inputs:
     dissemination_areas: lda_000b16a_e.zip
 
   osm_extract: tts2016-170101-clipped.osm.pbf
+  osm_clip_polygon: hulls/tts2016-hull-10km.geojson
 
   gtfs:
     service_date: "2016-10-19"

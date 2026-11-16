@@ -24,6 +24,7 @@ inputs:
     swiss_boundaries: swissboundaries3d_2025-04_2056_5728.shp/swissBOUNDARIES3D_1_5_TLM_HOHEITSGEBIET.shp
 
   osm_extract: tpg-220101-clipped.osm.pbf
+  osm_clip_polygon: hulls/tpg-hull-10km.geojson
 
   gtfs:
     service_date: "2022-05-18"

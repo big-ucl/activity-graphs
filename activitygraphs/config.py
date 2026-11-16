@@ -132,10 +132,12 @@ class PTPaths(SurveyPaths):
     Attributes:
         gtfs: The GTFS feeds of the dataset and assoc. service date.
         osm_extract: File name of the OSM extract clipped to the zones, in ``paths.osm``.
+        osm_clip_polygon: File name of the clip polygon of the OSM extract, in ``paths.osm``.
     """
 
     gtfs: GTFSFeeds
     osm_extract: str
+    osm_clip_polygon: str
 
 
 @dataclass

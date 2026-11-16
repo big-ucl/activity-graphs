@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import polars as pl
+import shapely
 
 from activitygraphs.config import GTFSFeeds
 
@@ -108,6 +109,22 @@ OPTIONAL_COLUMNS = {
 }
 OPTIONAL_TABLES = {"calendar", "calendar_dates"}
 
+SUBSET_KEY_COLUMNS = {
+    "stop_id": "stop",
+    "parent_station": "stop",
+    "from_stop_id": "stop",
+    "to_stop_id": "stop",
+    "trip_id": "trip",
+    "from_trip_id": "trip",
+    "to_trip_id": "trip",
+    "route_id": "route",
+    "from_route_id": "route",
+    "to_route_id": "route",
+    "service_id": "service",
+    "shape_id": "shape",
+}
+"""Id columns of the GTFS tables by type of GTFS ``_id``. Used by ``write_feed_subset`` to filter out discarded items."""
+
 
 @dataclass(frozen=True)
 class GTFSTables:
@@ -189,6 +206,49 @@ def read_gtfs(gtfs_feeds: GTFSFeeds, gtfs_dir: Path) -> GTFSTables:
     )
 
 
+def write_feed_subsets(
+    gtfs_feeds: GTFSFeeds, gtfs_dir: Path, clip_polygon: shapely.Geometry, out_dir: Path
+) -> list[Path]:
+    """Write each feed as a "clipped" zipped GTFS feed: holding only the trips on the service date calling inside ``clip_polygon``.
+
+    This function discards trips that: 1) do not run on the service date or 2) do not call inside ``clip_polygon``.
+    All stops, routes, services, shapes, and calendar dates that are no longer mentioned in the remaining trips are
+    also discarded.
+
+    Remaining trips include all calls, including the calls outside ``clip_polygon``. If a stop is kept, the
+    corresponding `parent_stop` is also kept.
+
+    Args:
+        gtfs_feeds: The paths of the feeds within ``gtfs_dir`` and the service date.
+        gtfs_dir: Root directory of the GTFS feed paths.
+        clip_polygon: The area of the trips to keep, in longitude and latitude.
+        out_dir: Directory of the zipped feeds, one ``{feed name}.zip`` per feed.
+
+    Returns:
+        The path of each non-empty zipped feed, in the order of ``gtfs_feeds.feeds``.
+    """
+    gtfs = read_gtfs(gtfs_feeds, gtfs_dir)
+    subset_ids = _subset_ids(gtfs, clip_polygon)
+    service_date = gtfs.service_date.strftime("%Y%m%d")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    feed_paths = []
+    for feed_name, path in gtfs_feeds.feeds.items():
+        feed_prefix = f"{feed_name}:"
+        feed_ids = {}
+        for kind, ids in subset_ids.items():
+            feed_ids[kind] = ids.filter(ids.str.starts_with(feed_prefix)).str.strip_prefix(feed_prefix)
+
+        if feed_ids["trip"].is_empty():
+            continue
+
+        feed_path = out_dir / f"{feed_name}.zip"
+        _write_feed_subset(gtfs_dir / path, feed_ids, service_date, feed_path)
+        feed_paths.append(feed_path)
+
+    return feed_paths
+
+
 def _read_feed(feed_name: str, feed_path: Path) -> dict[str, pl.LazyFrame]:
     """Read the GTFS tables of one feed (directory or zip file) with typed columns and prefixed ids."""
     table_reader = _build_dir_reader(feed_path) if feed_path.is_dir() else _build_archive_reader(feed_path)
@@ -203,7 +263,7 @@ def _read_feed(feed_name: str, feed_path: Path) -> dict[str, pl.LazyFrame]:
             tables[table_name] = pl.LazyFrame(schema={"feed": pl.String(), **table_columns})
             continue
 
-        raw_table = pl.scan_csv(table_source, infer_schema=False).rename(lambda name: name.strip().lstrip("﻿"))
+        raw_table = pl.scan_csv(table_source, infer_schema=False).rename(lambda name: name.lstrip("\ufeff").strip())
         typed_table = _typed_table(raw_table, feed_name, table_name, table_columns)
 
         tables[table_name] = typed_table
@@ -231,6 +291,88 @@ def _build_dir_reader(path: Path) -> Callable[[str], Path | io.BytesIO | None]:
         return file_path if file_path.exists() else None
 
     return _reader
+
+
+def _list_feed_tables(path: Path) -> list[str]:
+    """Return the name of every table of a feed (directory or zip file), without the ``.txt`` extension."""
+    if path.is_dir():
+        return sorted(file.stem for file in path.glob("*.txt"))
+
+    with zipfile.ZipFile(path) as archive:
+        return sorted(Path(name).stem for name in archive.namelist() if name.endswith(".txt"))
+
+
+def _subset_ids(gtfs: GTFSTables, clip_polygon: shapely.Geometry) -> dict[str, pl.Series]:
+    """Return the prefixed ids kept by ``write_feed_subsets``, keyed by kind: ``stop``, ``trip``, ``route``, ``service``."""
+    stop_lon = gtfs.stops_df["stop_lon"].to_numpy()
+    stop_lat = gtfs.stops_df["stop_lat"].to_numpy()
+    inside_mask = shapely.contains_xy(clip_polygon, stop_lon, stop_lat)
+    inside_stops = gtfs.stops_df.filter(pl.Series(inside_mask)).select("stop_id")
+    inside_calls = gtfs.stop_times_df.join(inside_stops.lazy(), on="stop_id")
+
+    service_trips = gtfs.trips_on_service_date()
+    kept_trip_ids = service_trips.join(inside_calls, on="trip_id").select("trip_id").unique()
+    kept_trips = service_trips.join(kept_trip_ids, on="trip_id").collect()
+
+    called_stops = gtfs.stop_times_df.join(kept_trip_ids, on="trip_id").select("stop_id").unique().collect()
+    parent_stations = gtfs.stops_df.join(called_stops, on="stop_id").select(stop_id="parent_station").drop_nulls()
+    kept_stops = pl.concat([called_stops, parent_stations]).unique()
+
+    return {
+        "stop": kept_stops["stop_id"],
+        "trip": kept_trips["trip_id"],
+        "route": kept_trips["route_id"].unique(),
+        "service": kept_trips["service_id"].unique(),
+    }
+
+
+def _write_feed_subset(feed_path: Path, feed_ids: dict[str, pl.Series], service_date: str, out_path: Path) -> None:
+    """Write the rows of every table of one feed whose ids are in ``feed_ids`` to the zip file ``out_path``.
+
+    A table left with no row is not written. Bytes that are not valid UTF-8 are replaced. Fields beyond the header of
+    a table are dropped.
+    """
+    table_reader = _build_dir_reader(feed_path) if feed_path.is_dir() else _build_archive_reader(feed_path)
+    table_names = _list_feed_tables(feed_path)
+    ordered_names = sorted(table_names, key=lambda name: name != "trips")
+    subset_ids = dict(feed_ids)
+
+    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for table_name in ordered_names:
+            table_source = table_reader(table_name)
+            if table_source is None:
+                raise FileNotFoundError(f"{feed_path} has no {table_name} table")
+
+            raw_table = pl.scan_csv(table_source, infer_schema=False, encoding="utf8-lossy", truncate_ragged_lines=True)
+            raw_table = raw_table.rename(lambda name: name.lstrip("\ufeff").strip())  # Strip chars in column names
+
+            table_subset = _table_subset(raw_table, subset_ids)
+
+            if table_name == "calendar_dates":
+                table_subset = table_subset.filter(pl.col("date").str.strip_chars() == service_date)
+
+            subset_rows = table_subset.collect()
+            if table_name == "trips" and "shape_id" in subset_rows.columns:
+                subset_ids["shape"] = subset_rows["shape_id"].str.strip_chars().drop_nulls().unique()
+
+            if subset_rows.height > 0:
+                archive.writestr(f"{table_name}.txt", subset_rows.write_csv())
+
+
+def _table_subset(raw_table: pl.LazyFrame, subset_ids: dict[str, pl.Series]) -> pl.LazyFrame:
+    """Filter ``raw_table`` to keep only rows with 1) empty id columns or 2) an id in ``subset_ids``."""
+    table_cols = raw_table.collect_schema().names()
+
+    for col_name in table_cols:
+        kind = SUBSET_KEY_COLUMNS.get(col_name)
+        if kind not in subset_ids:
+            continue
+
+        stripped_col_expr = pl.col(col_name).str.strip_chars()
+        empty_expr = stripped_col_expr.is_null() | (stripped_col_expr == "")
+        raw_table = raw_table.filter(empty_expr | stripped_col_expr.is_in(subset_ids[kind].implode()))
+
+    return raw_table
 
 
 def _typed_table(

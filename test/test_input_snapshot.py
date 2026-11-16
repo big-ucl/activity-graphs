@@ -112,9 +112,13 @@ def build_graph(zones: gpd.GeoDataFrame) -> GraphTables:
     nodes = nodes_gdf.to_crs(CRS)
     # city2graph's edge order depends on the hash seed.
     contiguity_edges = contiguity_edges_gdf.sort_index().to_crs(CRS).rename_axis(EDGE_INDEX_NAMES)
-    rail_edges = build_rail_edges(zones["loc_id"].tolist())
+    loc_ids = zones["loc_id"].tolist()
+    rail_edges = build_rail_edges(loc_ids)
+    pt_travel_times = build_pt_travel_times(loc_ids)
 
-    return GraphTables(nodes=nodes, contiguity_edges=contiguity_edges, rail_edges=rail_edges)
+    return GraphTables(
+        nodes=nodes, contiguity_edges=contiguity_edges, rail_edges=rail_edges, pt_travel_times=pt_travel_times
+    )
 
 
 def build_rail_edges(loc_ids: list[str]) -> pd.DataFrame:
@@ -125,6 +129,16 @@ def build_rail_edges(loc_ids: list[str]) -> pd.DataFrame:
     pair_index = pd.MultiIndex.from_tuples(pairs, names=EDGE_INDEX_NAMES)
 
     return pd.DataFrame({"rail_time_s": [120.0, 300.0, 180.0], "rail_trips": [24, 24, 12]}, index=pair_index)
+
+
+def build_pt_travel_times(loc_ids: list[str]) -> pd.DataFrame:
+    """Return a public transport travel time for every ordered pair of zones, as ``build_pt_travel_times`` does."""
+    pairs = list(itertools.product(loc_ids, repeat=2))
+    pair_index = pd.MultiIndex.from_tuples(pairs, names=EDGE_INDEX_NAMES)
+    pt_time_min = np.linspace(0.0, 180.0, len(pairs))
+    pt_reachable = pt_time_min < 180.0
+
+    return pd.DataFrame({"pt_time_min": pt_time_min, "pt_reachable": pt_reachable}, index=pair_index)
 
 
 def build_users(loc_ids: list[str]) -> pl.DataFrame:
@@ -287,6 +301,7 @@ def test_the_graph_tables_read_back_as_saved(tmp_path):
     assert_geodataframe_equal(read_graph.nodes, graph.nodes)
     assert_geodataframe_equal(read_graph.contiguity_edges, graph.contiguity_edges)
     pd.testing.assert_frame_equal(read_graph.rail_edges, graph.rail_edges)
+    pd.testing.assert_frame_equal(read_graph.pt_travel_times, graph.pt_travel_times)
 
 
 def test_the_shared_graph_is_undirected(tmp_path):

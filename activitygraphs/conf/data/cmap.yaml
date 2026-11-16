@@ -23,6 +23,7 @@ inputs:
     census_tracts: tl_2020_17_tract.zip
 
   osm_extract: cmap-190101-clipped.osm.pbf
+  osm_clip_polygon: hulls/cmap-hull-10km.geojson
 
   gtfs:
     service_date: "2018-10-17"
