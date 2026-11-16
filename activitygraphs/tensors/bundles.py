@@ -16,8 +16,10 @@ class LocationFile(StrEnum):
 
     X = "x.pt"
     ACCESS = "access.pt"
-    EDGE_INDEX = "edge_index.pt"
-    EDGE_ATTR = "edge_attr.pt"
+    CONTIGUITY_EDGE_INDEX = "contiguity_edge_index.pt"
+    CONTIGUITY_EDGE_ATTR = "contiguity_edge_attr.pt"
+    RAIL_EDGE_INDEX = "rail_edge_index.pt"
+    RAIL_EDGE_ATTR = "rail_edge_attr.pt"
     DISTANCE_M = "distance_m.pt"
     NODE_IDS = "node_ids.parquet"
 
@@ -40,8 +42,10 @@ class LocationTensors:
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
         access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
-        edge_index: Edge list, ``[2, num_edges]``.
-        edge_attr: Edge features, ``[num_edges, num_edge_features]``.
+        contiguity_edge_index: Edge list, ``[2, num_edges]``.
+        contiguity_edge_attr: Edge features, ``[num_edges, num_edge_features]``.
+        rail_edge_index: Rail edges between zones, in both directions, ``[2, num_rail_edges]``.
+        rail_edge_attr: Rail edge features, ``[num_rail_edges, num_rail_edge_features]``.
         distance_m: Distance between the centroids of every pair of nodes in metres, ``[num_nodes, num_nodes]``.
             Row ``i`` holds the distances from node ``i`` to every node.
         node_ids: Survey ``loc_id`` of each node, one row per node.
@@ -49,8 +53,10 @@ class LocationTensors:
 
     x: torch.Tensor
     access: torch.Tensor
-    edge_index: torch.Tensor
-    edge_attr: torch.Tensor
+    contiguity_edge_index: torch.Tensor
+    contiguity_edge_attr: torch.Tensor
+    rail_edge_index: torch.Tensor
+    rail_edge_attr: torch.Tensor
     distance_m: torch.Tensor
     node_ids: pl.DataFrame
 
@@ -65,8 +71,10 @@ class LocationTensors:
         tensor_files = {
             LocationFile.X: self.x,
             LocationFile.ACCESS: self.access,
-            LocationFile.EDGE_INDEX: self.edge_index,
-            LocationFile.EDGE_ATTR: self.edge_attr,
+            LocationFile.CONTIGUITY_EDGE_INDEX: self.contiguity_edge_index,
+            LocationFile.CONTIGUITY_EDGE_ATTR: self.contiguity_edge_attr,
+            LocationFile.RAIL_EDGE_INDEX: self.rail_edge_index,
+            LocationFile.RAIL_EDGE_ATTR: self.rail_edge_attr,
             LocationFile.DISTANCE_M: self.distance_m,
         }
         for file, tensor in tensor_files.items():
@@ -80,8 +88,10 @@ class LocationTensors:
         return cls(
             x=torch.load(directory / LocationFile.X, weights_only=True),
             access=torch.load(directory / LocationFile.ACCESS, weights_only=True),
-            edge_index=torch.load(directory / LocationFile.EDGE_INDEX, weights_only=True),
-            edge_attr=torch.load(directory / LocationFile.EDGE_ATTR, weights_only=True),
+            contiguity_edge_index=torch.load(directory / LocationFile.CONTIGUITY_EDGE_INDEX, weights_only=True),
+            contiguity_edge_attr=torch.load(directory / LocationFile.CONTIGUITY_EDGE_ATTR, weights_only=True),
+            rail_edge_index=torch.load(directory / LocationFile.RAIL_EDGE_INDEX, weights_only=True),
+            rail_edge_attr=torch.load(directory / LocationFile.RAIL_EDGE_ATTR, weights_only=True),
             distance_m=torch.load(directory / LocationFile.DISTANCE_M, weights_only=True),
             node_ids=pl.read_parquet(directory / LocationFile.NODE_IDS),
         )
@@ -147,9 +157,9 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
     """Check that the bundles agree on the number of users and nodes, and that their widths match ``schema``.
 
     Raises:
-        ValueError: The tensors and ids disagree on the number of users or nodes, a group's tensors have a different
-            number of numeric or categorical columns than its schema, a home node is not a node of the graph, or a
-            feature tensor holds a NaN or infinite value.
+        ValueError: The tensors and ids disagree on the number of users, nodes or rail edges, a group's tensors
+            have a different number of numeric or categorical columns than its schema, a home node is not a node of
+            the graph, or a feature tensor holds a NaN or infinite value.
     """
     _require_equal_counts(
         "User",
@@ -173,11 +183,19 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
             "node_ids": locations.node_ids.height,
         },
     )
+    _require_equal_counts(
+        "Rail edge",
+        {
+            "rail_edge_index": locations.rail_edge_index.shape[1],
+            "rail_edge_attr": locations.rail_edge_attr.shape[0],
+        },
+    )
 
     numeric_and_categorical_widths = {
         "locations": (locations.x.shape[-1], 0),
         "access": (locations.access.shape[-1], 0),
-        "edges": (locations.edge_attr.shape[-1], 0),
+        "contiguity_edges": (locations.contiguity_edge_attr.shape[-1], 0),
+        "rail_edges": (locations.rail_edge_attr.shape[-1], 0),
         "user_attributes": (users.attributes.shape[-1], users.attributes_cat.shape[-1]),
         "distances": (1, 0),
         "targets": (1, 0),
@@ -202,7 +220,8 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
     _require_finite({
         "x": locations.x,
         "access": locations.access,
-        "edge_attr": locations.edge_attr,
+        "contiguity_edge_attr": locations.contiguity_edge_attr,
+        "rail_edge_attr": locations.rail_edge_attr,
         "distance_m": locations.distance_m,
         "attributes": users.attributes,
     })

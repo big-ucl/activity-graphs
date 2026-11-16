@@ -7,14 +7,16 @@ from typing import cast
 import city2graph as c2g
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import polars as pl
 import torch
 import torch_geometric as pyg
 
 from activitygraphs.base import Purpose
 from activitygraphs.config import Config, DataConfig
-from activitygraphs.graph import load_graph
+from activitygraphs.graph import GraphTables, load_graph
 from activitygraphs.graph.access import ACCESS_SCHEMA
+from activitygraphs.graph.rail import RAIL_EDGE_SCHEMA
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema, infer_schema
 from activitygraphs.surveys.base import SurveyData
 from activitygraphs.surveys.registry import load_survey
@@ -36,7 +38,7 @@ COLS_EXCLUDED_FROM_FEATURES = [
 ]
 
 USER_NODE_SCHEMA = TensorSchema("user_nodes", (ColumnSpec("is_home", ColumnKind.BINARY),))
-EDGE_SCHEMA = TensorSchema("edges", (ColumnSpec("weight", ColumnKind.COUNT),))
+CONTIGUITY_EDGE_SCHEMA = TensorSchema("contiguity_edges", (ColumnSpec("weight", ColumnKind.COUNT),))
 DISTANCE_SCHEMA = TensorSchema("distances", (ColumnSpec("home_distance", ColumnKind.COUNT),))
 TARGET_SCHEMA = TensorSchema("targets", (ColumnSpec("is_visited", ColumnKind.BINARY),))
 
@@ -124,6 +126,28 @@ def _build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
     return torch.from_numpy(distances)
 
 
+def _build_rail_edges(rail_edges: pd.DataFrame, node_ids: pl.DataFrame) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the rail edges as node indices in both directions, with their ``RAIL_EDGE_SCHEMA`` columns.
+
+    Args:
+        rail_edges: Rail edges between the zones, as returned by ``build_rail_edges``.
+        node_ids: Survey ``loc_id`` of each node, in node order.
+
+    Returns:
+        Tuple ``(rail_edge_index, rail_edge_attr)``: the edges, ``[2, 2 * num_edges]``, the second half reversing
+        the first, and their columns, ``[2 * num_edges, num_rail_edge_features]``.
+    """
+    node_index = pd.Series(np.arange(node_ids.height), index=node_ids["loc_id"].to_list())
+    source_ids = rail_edges.index.get_level_values("source")
+    target_ids = rail_edges.index.get_level_values("target")
+    source = node_index.loc[source_ids].to_numpy()
+    target = node_index.loc[target_ids].to_numpy()
+    edge_index = torch.from_numpy(np.stack([np.concatenate([source, target]), np.concatenate([target, source])]))
+    edge_values = torch.from_numpy(rail_edges[RAIL_EDGE_SCHEMA.names].to_numpy(dtype=np.float32))
+
+    return edge_index, edge_values.repeat(2, 1)
+
+
 def _add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, col_name: str):
     """Add an indicator column with name ``col_name`` to ``feature_df`` which is ``True`` if ``[loc_id, user_id]`` appears in ``indicator_df`` and ``False`` otherwise."""
     true_indicators = indicator_df.select("user_id", "loc_id", pl.lit(True).alias(col_name)).unique().lazy()
@@ -195,8 +219,12 @@ def _build_group_ids(survey: SurveyData) -> torch.Tensor:
 # =========================================
 
 
-def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gpd.GeoDataFrame) -> SurveyTensors:
+def build_tensors(survey: SurveyData, graph: GraphTables) -> SurveyTensors:
     """Convert the graph and the survey into tensor form.
+
+    Args:
+        survey: The survey.
+        graph: The nodes, the contiguity edges and the rail edges of the graph.
 
     Returns:
         Tuple ``(locations, users, schema)``: the tensors of the shared graph, the per-user tensors and the dataset
@@ -205,14 +233,15 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
     Raises:
         ValueError: The graph has no edge index, or the tensors fail ``check_tensors``.
     """
+    nodes_gdf = graph.nodes
     excluded_cols = [*COLS_EXCLUDED_FROM_FEATURES, *ACCESS_SCHEMA.names]
     node_feature_cols = [col for col in nodes_gdf.columns if col not in excluded_cols]
 
     pyg_graph = c2g.gdf_to_pyg(
         nodes_gdf,
-        edges_gdf,
+        graph.contiguity_edges,
         node_feature_cols=node_feature_cols,
-        edge_feature_cols=EDGE_SCHEMA.names,
+        edge_feature_cols=CONTIGUITY_EDGE_SCHEMA.names,
         keep_geom=False,
         device="cpu",
     )
@@ -220,7 +249,10 @@ def build_tensors(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, edges_gdf: gp
     access = _build_access(nodes_gdf)
     distance_m = _build_node_distances(nodes_gdf)
     node_ids = _build_node_ids(survey, nodes_gdf)
-    locations = _build_location_tensors(cast(pyg.data.Data, pyg_graph), access, distance_m, node_ids)
+    rail_edge_index, rail_edge_attr = _build_rail_edges(graph.rail_edges, node_ids)
+    locations = _build_location_tensors(
+        cast(pyg.data.Data, pyg_graph), access, rail_edge_index, rail_edge_attr, distance_m, node_ids
+    )
 
     attributes, attributes_cat = _build_user_attributes(survey)
     users = UserTensors(
@@ -293,7 +325,8 @@ def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_
     return DatasetSchema(
         locations=locations_schema,
         access=ACCESS_SCHEMA,
-        edges=EDGE_SCHEMA,
+        contiguity_edges=CONTIGUITY_EDGE_SCHEMA,
+        rail_edges=RAIL_EDGE_SCHEMA,
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=survey.demographics_schema,
         distances=DISTANCE_SCHEMA,
@@ -302,7 +335,12 @@ def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_
 
 
 def _build_location_tensors(
-    pyg_graph: pyg.data.Data, access: torch.Tensor, distance_m: torch.Tensor, node_ids: pl.DataFrame
+    pyg_graph: pyg.data.Data,
+    access: torch.Tensor,
+    rail_edge_index: torch.Tensor,
+    rail_edge_attr: torch.Tensor,
+    distance_m: torch.Tensor,
+    node_ids: pl.DataFrame,
 ) -> LocationTensors:
     """Return the location tensors of the PyG graph built by city2graph.
 
@@ -315,8 +353,10 @@ def _build_location_tensors(
     return LocationTensors(
         x=cast(torch.Tensor, pyg_graph.x),
         access=access,
-        edge_index=pyg_graph.edge_index,
-        edge_attr=cast(torch.Tensor, pyg_graph.edge_attr),
+        contiguity_edge_index=pyg_graph.edge_index,
+        contiguity_edge_attr=cast(torch.Tensor, pyg_graph.edge_attr),
+        rail_edge_index=rail_edge_index,
+        rail_edge_attr=rail_edge_attr,
         distance_m=distance_m,
         node_ids=node_ids,
     )
@@ -325,6 +365,6 @@ def _build_location_tensors(
 def _build_survey_tensors(cfg: DataConfig, project_root: Path) -> SurveyTensors:
     """Build the SurveyTensors from the (cached or rebuilt) ``SurveyData`` and survey Graph described by ``cfg``."""
     survey = load_survey(cfg, project_root).with_filter("zone")
-    nodes_gdf, edges_gdf = load_graph(survey, cfg, project_root)
+    graph = load_graph(survey, cfg, project_root)
 
-    return build_tensors(survey, nodes_gdf, edges_gdf)
+    return build_tensors(survey, graph)

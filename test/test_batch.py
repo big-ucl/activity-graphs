@@ -15,8 +15,8 @@ def make_path_locations():
     """Return the path ``0 - 1 - 2`` with one feature per node and per edge and two encoding columns per node."""
     locations = make_locations(
         x=torch.tensor([[1.0], [2.0], [3.0]]),
-        edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),
-        edge_attr=torch.tensor([[10.0], [11.0], [12.0], [13.0]]),
+        contiguity_edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),
+        contiguity_edge_attr=torch.tensor([[10.0], [11.0], [12.0], [13.0]]),
         random_walk_pe=torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]),
         distance_m=DISTANCE_M,
     )
@@ -86,8 +86,8 @@ def test_moving_the_locations_moves_every_tensor_and_keeps_the_node_ids():
     locations = make_path_locations().to(torch.device("meta"))
 
     assert locations.x.is_meta
-    assert locations.edge_index.is_meta
-    assert locations.edge_attr.is_meta
+    assert locations.contiguity_edge_index.is_meta
+    assert locations.contiguity_edge_attr.is_meta
     assert locations.random_walk_pe.is_meta
     assert locations.hop_distance.is_meta
     assert locations.distance_m.is_meta

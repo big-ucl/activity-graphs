@@ -17,34 +17,43 @@ def chain_edge_index(num_nodes: int) -> torch.Tensor:
 
 def make_locations(
     x: torch.Tensor,
-    edge_index: torch.Tensor,
-    edge_attr: torch.Tensor | None = None,
+    contiguity_edge_index: torch.Tensor,
+    contiguity_edge_attr: torch.Tensor | None = None,
     random_walk_pe: torch.Tensor | None = None,
     distance_m: torch.Tensor | None = None,
     access: torch.Tensor | None = None,
+    rail_edge_index: torch.Tensor | None = None,
 ) -> Locations:
-    """Return the locations over ``x`` and ``edge_index``, with the hop distances computed from the edges.
+    """Return the locations over ``x`` and ``contiguity_edge_index``, with the hop distances computed from the contiguity and rail edges.
 
-    A missing ``edge_attr``, ``random_walk_pe`` or ``access`` has no columns, and a missing ``distance_m`` puts every node at 0 m
-    from every node. The scaled ``distance`` equals ``distance_m``.
+    A missing ``contiguity_edge_attr``, ``random_walk_pe`` or ``access`` has no columns, and a missing ``distance_m`` puts every node at 0 m
+    from every node. A missing ``rail_edge_index`` has no edges, and the rail edges have no columns. The scaled
+    ``distance`` equals ``distance_m``.
     """
     num_nodes = x.shape[0]
-    if edge_attr is None:
-        edge_attr = torch.zeros(edge_index.shape[1], 0)
+    if contiguity_edge_attr is None:
+        contiguity_edge_attr = torch.zeros(contiguity_edge_index.shape[1], 0)
     if random_walk_pe is None:
         random_walk_pe = torch.zeros(num_nodes, 0)
     if distance_m is None:
         distance_m = torch.zeros(num_nodes, num_nodes)
     if access is None:
         access = torch.zeros(num_nodes, 0)
+    if rail_edge_index is None:
+        rail_edge_index = torch.zeros(2, 0, dtype=torch.long)
 
     return Locations(
         x=x,
         access=access,
-        edge_index=edge_index,
-        edge_attr=edge_attr,
+        contiguity_edge_index=contiguity_edge_index,
+        contiguity_edge_attr=contiguity_edge_attr,
+        rail_edge_index=rail_edge_index,
+        rail_edge_attr=torch.zeros(rail_edge_index.shape[1], 0),
         random_walk_pe=random_walk_pe,
-        hop_distance=_compute_hop_distance(edge_index, num_nodes),
+        hop_distance=_compute_hop_distance(contiguity_edge_index, num_nodes),
+        network_hop_distance=_compute_hop_distance(
+            torch.cat([contiguity_edge_index, rail_edge_index], dim=1), num_nodes
+        ),
         distance_m=distance_m,
         distance=distance_m,
         node_ids=pl.DataFrame({"loc_id": [f"z{node}" for node in range(num_nodes)]}),

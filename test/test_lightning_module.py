@@ -46,15 +46,18 @@ def chain_hop_distance(num_nodes: int = 8) -> torch.Tensor:
     return (idx[:, None] - idx[None, :]).abs().float()
 
 
-def chain_locations(num_nodes: int = 8) -> Locations:
-    """Return the chain graph ``0 - 1 - ... - (num_nodes - 1)``, with fixed random features, edge features and RWPE."""
+def chain_locations(num_nodes: int = 8, rail_edge_index: torch.Tensor | None = None) -> Locations:
+    """Return the chain graph ``0 - 1 - ... - (num_nodes - 1)``, with fixed random features, edge features and RWPE.
+
+    ``rail_edge_index`` adds rail edges, by default none.
+    """
     rng = torch.Generator().manual_seed(0)
     edge_index = chain_edge_index(num_nodes)
     x = torch.rand(num_nodes, NUM_LOCATION_FEATURES, generator=rng)
     edge_attr = torch.rand(edge_index.size(1), NUM_EDGE_FEATURES, generator=rng)
     random_walk_pe = torch.rand(num_nodes, NUM_RWPE_FEATURES, generator=rng)
 
-    return make_locations(x, edge_index, edge_attr, random_walk_pe)
+    return make_locations(x, edge_index, edge_attr, random_walk_pe, rail_edge_index=rail_edge_index)
 
 
 def make_batch(
@@ -720,7 +723,7 @@ def make_home_batch(
 
 def make_home_pe_module(num_nodes: int = 8, n_bins: int = HOME_PE_BINS) -> RankingModule:
     """A module with the home-anchored PE enabled; model width accounts for the extra ``n_bins`` columns."""
-    home_pe = HomeAnchoredPE(n_bins, HOME_PE_MAX_HOPS)
+    home_pe = HomeAnchoredPE(n_bins, HOME_PE_MAX_HOPS, network_hops=False)
     encoder = make_encoder(NUM_LOCATION_FEATURES, NUM_DEMO_FEATURES, home_pe)
     model = NodeMLP(num_layers=2, in_channels=encoder.out_dim, hidden_channels=8, out_channels=1)
     return RankingModule(
@@ -737,28 +740,34 @@ class TestHomePositionalEncoding:
     def test_shape_and_home_is_peak(self):
         """Encoding is [num_users, num_nodes, n_bins]; the home node (hop 0) peaks in the first RBF bin at value 1."""
         locations, batch, _ = make_home_batch()
-        pe = HomeAnchoredPE(8, HOME_PE_MAX_HOPS)(locations, batch)
+        pe = HomeAnchoredPE(8, HOME_PE_MAX_HOPS, network_hops=False)(locations, batch)
 
         assert pe.shape == (batch.num_users, batch.num_nodes, 8)
         home = pe[batch.is_home]
         assert torch.all(home.argmax(dim=1) == 0)
         torch.testing.assert_close(home.amax(dim=1), torch.ones(batch.num_users))
 
-    def test_matches_rbf_formula(self):
-        """Explicit RBF over hop-to-home reproduces the encoding exactly (single user, home = node 0)."""
-        locations, batch, hop_distance = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
-        n_bins = 8
-        pe = HomeAnchoredPE(n_bins, HOME_PE_MAX_HOPS)(locations, batch)
+    def test_every_hop_count_up_to_max_hops_is_near_one_centre(self):
+        """Hop counts between two centres still get a feature near 1, so no count up to ``max_hops`` encodes as zero."""
+        locations, batch, _ = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
+        pe = HomeAnchoredPE(4, 6, network_hops=False)(locations, batch)[0]
 
-        hops = hop_distance[0].clamp(max=40)  # row 0 == distances from the home node
-        centers = torch.linspace(0, 40, n_bins)
-        expected = torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)
-        torch.testing.assert_close(pe[0], expected)
+        assert torch.all(pe[:7].amax(dim=1) > 0.8)
+
+    def test_nearer_hop_counts_get_nearer_encodings(self):
+        locations, batch, _ = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
+        pe = HomeAnchoredPE(4, 6, network_hops=False)(locations, batch)[0]
+
+        assert torch.dist(pe[2], pe[3]) < torch.dist(pe[2], pe[5])
+
+    def test_fewer_than_two_bins_raise(self):
+        with pytest.raises(ValueError):
+            HomeAnchoredPE(1, HOME_PE_MAX_HOPS, network_hops=False)
 
     def test_hops_are_capped_at_max_hops(self):
         """Every node at or beyond ``max_hops`` gets the encoding of ``max_hops`` itself."""
         locations, batch, _ = make_home_batch(num_graphs=1, num_nodes=8, home_nodes=[0])
-        pe = HomeAnchoredPE(4, 3)(locations, batch)[0]
+        pe = HomeAnchoredPE(4, 3, network_hops=False)(locations, batch)[0]
 
         torch.testing.assert_close(pe[3:], pe[3].expand(5, 4))
         assert not torch.allclose(pe[2], pe[3])
@@ -766,14 +775,31 @@ class TestHomePositionalEncoding:
     def test_varies_per_user(self):
         """Different home anchors give different encodings for the same node positions (the whole point)."""
         locations, batch, _ = make_home_batch(home_nodes=[0, 7])
-        pe = HomeAnchoredPE(8, HOME_PE_MAX_HOPS)(locations, batch)
+        pe = HomeAnchoredPE(8, HOME_PE_MAX_HOPS, network_hops=False)(locations, batch)
 
         assert not torch.allclose(pe[0], pe[1])
+
+    def test_network_hops_count_a_rail_edge_as_one_hop(self):
+        locations = chain_locations(rail_edge_index=torch.tensor([[0, 7], [7, 0]]))
+        rows = UserRows(
+            user_idx=torch.tensor([0]),
+            home_node=torch.tensor([0]),
+            visited=torch.zeros(1, 8),
+            attributes=torch.zeros(1, NUM_DEMO_FEATURES),
+            attributes_cat=torch.zeros(1, 0, dtype=torch.long),
+        )
+        batch = UserBatch.join(rows, locations)
+        edge_pe = HomeAnchoredPE(8, HOME_PE_MAX_HOPS, network_hops=False)(locations, batch)[0]
+        network_pe = HomeAnchoredPE(8, HOME_PE_MAX_HOPS, network_hops=True)(locations, batch)[0]
+
+        torch.testing.assert_close(network_pe[7], edge_pe[1])
+        torch.testing.assert_close(network_pe[:4], edge_pe[:4])
+        assert not torch.allclose(network_pe[7], edge_pe[7])
 
     def test_the_encoder_appends_bins_columns(self):
         """The encoder widens by exactly ``bins`` when the home PE is a source, and ``out_dim`` follows."""
         locations, batch, _ = make_home_batch()
-        home_pe = HomeAnchoredPE(HOME_PE_BINS, HOME_PE_MAX_HOPS)
+        home_pe = HomeAnchoredPE(HOME_PE_BINS, HOME_PE_MAX_HOPS, network_hops=False)
         base = make_default_encoder()
         with_pe = make_encoder(NUM_LOCATION_FEATURES, NUM_DEMO_FEATURES, home_pe)
 

@@ -42,7 +42,9 @@ class UserBatch:
         is_home: One-hot indicators of whether each node is the user's home node, bool, ``[num_users, num_nodes]``.
         home_distance: Distance from the user's home to each node, as fed to the model, ``[num_users, num_nodes]``.
         home_distance_m: Distance in metres from the user's home to each node, ``[num_users, num_nodes]``.
-        home_hops: Hop distance from the user's home to each node, ``[num_users, num_nodes]``.
+        home_hops: Hop distance from the user's home to each node over the contiguity edges, ``[num_users, num_nodes]``.
+        home_network_hops: Hop distance from the user's home to each node over the contiguity and rail edges,
+            ``[num_users, num_nodes]``.
         attributes: Numeric user attributes, ``[num_users, num_numeric_attributes]``.
         attributes_cat: Codes of the categorical user attributes, int64, ``[num_users, num_categorical_attributes]``.
     """
@@ -54,6 +56,7 @@ class UserBatch:
     home_distance: Tensor
     home_distance_m: Tensor
     home_hops: Tensor
+    home_network_hops: Tensor
     attributes: Tensor
     attributes_cat: Tensor
 
@@ -77,6 +80,7 @@ class UserBatch:
             home_distance=home_distance,
             home_distance_m=locations.distance_m[home_node],
             home_hops=locations.hop_distance[home_node],
+            home_network_hops=locations.network_hop_distance[home_node],
             attributes=rows.attributes,
             attributes_cat=rows.attributes_cat,
         )
@@ -124,11 +128,11 @@ class GraphBatch:
 
         users = torch.arange(num_users, device=x.device)
         offsets = users * num_nodes
-        edge_index = (locations.edge_index.unsqueeze(1) + offsets.view(1, -1, 1)).reshape(2, -1)
+        edge_index = (locations.contiguity_edge_index.unsqueeze(1) + offsets.view(1, -1, 1)).reshape(2, -1)
 
         return cls(
             x=x.reshape(-1, num_features),
             edge_index=edge_index,
-            edge_attr=locations.edge_attr.repeat(num_users, 1),
+            edge_attr=locations.contiguity_edge_attr.repeat(num_users, 1),
             batch=users.repeat_interleave(num_nodes),
         )

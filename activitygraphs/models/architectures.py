@@ -153,7 +153,7 @@ def _encoded_scorer(
         sizes = NetworkSizes(
             in_channels=encoder.out_dim,
             out_channels=schema.targets.width,
-            edge_dim=schema.edges.width,
+            edge_dim=schema.contiguity_edges.width,
         )
         network = build_network_fn(config, sizes)
 
@@ -194,7 +194,8 @@ def _build_two_tower(
     Features inputs are given to the model components as follows:
     - Node tower: accessibility features (``use_access``) and random-walk PE (``use_rwpe``).
     - User tower: user attributes (``use_demographics``)
-    - Pairwise block: home-anchored PE (``use_home_pe``) and distance from home (``use_dist``).
+    - Pairwise block: home-anchored PE (``use_home_pe``, over the network hops with ``use_network_hops``) and
+      distance from home (``use_dist``).
 
     Raises:
         ValueError: If ``config.bias`` is not one of ``TWO_TOWER_BIASES``.
@@ -214,7 +215,7 @@ def _build_two_tower(
     node_sizes = NetworkSizes(
         in_channels=node_encoder.out_dim,
         out_channels=embedding_dim,
-        edge_dim=schema.edges.width,
+        edge_dim=schema.contiguity_edges.width,
     )
     node_network = _build_gat(two_tower, node_sizes)
     node_tower = NodeTower(node_encoder, node_network)
@@ -228,7 +229,7 @@ def _build_two_tower(
     if two_tower.pair_location_features:
         pair_sources.append(ProjectedLocationFeatures(schema.locations, embedding_dim))
     if features.use_home_pe:
-        pair_sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
+        pair_sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops, features.use_network_hops))
     if features.use_dist:
         pair_sources.append(HomeDistance(schema.distances))
 

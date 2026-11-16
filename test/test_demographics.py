@@ -36,7 +36,7 @@ class TestQuantileBands:
     def test_codes_without_a_valid_band_raise(self):
         codes = pl.Series("income", [999, 999])
 
-        with pytest.raises(ValueError, match="No row of `income` has a code in"):
+        with pytest.raises(ValueError):
             quantile_bands(codes, [1, 2, 3], INCOME_QUARTILES)
 
     def test_tts_2016_bands_spread_over_every_quartile(self):

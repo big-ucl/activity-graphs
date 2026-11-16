@@ -123,7 +123,7 @@ def read_dataset_run(data: str) -> DatasetRun:
     utm_crs = nodes.estimate_utm_crs()
     centroids = nodes.to_crs(utm_crs).geometry.get_coordinates().to_numpy()
     polygons = nodes.set_geometry("original_geometry").to_crs(utm_crs).geometry.reset_index(drop=True)
-    edges = gpd.read_parquet(graph_path / "edges.parquet")
+    edges = gpd.read_parquet(graph_path / "contiguity_edges.parquet")
     hops = _contiguity_hops(nodes.index.to_list(), edges)
 
     run_path = _run_path(cfg, data)

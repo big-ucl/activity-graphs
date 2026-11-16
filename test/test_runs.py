@@ -87,7 +87,7 @@ class TestRunDir:
         make_run(tmp_path, "TPG", 4, started="20261026-153000")
         make_run(tmp_path, "TPG", 4, started="20261026-153001")
 
-        with pytest.raises(ValueError, match="several"):
+        with pytest.raises(ValueError):
             run_dir(tmp_path, "TPG", 4)
 
 

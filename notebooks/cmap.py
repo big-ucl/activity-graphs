@@ -47,7 +47,8 @@ def _(cfg, project_root):
     from activitygraphs.surveys.registry import load_survey
 
     cmap_survey = load_survey(cfg.data, project_root).with_filter("zone")
-    nodes_gdf, edges_gdf = load_graph(cmap_survey, cfg.data, project_root)
+    _graph = load_graph(cmap_survey, cfg.data, project_root)
+    nodes_gdf, edges_gdf = _graph.nodes, _graph.contiguity_edges
     return edges_gdf, nodes_gdf
 
 

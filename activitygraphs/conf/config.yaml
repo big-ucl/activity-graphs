@@ -63,8 +63,8 @@ train:
     patience: 12
   # Home-anchored positional encoding: an RBF expansion of the hop distance to home, capped at `max_hops`.
   home_pe:
-    bins: 8
-    max_hops: 40
+    bins: 11
+    max_hops: 20
   # Number of probability bins of the calibration error.
   calibration_bins: 15
   # Enable PyTorch model compilation (Dynamo).

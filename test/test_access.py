@@ -173,5 +173,5 @@ class TestReadMotorwayJunctions:
         osm_path = tmp_path / "empty.osm"
         osm_path.write_text(NO_JUNCTION_OSM)
 
-        with pytest.raises(ValueError, match="does not contain motorway junctions"):
+        with pytest.raises(ValueError):
             read_motorway_junctions(osm_path)

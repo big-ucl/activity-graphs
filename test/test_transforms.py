@@ -14,7 +14,7 @@ from activitygraphs.datasets.transforms import (
     TransformPolicy,
 )
 from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
-from activitygraphs.tensors.build import DISTANCE_SCHEMA, EDGE_SCHEMA, USER_NODE_SCHEMA
+from activitygraphs.tensors.build import CONTIGUITY_EDGE_SCHEMA, DISTANCE_SCHEMA, USER_NODE_SCHEMA
 
 CONTINUOUS = ColumnKind.CONTINUOUS
 COUNT = ColumnKind.COUNT
@@ -121,7 +121,7 @@ class TestTransformPolicy:
 
         assert TRANSFORM_POLICY.column_transforms(schema) == (PASSTHROUGH, ZSCORE)
 
-    @pytest.mark.parametrize("schema", [DISTANCE_SCHEMA, EDGE_SCHEMA])
+    @pytest.mark.parametrize("schema", [DISTANCE_SCHEMA, CONTIGUITY_EDGE_SCHEMA])
     def test_distances_and_edge_weights_are_log1p_then_zscored(self, schema):
         assert TRANSFORM_POLICY.column_transforms(schema) == (LOG1P_ZSCORE,)
 
@@ -160,7 +160,7 @@ class TestFeatureTransforms:
 
     def test_is_stale_once_the_policy_changes(self, monkeypatch):
         fitted, _ = self.make({"n_users": 3})
-        policy = TransformPolicy(TRANSFORM_POLICY.kinds, group_overrides={"edges": {COUNT: ZSCORE}})
+        policy = TransformPolicy(TRANSFORM_POLICY.kinds, group_overrides={"contiguity_edges": {COUNT: ZSCORE}})
         monkeypatch.setattr(transforms_module, "TRANSFORM_POLICY", policy)
 
         assert not fitted.is_current({"n_users": 3})

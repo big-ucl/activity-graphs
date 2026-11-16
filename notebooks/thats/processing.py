@@ -68,9 +68,10 @@ def _(
     survey = THATSSurvey.load(cfg.data, project_root).with_filter("zone")
     tables = read_tables(cfg.data, project_root)
 
-    nodes_gdf, edges_gdf = load_graph(survey, cfg.data, project_root)
+    _graph = load_graph(survey, cfg.data, project_root)
+    nodes_gdf, edges_gdf = _graph.nodes, _graph.contiguity_edges
 
-    survey_tensors = build_tensors(survey, nodes_gdf, edges_gdf)
+    survey_tensors = build_tensors(survey, _graph)
 
     dataset_path = tensors_path(cfg.data, project_root)
 

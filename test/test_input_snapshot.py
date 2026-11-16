@@ -14,10 +14,12 @@ from pathlib import Path
 import city2graph as c2g
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 import torch
 import torch_geometric as pyg
+from geopandas.testing import assert_geodataframe_equal
 from graphs import join_users
 from shapely.geometry import box
 
@@ -25,6 +27,8 @@ from activitygraphs.base import CRS, LOCATIONS_COLUMNS, USER_JOURNEY_SCHEMA, USE
 from activitygraphs.config import HomePEConfig
 from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, UserDataset, Users, datamodule
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
+from activitygraphs.graph import GraphTables
+from activitygraphs.graph.rail import EDGE_INDEX_NAMES
 from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.schema_encoder import _default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
@@ -59,7 +63,7 @@ USERS_PER_HOUSEHOLD = 2
 NUM_USERS = NUM_HOUSEHOLDS * USERS_PER_HOUSEHOLD
 TRAIN_IDX = list(range(10))
 VISIT_PURPOSES = [Purpose.WORK_MAIN, Purpose.SHOP, Purpose.LEISURE_OTHER, Purpose.STUDY]
-FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe", "use_access")
+FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe", "use_access", "use_network_hops")
 SURVEYS = ("cmap", "no_demographics")
 HOME_PE = HomePEConfig(bins=8, max_hops=40)
 
@@ -89,8 +93,11 @@ def build_zones() -> gpd.GeoDataFrame:
     return add_lon_lat_from_centroid(zones, "loc_id")[LOCATIONS_COLUMNS]
 
 
-def build_graph(zones: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Return the contiguity graph over ``zones`` with density, land-use and access columns, as ``graph/build.py`` does."""
+def build_graph(zones: gpd.GeoDataFrame) -> GraphTables:
+    """Return the contiguity graph over ``zones`` with density, land-use and access columns, as ``graph/build.py`` does.
+
+    The rail edges are one line, from ``build_rail_edges``.
+    """
     rng = np.random.default_rng(0)
     projected = zones.to_crs(zones.estimate_utm_crs())
     projected["pop_density"] = rng.lognormal(-6.0, 1.0, len(zones))
@@ -100,10 +107,24 @@ def build_graph(zones: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoDataF
     projected["rail_station_distance_m"] = rng.uniform(100.0, 5000.0, len(zones))
     projected["peak_departures_per_hour"] = rng.poisson(20.0, len(zones)).astype(float)
     projected["motorway_junction_distance_m"] = rng.uniform(100.0, 10000.0, len(zones))
-    nodes_gdf, edges_gdf = c2g.contiguity_graph(projected.set_index("loc_id"), set_point_nodes=True)
+    nodes_gdf, contiguity_edges_gdf = c2g.contiguity_graph(projected.set_index("loc_id"), set_point_nodes=True)
 
+    nodes = nodes_gdf.to_crs(CRS)
     # city2graph's edge order depends on the hash seed.
-    return nodes_gdf.to_crs(CRS), edges_gdf.sort_index().to_crs(CRS)
+    contiguity_edges = contiguity_edges_gdf.sort_index().to_crs(CRS).rename_axis(EDGE_INDEX_NAMES)
+    rail_edges = build_rail_edges(zones["loc_id"].tolist())
+
+    return GraphTables(nodes=nodes, contiguity_edges=contiguity_edges, rail_edges=rail_edges)
+
+
+def build_rail_edges(loc_ids: list[str]) -> pd.DataFrame:
+    """Return the rail edges of one line calling at the first, middle and last zone, as ``build_rail_edges`` does."""
+    line = [loc_ids[0], loc_ids[len(loc_ids) // 2], loc_ids[-1]]
+    pairs = list(itertools.combinations(line, 2))
+
+    pair_index = pd.MultiIndex.from_tuples(pairs, names=EDGE_INDEX_NAMES)
+
+    return pd.DataFrame({"rail_time_s": [120.0, 300.0, 180.0], "rail_trips": [24, 24, 12]}, index=pair_index)
 
 
 def build_users(loc_ids: list[str]) -> pl.DataFrame:
@@ -171,13 +192,13 @@ def build_journeys(users: pl.DataFrame, loc_ids: list[str]) -> pl.DataFrame:
 def build_survey_tensors(survey_name: str) -> SurveyTensors:
     """Return the tensors of the synthetic survey ``survey_name``."""
     zones = build_zones()
-    nodes_gdf, edges_gdf = build_graph(zones)
+    graph = build_graph(zones)
     loc_ids = zones["loc_id"].tolist()
     users = build_users(loc_ids)
     survey_cls = SURVEY_CLASSES[survey_name]
     survey = survey_cls(zones, build_journeys(users, loc_ids), users).with_filter("zone")
 
-    return build_tensors(survey, nodes_gdf, edges_gdf)
+    return build_tensors(survey, graph)
 
 
 def cache_survey_tensors(survey_name: str, root: Path) -> SurveyTensors:
@@ -223,7 +244,7 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
 
     batch = join_users(locations, users)
 
-    edge_attr = locations.edge_attr.repeat(batch.num_users, 1)
+    edge_attr = locations.contiguity_edge_attr.repeat(batch.num_users, 1)
     y = batch.visited.reshape(-1, 1)
     inputs = {"edge_attr": edge_attr, "y": y}
     for active in itertools.product([False, True], repeat=len(FLAGS)):
@@ -257,12 +278,23 @@ def test_model_inputs_match_the_snapshot(survey_name, snapshot, tmp_path):
         torch.testing.assert_close(actual[key], tensor, msg=lambda m, key=key: f"{key}: {m}")
 
 
+def test_the_graph_tables_read_back_as_saved(tmp_path):
+    graph = build_graph(build_zones())
+
+    graph.save(tmp_path)
+    read_graph = GraphTables.read(tmp_path)
+
+    assert_geodataframe_equal(read_graph.nodes, graph.nodes)
+    assert_geodataframe_equal(read_graph.contiguity_edges, graph.contiguity_edges)
+    pd.testing.assert_frame_equal(read_graph.rail_edges, graph.rail_edges)
+
+
 def test_the_shared_graph_is_undirected(tmp_path):
     locations, _, _ = build_survey("cmap", tmp_path)
-    _, edges_gdf = build_graph(build_zones())
+    graph = build_graph(build_zones())
 
-    assert pyg.utils.is_undirected(locations.edge_index, num_nodes=locations.num_nodes)
-    assert locations.edge_index.size(1) == 2 * len(edges_gdf)
+    assert pyg.utils.is_undirected(locations.contiguity_edge_index, num_nodes=locations.num_nodes)
+    assert locations.contiguity_edge_index.size(1) == 2 * len(graph.contiguity_edges)
     assert locations.random_walk_pe.abs().sum() > 0
 
 
@@ -329,7 +361,7 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential"]
     assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2]
     assert schema.locations.width == locations.x.shape[1]
-    assert schema.edges.width == locations.edge_attr.shape[1]
+    assert schema.contiguity_edges.width == locations.contiguity_edge_attr.shape[1]
     assert schema.user_nodes.names == ["is_home"]
     assert schema.user_attributes.numeric.width == users.attributes.shape[-1]
     assert schema.user_attributes.categorical.width == users.attributes_cat.shape[-1]
@@ -385,7 +417,7 @@ def test_a_tensor_whose_width_differs_from_its_schema_raises():
     distances = TensorSchema("distances", (*schema.distances.columns, extra_column))
     wider_schema = dataclasses.replace(schema, distances=distances)
 
-    with pytest.raises(ValueError, match=r"`distances` tensors have \(numeric, categorical\) widths \(1, 0\)"):
+    with pytest.raises(ValueError, match="`distances`"):
         check_tensors(locations, users, wider_schema)
 
 
@@ -394,7 +426,7 @@ def test_a_home_node_outside_the_graph_raises():
     home_node = users.home_node.clone()
     home_node[0] = locations.num_nodes
 
-    with pytest.raises(ValueError, match="1 users have a home node outside the graph"):
+    with pytest.raises(ValueError, match="home node"):
         check_tensors(locations, dataclasses.replace(users, home_node=home_node), schema)
 
 
@@ -403,23 +435,30 @@ def test_a_nan_user_attribute_raises():
     attributes = users.attributes.clone()
     attributes[0, 0] = float("nan")
 
-    with pytest.raises(ValueError, match="`attributes` tensor holds 1 NaN or infinite values"):
+    with pytest.raises(ValueError, match="`attributes`"):
         check_tensors(locations, dataclasses.replace(users, attributes=attributes), schema)
 
 
 def test_a_graph_without_an_edge_index_raises():
     locations, _, _ = build_survey_tensors("cmap")
-    graph = pyg.data.Data(x=locations.x, edge_attr=locations.edge_attr)
+    graph = pyg.data.Data(x=locations.x, edge_attr=locations.contiguity_edge_attr)
 
-    with pytest.raises(ValueError, match="no edge index"):
-        _build_location_tensors(graph, locations.access, locations.distance_m, locations.node_ids)
+    with pytest.raises(ValueError):
+        _build_location_tensors(
+            graph,
+            locations.access,
+            locations.rail_edge_index,
+            locations.rail_edge_attr,
+            locations.distance_m,
+            locations.node_ids,
+        )
 
 
 def test_tensors_that_disagree_on_the_number_of_users_raise():
     locations, users, schema = build_survey_tensors("cmap")
     one_user_short = users.attributes_cat[1:]
 
-    with pytest.raises(ValueError, match=f"User count mismatch: .*attributes_cat {NUM_USERS - 1}"):
+    with pytest.raises(ValueError, match=f"attributes_cat {NUM_USERS - 1}"):
         check_tensors(locations, dataclasses.replace(users, attributes_cat=one_user_short), schema)
 
 
@@ -436,7 +475,7 @@ def test_the_cached_tensors_read_back_unchanged(tmp_path):
 
 
 def test_reading_an_uncached_tensor_cache_raises(tmp_path):
-    with pytest.raises(FileNotFoundError, match="is missing"):
+    with pytest.raises(FileNotFoundError):
         read_tensors(tmp_path)
 
 

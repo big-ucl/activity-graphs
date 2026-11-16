@@ -24,6 +24,7 @@ class InputFeatures:
         use_demographics: Concatenate the user attributes onto each node's features.
         use_rwpe: Append the random-walk positional encoding to each node's features.
         use_access: Append the accessibility features of each node to its features.
+        use_network_hops: Instead of counting using contiguity edges in ``home_pe``, use all edge types (contiguity, rail) .
     """
 
     use_home_pe: bool = True
@@ -31,6 +32,7 @@ class InputFeatures:
     use_demographics: bool = True
     use_rwpe: bool = True
     use_access: bool = True
+    use_network_hops: bool = True
 
     @property
     def departures(self) -> list[str]:
@@ -164,22 +166,34 @@ class HomeAnchoredPE(FeatureSource):
     """Extracts the home-anchored positional encoding: the RBF expansion of each node's hop distance to the user's home.
 
     Args:
-        bins: Number of RBF centres, spread evenly over ``[0, max_hops]``. It is also ``out_dim``.
+        bins: Number of RBF centres, at least 2, spread evenly over ``[0, max_hops]``. It is also ``out_dim``. The
+            width of each RBF is the spacing between two centres.
         max_hops: Hop distance at which the encoding is capped, and the position of the last centre.
+        network_hops: Read the hop distance over the contiguity and rail edges, ``batch.home_network_hops``, instead of
+            only the contiguity edges, ``batch.home_hops``.
+
+    Raises:
+        ValueError: ``bins`` is below 2.
     """
 
-    def __init__(self, bins: int, max_hops: int):
+    def __init__(self, bins: int, max_hops: int, network_hops: bool):
         super().__init__()
+        if bins < 2:
+            raise ValueError(f"The home-anchored PE needs at least 2 bins, got {bins}.")
+
         self.bins = bins
         self.max_hops = max_hops
+        self.network_hops = network_hops
         self.out_dim = bins
 
     def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
         """Return the home-anchored encoding of each node for every user, ``[num_users, num_nodes, bins]``."""
-        hops = batch.home_hops.clamp(max=self.max_hops)
+        home_hops = batch.home_network_hops if self.network_hops else batch.home_hops
+        hops = home_hops.clamp(max=self.max_hops)
         centers = torch.linspace(0, self.max_hops, self.bins, device=hops.device)
+        width = self.max_hops / (self.bins - 1)
 
-        return torch.exp(-((hops.unsqueeze(-1) - centers) ** 2) / 2.0)
+        return torch.exp(-(((hops.unsqueeze(-1) - centers) / width) ** 2) / 2.0)
 
 
 class Demographics(FeatureSource):
@@ -257,7 +271,7 @@ def build_feature_encoder(
     The column order goes:
       1. node features (location and accessibility features and random-walk PE), as in ``build_node_feature_encoder``,
       2. per-user node features,
-      3. home-anchored PE,
+      3. home-anchored PE, over the network hops when ``features.use_network_hops`` is set,
       4. demographics, and
       5. distance from home.
 
@@ -273,7 +287,7 @@ def build_feature_encoder(
     ]
 
     if features.use_home_pe:
-        sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops))
+        sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops, features.use_network_hops))
     if features.use_demographics:
         sources.append(Demographics(schema.user_attributes))
     if features.use_dist:

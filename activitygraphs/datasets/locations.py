@@ -24,11 +24,15 @@ class Locations:
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
         access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
-        edge_index: Edge list, ``[2, num_edges]``.
-        edge_attr: Edge features, ``[num_edges, num_edge_features]``.
+        contiguity_edge_index: Edge list, ``[2, num_edges]``.
+        contiguity_edge_attr: Edge features, ``[num_edges, num_edge_features]``.
+        rail_edge_index: Rail edges between zones, in both directions, ``[2, num_rail_edges]``.
+        rail_edge_attr: Rail edge features, ``[num_rail_edges, num_rail_edge_features]``.
         random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, num_rwpe_features]``.
-        hop_distance: Graph-hop distance between every pair of nodes, ``inf`` for unreachable pairs,
+        hop_distance: Graph-hop distance between every pair of nodes over the contiguity edges, ``inf`` for unreachable pairs,
             ``[num_nodes, num_nodes]``.
+        network_hop_distance: Graph-hop distance between every pair of nodes over the contiguity and rail edges,
+            ``inf`` for unreachable pairs, ``[num_nodes, num_nodes]``.
         distance_m: Distance between the centroids of every pair of nodes in metres, never scaled,
             ``[num_nodes, num_nodes]``. Row ``i`` holds the distances from node ``i`` to every node.
         distance: Scaled and transformed ``distance_m`, used as a model feature, ``[num_nodes, num_nodes]``.
@@ -37,10 +41,13 @@ class Locations:
 
     x: torch.Tensor
     access: torch.Tensor
-    edge_index: torch.Tensor
-    edge_attr: torch.Tensor
+    contiguity_edge_index: torch.Tensor
+    contiguity_edge_attr: torch.Tensor
+    rail_edge_index: torch.Tensor
+    rail_edge_attr: torch.Tensor
     random_walk_pe: torch.Tensor
     hop_distance: torch.Tensor
+    network_hop_distance: torch.Tensor
     distance_m: torch.Tensor
     distance: torch.Tensor
     node_ids: pl.DataFrame
@@ -53,26 +60,38 @@ class Locations:
             tensors: The location tensors.
             transforms: The transforms fitted on the training split. ``None`` leaves the features unscaled.
         """
-        graph = pyg.data.Data(edge_index=tensors.edge_index, num_nodes=tensors.num_nodes)
+        graph = pyg.data.Data(edge_index=tensors.contiguity_edge_index, num_nodes=tensors.num_nodes)
         random_walk_pe = T.AddRandomWalkPE(walk_length=RWPE_WALK_LENGTH)(graph).random_walk_pe
-        hop_distance = _compute_hop_distance(tensors.edge_index, tensors.num_nodes)
+        hop_distance = _compute_hop_distance(tensors.contiguity_edge_index, tensors.num_nodes)
+        network_edge_index = torch.cat([tensors.contiguity_edge_index, tensors.rail_edge_index], dim=1)
+        network_hop_distance = _compute_hop_distance(network_edge_index, tensors.num_nodes)
 
         if transforms is None:
-            x, access, edge_attr, distance = tensors.x, tensors.access, tensors.edge_attr, tensors.distance_m
+            x, access, contiguity_edge_attr, distance = (
+                tensors.x,
+                tensors.access,
+                tensors.contiguity_edge_attr,
+                tensors.distance_m,
+            )
+            rail_edge_attr = tensors.rail_edge_attr
         else:
             distance_m = tensors.distance_m.unsqueeze(-1)
             x = transforms.groups["locations"].apply(tensors.x)
             access = transforms.groups["access"].apply(tensors.access)
-            edge_attr = transforms.groups["edges"].apply(tensors.edge_attr)
+            contiguity_edge_attr = transforms.groups["contiguity_edges"].apply(tensors.contiguity_edge_attr)
+            rail_edge_attr = transforms.groups["rail_edges"].apply(tensors.rail_edge_attr)
             distance = transforms.groups["distances"].apply(distance_m).squeeze(-1)
 
         return cls(
             x=x,
             access=access,
-            edge_index=tensors.edge_index,
-            edge_attr=edge_attr,
+            contiguity_edge_index=tensors.contiguity_edge_index,
+            contiguity_edge_attr=contiguity_edge_attr,
+            rail_edge_index=tensors.rail_edge_index,
+            rail_edge_attr=rail_edge_attr,
             random_walk_pe=random_walk_pe,
             hop_distance=hop_distance,
+            network_hop_distance=network_hop_distance,
             distance_m=tensors.distance_m,
             distance=distance,
             node_ids=tensors.node_ids,
@@ -100,7 +119,7 @@ class Locations:
 
 
 def _compute_hop_distance(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
-    """Return the all-pairs contiguity-hop distance matrix ``[num_nodes, num_nodes]``, float32.
+    """Return the all-pairs hop distance matrix over ``edge_index``, ``[num_nodes, num_nodes]``, float32.
 
     Treats the graph as undirected and unweighted; unreachable pairs are ``inf``.
     """

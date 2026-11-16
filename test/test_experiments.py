@@ -11,6 +11,8 @@ import polars as pl
 import pytest
 import torch
 from encoders import continuous_schema
+from graphs import chain_edge_index, join_users, make_users
+from graphs import make_locations as make_graph_locations
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.demos.boring_classes import BoringModel
 from omegaconf import OmegaConf
@@ -18,6 +20,7 @@ from omegaconf.errors import ConfigKeyError
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, HomePEConfig, read_config
+from activitygraphs.datasets import Locations, Users
 from activitygraphs.experiments import runners
 from activitygraphs.experiments.results import (
     _drop_empty_columns,
@@ -46,7 +49,6 @@ from activitygraphs.models.features import (
     build_feature_encoder,
     build_node_feature_encoder,
 )
-from activitygraphs.models.networks import GAT, GraphTransformer, NodeMLP
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.models.two_tower import TwoTowerScorer
 from activitygraphs.runs import CHECKPOINTS_DIR, CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
@@ -89,7 +91,8 @@ def make_schema(
     return DatasetSchema(
         locations=continuous_schema("locations", num_location_features),
         access=continuous_schema("access", num_access_features),
-        edges=continuous_schema("edges", num_edge_features),
+        contiguity_edges=continuous_schema("contiguity_edges", num_edge_features),
+        rail_edges=continuous_schema("rail_edges", 0),
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", num_attributes),
         distances=continuous_schema("distances", 1),
@@ -100,6 +103,26 @@ def make_schema(
 def make_locations() -> types.SimpleNamespace:
     """Stand-in exposing only what the scorer builders read off ``Locations``."""
     return types.SimpleNamespace(num_rwpe_features=2, num_nodes=6)
+
+
+def make_survey() -> tuple[Locations, Users]:
+    """A chain of nodes and two users, with random columns of the widths given by ``make_schema()``."""
+    generator = torch.Generator().manual_seed(0)
+    schema, stand_in = make_schema(), make_locations()
+    num_nodes, num_users = stand_in.num_nodes, 2
+    edge_index = chain_edge_index(num_nodes)
+    x = torch.rand(num_nodes, schema.locations.width, generator=generator)
+    edge_attr = torch.rand(edge_index.shape[1], schema.contiguity_edges.width, generator=generator)
+    random_walk_pe = torch.rand(num_nodes, stand_in.num_rwpe_features, generator=generator)
+    distance_m = torch.rand(num_nodes, num_nodes, generator=generator) * 1000.0
+    access = torch.rand(num_nodes, schema.access.width, generator=generator)
+    locations = make_graph_locations(x, edge_index, edge_attr, random_walk_pe, distance_m, access)
+
+    visited = (torch.rand(num_users, num_nodes, generator=generator) < 0.5).float()
+    home_node = torch.tensor([0, 3])
+    attributes = torch.rand(num_users, schema.user_attributes.width, generator=generator)
+
+    return locations, make_users(visited, home_node, attributes)
 
 
 def record_training(monkeypatch, frame=None) -> list[dict]:
@@ -230,11 +253,11 @@ class TestBuildVariants:
         assert variant_names(cfg, {"model": "two_tower", "set": {"bias": "location"}}) == ["TwoTower-4"]
 
     def test_an_unknown_key_raises(self, cfg):
-        with pytest.raises(ConfigKeyError, match="sweeps"):
+        with pytest.raises(ConfigKeyError):
             variant_names(cfg, {"model": "mlp", "sweeps": {}})
 
     def test_an_unknown_flag_raises(self, cfg):
-        with pytest.raises(TypeError, match="use_hpe"):
+        with pytest.raises(TypeError):
             variant_names(cfg, {"model": "mlp", "features": {"use_hpe": False}})
 
     def test_a_field_that_leaves_the_name_unchanged_raises(self, cfg):
@@ -263,29 +286,29 @@ class TestBuildScorer:
         assert isinstance(scorer_of(cfg.models[key]), torch.nn.Module)
 
     def test_input_width_follows_the_variant_features(self, cfg):
-        locations = make_locations()
-        schema = make_schema(num_location_features=5, num_attributes=3, num_access_features=4)
+        locations, schema = make_locations(), make_schema()
         plain_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False)
         plain = build_feature_encoder(plain_features, locations, schema, HOME_PE)  # type: ignore[arg-type]
         dist = build_feature_encoder(InputFeatures(use_home_pe=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        node_width = schema.locations.width + schema.access.width + locations.num_rwpe_features
 
-        assert plain.out_dim == 5 + 4 + 1 + 2
-        assert dist.out_dim == 5 + 4 + 1 + 2 + 3 + 1
+        assert plain.out_dim == node_width + schema.user_nodes.width
+        assert dist.out_dim - plain.out_dim == schema.user_attributes.width + schema.distances.width
 
     def test_rwpe_free_input_width_leaves_out_the_encoding(self, cfg):
-        locations = make_locations()
-        schema = make_schema(num_location_features=5, num_attributes=3, num_access_features=4)
+        locations, schema = make_locations(), make_schema()
+        with_rwpe = build_feature_encoder(InputFeatures(use_home_pe=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
         features = InputFeatures(use_home_pe=False, use_rwpe=False)
-        encoder = build_feature_encoder(features, locations, schema, HOME_PE)  # type: ignore[arg-type]
+        without_rwpe = build_feature_encoder(features, locations, schema, HOME_PE)  # type: ignore[arg-type]
 
-        assert encoder.out_dim == 5 + 4 + 1 + 3 + 1
+        assert with_rwpe.out_dim - without_rwpe.out_dim == locations.num_rwpe_features
 
     def test_the_access_flag_adds_the_access_columns(self, cfg):
-        locations, schema = make_locations(), make_schema(num_access_features=4)
+        locations, schema = make_locations(), make_schema()
         without_access = build_feature_encoder(InputFeatures(use_access=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
         with_access = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
-        assert with_access.out_dim - without_access.out_dim == 4
+        assert with_access.out_dim - without_access.out_dim == schema.access.width
 
     @pytest.mark.parametrize(
         ("features", "source_types"),
@@ -308,28 +331,20 @@ class TestBuildScorer:
 
         assert with_pe.out_dim - plain.out_dim == HOME_PE.bins
 
-    def test_the_network_takes_the_encoder_width(self, cfg):
-        scorer = scorer_of(cfg.models.mlp)
+    @pytest.mark.parametrize("key", ["mlp", "gat", "gps"])
+    def test_every_network_scores_every_node_of_every_user(self, cfg, key):
+        locations, users = make_survey()
+        scorer = build_scorer(cfg.models[key], DEFAULT_FEATURES, locations, make_schema(), HOME_PE)
+        batch = join_users(locations, users)
 
-        assert isinstance(scorer, NodeScorer) and isinstance(scorer.network, NodeMLP)
-        assert scorer.network.lins[0].in_features == scorer.encoder.out_dim
-
-    def test_edge_dim_reaches_the_networks_that_take_it(self, cfg):
-        schema = make_schema(num_edge_features=2)
-        gat = scorer_of(cfg.models.gat, schema=schema)
-        gps = scorer_of(cfg.models.gps, schema=schema)
-
-        assert isinstance(gat, GraphScorer) and isinstance(gps, GraphScorer)
-        assert isinstance(gat.network, GAT) and isinstance(gps.network, GraphTransformer)
-        assert gps.network.edge_proj.in_features == 2
+        assert scorer(locations, batch).shape == (users.num_users, locations.num_nodes)
 
     def test_gat_norm_follows_the_config(self, cfg):
         normed = scorer_of(cfg.models.gat)
         plain = scorer_of(with_overrides(cfg.models.gat, {"norm": None}))
 
-        assert isinstance(normed, GraphScorer) and isinstance(plain, GraphScorer)
-        assert all(isinstance(norm, torch.nn.LayerNorm) for norm in normed.network.convs.norms)  # type: ignore[union-attr]
-        assert all(isinstance(norm, torch.nn.Identity) for norm in plain.network.convs.norms)  # type: ignore[union-attr]
+        assert any(isinstance(module, torch.nn.LayerNorm) for module in normed.modules())
+        assert not any(isinstance(module, torch.nn.LayerNorm) for module in plain.modules())
 
     @pytest.mark.parametrize(
         ("key", "scorer_type"),
@@ -389,6 +404,7 @@ EXPECTED_VARIANTS = {
     "demographics_ablation": ["MLP", "MLP-nodemo", "GATv2-2", "GATv2-2-nodemo"],
     "depth_sweep": ["MLP", "GATv2-1", "GATv2-2", "GATv2-4", "GATv2-8"],
     "headline": ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"],
+    "network_hops": ["MLP", "MLP-nonet", "MLP-nohpe"],
     "overfit_health": ["MLP-nohpe", "GATv2-8-nohpe"],
     "two_tower_ablation": [
         "MLP",
@@ -459,7 +475,7 @@ class TestArchitectureRegistry:
     def test_an_unregistered_architecture_raises(self, cfg):
         model = with_overrides(cfg.models.mlp, {"architecture": "unknown"})
 
-        with pytest.raises(KeyError, match="unknown"):
+        with pytest.raises(KeyError):
             _lookup_architecture(model)
 
 

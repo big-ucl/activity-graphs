@@ -1,0 +1,8 @@
+# @package _global_
+# The MLP with its home-anchored PE over the contiguity and rail edges, over the contiguity edges alone, and without it, beside the baselines.
+experiment:
+  name: network_hops
+  variants:
+    - { model: mlp }
+    - { model: mlp, features: { use_network_hops: false } }
+    - { model: mlp, features: { use_home_pe: false } }

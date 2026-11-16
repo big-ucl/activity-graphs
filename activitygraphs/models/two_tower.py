@@ -30,7 +30,7 @@ class NodeTower(torch.nn.Module):
     def forward(self, locations: Locations) -> Tensor:
         """Return the embedding of every node, ``[num_nodes, d]``."""
         x = self.node_encoder(locations)
-        return self.network(x, locations.edge_index, locations.edge_attr, None)
+        return self.network(x, locations.contiguity_edge_index, locations.contiguity_edge_attr, None)
 
 
 class UserTower(torch.nn.Module):

@@ -97,14 +97,14 @@ ones on `experiment=core`, the short run for paired comparisons between code cha
 An edge feature is a column on the edges of the graph. The only edge feature today is `weight`, the distance in metres
 between the centroids of the two zones, computed by `c2g.contiguity_graph`.
 
-1. **Compute the column** on `edges_gdf` in `_build_graph`. The edges from `build_extra_edges` are concatenated after
+1. **Compute the column** on `contiguity_edges_gdf` in `_build_graph`. The edges from `build_extra_edges` are concatenated after
    the contiguity edges, so compute the column after the concatenation, or make every extra-edges builder return it
    too. An extra edge without the column holds a NaN, and `check_tensors` raises.
-2. **Declare the column** in `EDGE_SCHEMA` (`activitygraphs/tensors/build.py`), with its kind. The edge schema is
-   declared rather than inferred, and `gdf_to_pyg` reads exactly the columns of `EDGE_SCHEMA`.
+2. **Declare the column** in `CONTIGUITY_EDGE_SCHEMA` (`activitygraphs/tensors/build.py`), with its kind. The edge schema is
+   declared rather than inferred, and `gdf_to_pyg` reads exactly the columns of `CONTIGUITY_EDGE_SCHEMA`.
 3. **Rebuild the caches.** Delete `Graph/` and `Tensors/`.
 
-The edge width reaches the networks through `schema.edges.width`, which `_encoded_scorer` passes as `edge_dim`. The
+The edge width reaches the networks through `schema.contiguity_edges.width`, which `_encoded_scorer` passes as `edge_dim`. The
 GAT and the GPS layers read the edge features, and the node-wise MLP ignores them.
 
 ## Add a user attribute

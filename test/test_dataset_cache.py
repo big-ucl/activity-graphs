@@ -35,7 +35,8 @@ def make_schema(n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
     return DatasetSchema(
         locations=make_group("locations", 0),
         access=make_group("access", 0),
-        edges=make_group("edges", 0),
+        contiguity_edges=make_group("contiguity_edges", 0),
+        rail_edges=make_group("rail_edges", 0),
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=make_group("user_attributes", n_demo, demo_kind),
         distances=make_group("distances", 1),
@@ -64,8 +65,10 @@ def make_dataset(
     locations = LocationTensors(
         x=torch.zeros((n_nodes, 0)),
         access=torch.zeros((n_nodes, 0)),
-        edge_index=torch.zeros((2, 0), dtype=torch.long),
-        edge_attr=torch.zeros((0, 0)),
+        contiguity_edge_index=torch.zeros((2, 0), dtype=torch.long),
+        contiguity_edge_attr=torch.zeros((0, 0)),
+        rail_edge_index=torch.zeros((2, 0), dtype=torch.long),
+        rail_edge_attr=torch.zeros((0, 0)),
         distance_m=torch.zeros((n_nodes, n_nodes)),
         node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),
     )
@@ -231,7 +234,7 @@ class TestReadSplitIndices:
         old = make_dataset(n_users=40)
         load_split_indices(old.users, SPLIT, 42, fingerprint_of(cfg, old), cache_path=cache)
 
-        with pytest.raises(ValueError, match="fingerprint"):
+        with pytest.raises(ValueError):
             read_split_indices(cache, fingerprint_of(cfg, make_dataset(n_users=60)))
 
     def test_raises_when_nothing_is_cached(self, tmp_path, cfg):

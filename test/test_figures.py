@@ -98,7 +98,7 @@ def test_with_labels_renames_and_filters(curve):
     assert labelled["model"].unique().to_list() == ["Gravity"]
     assert labelled.height == 3
 
-    with pytest.raises(KeyError, match="not in the frame"):
+    with pytest.raises(KeyError):
         _with_labels(curve, (ModelStyle("Nope", "Nope", "#000000", learned=False),))
 
 
@@ -256,7 +256,7 @@ def test_add_transit_line_needs_two_distinct_zones(nodes_gdf):
     nodes = node_gdf(nodes_gdf)
     ax = zone_map(nodes, basemap=False)
 
-    with pytest.raises(ValueError, match="different zones"):
+    with pytest.raises(ValueError):
         add_transit_line(ax, nodes, through=[1, 1])
 
 

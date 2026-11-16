@@ -72,7 +72,7 @@ def read_graph(cfg):
     graph_path = PROJECT_ROOT / cfg.data.paths.processed / "Graph"
     nodes = figures.node_gdf(gpd.read_parquet(graph_path / "nodes.parquet"))
 
-    return nodes, gpd.read_parquet(graph_path / "edges.parquet")
+    return nodes, gpd.read_parquet(graph_path / "contiguity_edges.parquet")
 
 
 def out_dir(cfg) -> Path:

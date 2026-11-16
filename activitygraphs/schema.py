@@ -150,7 +150,8 @@ class DatasetSchema:
     Attributes:
         locations: Location node features.
         access: Accessibility features of the location nodes.
-        edges: Edge features.
+        contiguity_edges: Features of the contiguity edges between zones.
+        rail_edges: Features of the rail edges between zones.
         user_nodes: Per-user node features.
         user_attributes: Per-user attributes.
         distances: Per-user distance from home of every node.
@@ -162,7 +163,8 @@ class DatasetSchema:
 
     locations: TensorSchema
     access: TensorSchema
-    edges: TensorSchema
+    contiguity_edges: TensorSchema
+    rail_edges: TensorSchema
     user_nodes: TensorSchema
     user_attributes: TensorSchema
     distances: TensorSchema

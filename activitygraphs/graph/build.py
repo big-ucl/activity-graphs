@@ -1,7 +1,9 @@
-"""Load and build the contiguity graph over the zones of a Survey, with enriched node features."""
+"""Load and build the contiguity graph over the zones of a Survey, with enriched node features and the rail edges."""
 
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import city2graph as c2g
 import geopandas as gpd
@@ -10,6 +12,7 @@ import pandas as pd
 from activitygraphs.base import CRS
 from activitygraphs.config import DataConfig, PTPaths
 from activitygraphs.graph.access import add_access_features, read_motorway_junctions
+from activitygraphs.graph.rail import EDGE_INDEX_NAMES, build_rail_edges
 from activitygraphs.surveys.base import SurveyData, SurveyLoader
 from activitygraphs.surveys.gtfs import GTFSTables, read_gtfs
 from activitygraphs.surveys.overture import Overture
@@ -19,9 +22,48 @@ from activitygraphs.utils import get_project_root
 GRAPH_DIR = "Graph"
 
 
-def load_graph(
-    survey: SurveyData, cfg: DataConfig, project_root: Path | None = None
-) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+class GraphFile(StrEnum):
+    """Filenames of a ``GraphTables`` bundle, in the cache directory."""
+
+    NODES = "nodes.parquet"
+    CONTIGUITY_EDGES = "contiguity_edges.parquet"
+    RAIL_EDGES = "rail_edges.parquet"
+
+
+@dataclass(frozen=True)
+class GraphTables:
+    """The tables of the location graph for a survey.
+
+    Edges tables are indexed by (source, target) ``loc_id``, are undirected and contain additional edge features.
+
+    Attributes:
+        nodes: Zones indexed by ``loc_id``, with their features.
+        contiguity_edges: Contiguity edges table.
+        rail_edges: Rail edges table.
+    """
+
+    nodes: gpd.GeoDataFrame
+    contiguity_edges: gpd.GeoDataFrame
+    rail_edges: pd.DataFrame
+
+    def save(self, directory: Path) -> None:
+        """Write the tables to ``directory``, one file each."""
+        directory.mkdir(parents=True, exist_ok=True)
+        self.nodes.to_parquet(directory / GraphFile.NODES)
+        self.contiguity_edges.to_parquet(directory / GraphFile.CONTIGUITY_EDGES)
+        self.rail_edges.to_parquet(directory / GraphFile.RAIL_EDGES)
+
+    @classmethod
+    def read(cls, directory: Path) -> Self:
+        """Read the tables written by ``save`` to ``directory``."""
+        return cls(
+            nodes=gpd.read_parquet(directory / GraphFile.NODES),
+            contiguity_edges=gpd.read_parquet(directory / GraphFile.CONTIGUITY_EDGES),
+            rail_edges=pd.read_parquet(directory / GraphFile.RAIL_EDGES),
+        )
+
+
+def load_graph(survey: SurveyData, cfg: DataConfig, project_root: Path | None = None) -> GraphTables:
     """Load the graph from cache, or build and cache it.
 
     Cached parquet files are stored under ``cfg.paths.processed/Graph/``.
@@ -32,32 +74,25 @@ def load_graph(
         project_root: Repo root, defaults to ``Path(".")``.
 
     Returns:
-        Tuple ``(nodes_gdf, edges_gdf)``: nodes indexed by ``loc_id``, edges by (source, target) ``loc_id``.
+        The tables representing the graph (nodes and edges).
     """
     root = get_project_root(project_root)
     graph_path = root / cfg.paths.processed / GRAPH_DIR
-    nodes_path = graph_path / "nodes.parquet"
-    edges_path = graph_path / "edges.parquet"
 
-    if nodes_path.exists() and edges_path.exists():
-        return gpd.read_parquet(nodes_path), gpd.read_parquet(edges_path)
+    if not all((graph_path / file).exists() for file in GraphFile):
+        loader = survey_loader(cfg)
+        zones_gdf = survey.with_filter("zone").locations_gdf
+        overture = Overture.load(zones_gdf, cfg.inputs.overture, root)
+        statistics = loader.read_statistics(cfg, root)
 
-    loader = survey_loader(cfg)
-    zones_gdf = survey.with_filter("zone").locations_gdf
-    overture = Overture.load(zones_gdf, cfg.inputs.overture, root)
-    statistics = loader.read_statistics(cfg, root)
+        pt_inputs = cast(PTPaths, cfg.inputs)
+        gtfs = read_gtfs(pt_inputs.gtfs, root / cfg.paths.gtfs)
+        junctions = read_motorway_junctions(root / cfg.paths.osm / pt_inputs.osm_extract)
 
-    pt_inputs = cast(PTPaths, cfg.inputs)
-    gtfs = read_gtfs(pt_inputs.gtfs, root / cfg.paths.gtfs)
-    junctions = read_motorway_junctions(root / cfg.paths.osm / pt_inputs.osm_extract)
+        graph = _build_graph(zones_gdf, overture, statistics, loader, gtfs, junctions)
+        graph.save(graph_path)
 
-    nodes_gdf, edges_gdf = _build_graph(zones_gdf, overture, statistics, loader, gtfs, junctions)
-
-    graph_path.mkdir(parents=True, exist_ok=True)
-    nodes_gdf.to_parquet(nodes_path)
-    edges_gdf.to_parquet(edges_path)
-
-    return nodes_gdf, edges_gdf
+    return GraphTables.read(graph_path)
 
 
 def _build_graph[S](
@@ -67,7 +102,7 @@ def _build_graph[S](
     loader: SurveyLoader[Any, S],
     gtfs: GTFSTables,
     junctions: gpd.GeoSeries,
-) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+) -> GraphTables:
     """Build the spatial contiguity graph over ``zones_gdf``, enriched with census stats, POIs, land uses and access.
 
     Args:
@@ -75,11 +110,11 @@ def _build_graph[S](
         overture: Overture POIs and land uses covering the zones.
         statistics: Census statistics from ``loader.read_statistics``.
         loader: The survey's loader, which adds the statistics and any extra edges.
-        gtfs: The GTFS feeds of the dataset, read for the rail stations and the peak departures.
+        gtfs: The GTFS feeds of the dataset, read for the rail stations, the peak departures and the rail edges.
         junctions: The motorway junctions around the zones.
 
     Returns:
-        Tuple ``(nodes_gdf, edges_gdf)``: nodes indexed by ``loc_id``, edges by (source, target) ``loc_id``.
+        The nodes, the contiguity edges and the rail edges of the graph, the nodes and the contiguity edges in ``CRS``.
     """
     utm_crs = zones_gdf.estimate_utm_crs()
     zones_gdf = zones_gdf.to_crs(utm_crs)
@@ -89,13 +124,17 @@ def _build_graph[S](
     zones_gdf = overture.add_land_uses(zones_gdf)
     zones_gdf = zones_gdf.set_index("loc_id")
 
-    nodes_gdf, edges_gdf = c2g.contiguity_graph(zones_gdf, set_point_nodes=True)
+    nodes_gdf, contiguity_edges_gdf = c2g.contiguity_graph(zones_gdf, set_point_nodes=True)
 
     if loader.build_extra_edges is not None:
-        extra_edges = loader.build_extra_edges(nodes_gdf, edges_gdf)
-        edges_gdf = cast(gpd.GeoDataFrame, pd.concat([edges_gdf, extra_edges]))
-        edges_gdf = c2g.canonicalize_edges(edges_gdf)
+        extra_edges = loader.build_extra_edges(nodes_gdf, contiguity_edges_gdf)
+        contiguity_edges_gdf = cast(gpd.GeoDataFrame, pd.concat([contiguity_edges_gdf, extra_edges]))
+        contiguity_edges_gdf = c2g.canonicalize_edges(contiguity_edges_gdf)
 
     nodes_gdf = add_access_features(nodes_gdf, gtfs, junctions)
+    rail_edges = build_rail_edges(nodes_gdf, gtfs)
 
-    return nodes_gdf.to_crs(CRS), edges_gdf.to_crs(CRS)
+    nodes = nodes_gdf.to_crs(CRS)
+    contiguity_edges = contiguity_edges_gdf.to_crs(CRS).rename_axis(EDGE_INDEX_NAMES)
+
+    return GraphTables(nodes=nodes, contiguity_edges=contiguity_edges, rail_edges=rail_edges)

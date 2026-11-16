@@ -339,7 +339,7 @@ The first run builds every cache of the dataset under `data/processed/XYZ/`:
 ```
 data/processed/XYZ/
   XYZSurvey/      # the locations, journeys, and users
-  Graph/          # nodes.parquet and edges.parquet
+  Graph/          # nodes.parquet, contiguity_edges.parquet and rail_edges.parquet
   Tensors/        # the location and user tensors, schema.json, and fingerprint.json
   Datasets/       # the split indices and the fitted feature transforms
 ```

@@ -171,7 +171,8 @@ def fit_transforms(
     values = {
         "locations": locations.x,
         "access": locations.access,
-        "edges": locations.edge_attr,
+        "contiguity_edges": locations.contiguity_edge_attr,
+        "rail_edges": locations.rail_edge_attr,
         "user_attributes": users.attributes[train_idx],
         "distances": locations.distance_m[train_homes].unsqueeze(-1),
     }

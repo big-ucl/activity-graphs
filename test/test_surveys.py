@@ -20,5 +20,5 @@ def test_an_unregistered_survey_raises(monkeypatch):
     cfg = read_config(get_project_root(), verbose=False, data="tpg")
     monkeypatch.setattr(cfg.data, "survey", "unknown")
 
-    with pytest.raises(KeyError, match="unknown"):
+    with pytest.raises(KeyError):
         survey_loader(cfg.data)

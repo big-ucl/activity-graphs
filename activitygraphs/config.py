@@ -316,7 +316,7 @@ class HomePEConfig:
     """Home-anchored positional encoding settings.
 
     Attributes:
-        bins: Number of RBF centres, which is the number of feature columns added.
+        bins: Number of RBF centres, at least 2, which is the number of feature columns added.
         max_hops: Hop distance at which the encoding is capped, and the position of the last centre.
     """
 
