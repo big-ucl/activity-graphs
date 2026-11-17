@@ -45,6 +45,10 @@ class UserBatch:
         home_hops: Hop distance from the user's home to each node over the contiguity edges, ``[num_users, num_nodes]``.
         home_network_hops: Hop distance from the user's home to each node over the contiguity and rail edges,
             ``[num_users, num_nodes]``.
+        home_travel_times: Travel times from the user's home to each node, as fed to the model,
+            ``[num_users, num_nodes, num_travel_time_features]``.
+        home_travel_times_min: Travel time in minutes and reachability by each mode from the user's home to each node,
+            ``[num_users, num_nodes, num_travel_time_features]``.
         attributes: Numeric user attributes, ``[num_users, num_numeric_attributes]``.
         attributes_cat: Codes of the categorical user attributes, int64, ``[num_users, num_categorical_attributes]``.
     """
@@ -57,6 +61,8 @@ class UserBatch:
     home_distance_m: Tensor
     home_hops: Tensor
     home_network_hops: Tensor
+    home_travel_times: Tensor
+    home_travel_times_min: Tensor
     attributes: Tensor
     attributes_cat: Tensor
 
@@ -81,6 +87,8 @@ class UserBatch:
             home_distance_m=locations.distance_m[home_node],
             home_hops=locations.hop_distance[home_node],
             home_network_hops=locations.network_hop_distance[home_node],
+            home_travel_times=locations.travel_times[home_node],
+            home_travel_times_min=locations.travel_times_min[home_node],
             attributes=rows.attributes,
             attributes_cat=rows.attributes_cat,
         )

@@ -1,10 +1,12 @@
 """Tests for the distance-decay baselines."""
 
 import dataclasses
+import math
 
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 from graphs import edgeless_locations, join_users, make_locations, make_users
 
 from activitygraphs.datasets import Locations, UserBatch, Users
@@ -14,8 +16,12 @@ from activitygraphs.models.baselines.gravity import (
     DistanceDecayBaseline,
     GravityBaseline,
     GravityBinnedBaseline,
+    LogsumGravityBaseline,
+    TravelTimeGravityBaseline,
+    _weighted_median,
 )
 from activitygraphs.models.baselines.popularity import home_excluded_visit_rate
+from activitygraphs.schema import ColumnKind, ColumnSpec, TensorSchema
 
 NUM_LOCATION_FEATURES = 1
 
@@ -167,4 +173,218 @@ class TestConditionalGravity:
         conditional = ConditionalGravityBaseline(gravity).fit(train, val, locations)
 
         assert conditional.strength is not None
-        assert conditional.counts.shape == (10, 10)
+        assert conditional.num_visits.shape == (10, 10)
+
+
+TRAVEL_TIME_SCHEMA = TensorSchema(
+    "travel_times",
+    (ColumnSpec("car_time_min", ColumnKind.COUNT), ColumnSpec("car_reachable", ColumnKind.BINARY)),
+)
+
+
+def simulate_travel_times(n_users: int, n_nodes: int, seed: int = 0) -> tuple[Users, torch.Tensor, torch.Tensor]:
+    """Draw labels that decay with the car time alone, beside a distance unrelated to the car time.
+
+    The pairs with a car time above 60 min are unreachable and never visited.
+
+    Returns:
+        ``(users, distance_m, travel_times_min)``, with ``travel_times_min`` of ``TRAVEL_TIME_SCHEMA``,
+        ``[n_nodes, n_nodes, 2]``.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    distance_m = 500.0 + 20_000.0 * torch.rand(n_nodes, n_nodes, generator=generator)
+    car_time_min = 2.0 + 80.0 * torch.rand(n_nodes, n_nodes, generator=generator)
+    distance_m.fill_diagonal_(0.0)
+    car_time_min.fill_diagonal_(0.0)
+    car_reachable = (car_time_min <= 60.0).float()
+    travel_times_min = torch.stack([car_time_min.clamp(max=60.0), car_reachable], dim=-1)
+
+    homes = torch.randint(0, n_nodes, (n_users,), generator=generator)
+    logits = 1.0 - 1.5 * car_time_min[homes].clamp(min=1.0).log()
+    labels = (torch.rand(n_users, n_nodes, generator=generator) < logits.sigmoid()).float()
+    labels = labels * car_reachable[homes]
+    labels[torch.arange(n_users), homes] = 1.0
+
+    return make_users(labels, homes), distance_m, travel_times_min
+
+
+class TestTravelTimeGravity:
+    def test_the_fit_decays_with_the_time_that_drives_the_visits(self):
+        users, distance_m, travel_times_min = simulate_travel_times(n_users=2000, n_nodes=60)
+        locations = make_locations(
+            torch.zeros(60, 1),
+            torch.zeros(2, 0, dtype=torch.long),
+            distance_m=distance_m,
+            travel_times_min=travel_times_min,
+        )
+
+        gravity = TravelTimeGravityBaseline(TRAVEL_TIME_SCHEMA).fit(users, users, locations)
+        distance_decay, car_decay = gravity.beta_log.tolist()
+
+        assert car_decay == pytest.approx(1.5, abs=0.3)
+        assert abs(distance_decay) < 0.3
+        assert gravity.gamma.item() > 2.0
+
+    def test_the_fit_minimises_the_loss_over_every_user_pair(self):
+        users, distance_m, travel_times_min = simulate_travel_times(n_users=300, n_nodes=12)
+        locations = make_locations(
+            torch.zeros(12, 1),
+            torch.zeros(2, 0, dtype=torch.long),
+            distance_m=distance_m,
+            travel_times_min=travel_times_min,
+        )
+        gravity = TravelTimeGravityBaseline(TRAVEL_TIME_SCHEMA).fit(users, users, locations)
+        batch = join_users(locations, users)
+        logits = gravity(locations, batch)
+        not_home = ~batch.is_home
+
+        def user_pair_loss(intercept_shift: float) -> float:
+            shifted_logits = logits[not_home] + intercept_shift
+            return float(F.binary_cross_entropy_with_logits(shifted_logits, users.visited[not_home]))
+
+        assert user_pair_loss(0.0) < user_pair_loss(0.05)
+        assert user_pair_loss(0.0) < user_pair_loss(-0.05)
+
+    def test_forward_scores_a_shorter_reachable_trip_higher(self):
+        users, distance_m, travel_times_min = simulate_travel_times(n_users=2000, n_nodes=60)
+        locations = make_locations(
+            torch.zeros(60, 1),
+            torch.zeros(2, 0, dtype=torch.long),
+            distance_m=distance_m,
+            travel_times_min=travel_times_min,
+        )
+        gravity = TravelTimeGravityBaseline(TRAVEL_TIME_SCHEMA).fit(users, users, locations)
+        batch = join_users(locations, users)
+
+        logits = gravity(locations, batch)
+        home = int(users.home_node[0])
+        car_time = travel_times_min[home, :, 0]
+        is_reachable = travel_times_min[home, :, 1] > 0.5
+        is_reachable[home] = False
+        fastest_node_idx = car_time.masked_fill(~is_reachable, float("inf")).argmin()
+        slowest_node_idx = car_time.masked_fill(~is_reachable, -1.0).argmax()
+        unreachable_node_idx = torch.nonzero(~is_reachable & (torch.arange(60) != home))[0, 0]
+
+        assert logits[0, fastest_node_idx] > logits[0, slowest_node_idx] > logits[0, unreachable_node_idx]
+
+
+class TestWeightedMedian:
+    def test_equals_the_median_of_the_repeated_rows(self):
+        values = torch.tensor([[5.0, 1.0], [1.0, 7.0], [3.0, 2.0], [9.0, 4.0]])
+        weights = torch.tensor([1.0, 4.0, 2.0, 2.0])
+        repeated_values = values.repeat_interleave(weights.long(), dim=0)
+
+        torch.testing.assert_close(_weighted_median(values, weights), repeated_values.median(dim=0).values)
+
+
+LOGSUM_SCHEMA = TensorSchema(
+    "travel_times",
+    (
+        ColumnSpec("pt_time_min", ColumnKind.COUNT),
+        ColumnSpec("car_time_min", ColumnKind.COUNT),
+        ColumnSpec("pt_reachable", ColumnKind.BINARY),
+        ColumnSpec("car_reachable", ColumnKind.BINARY),
+    ),
+)
+
+
+def simulate_shortest_mode(n_users: int, n_nodes: int, seed: int = 0) -> tuple[Users, torch.Tensor]:
+    """Draw labels that decay with the shorter of two mode times, both drawn independently of each other.
+
+    Returns:
+        ``(users, travel_times_min)``, with ``travel_times_min`` of ``LOGSUM_SCHEMA``, ``[n_nodes, n_nodes, 4]``.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    pt_time_min = 5.0 + 120.0 * torch.rand(n_nodes, n_nodes, generator=generator)
+    car_time_min = 5.0 + 120.0 * torch.rand(n_nodes, n_nodes, generator=generator)
+    shortest_time_min = torch.minimum(pt_time_min, car_time_min)
+    flags = torch.ones(n_nodes, n_nodes, 2)
+    travel_times_min = torch.cat([pt_time_min.unsqueeze(-1), car_time_min.unsqueeze(-1), flags], dim=-1)
+
+    homes = torch.randint(0, n_nodes, (n_users,), generator=generator)
+    logits = 2.0 - 1.5 * shortest_time_min[homes].log()
+    labels = (torch.rand(n_users, n_nodes, generator=generator) < logits.sigmoid()).float()
+    labels[torch.arange(n_users), homes] = 1.0
+
+    return make_users(labels, homes), travel_times_min
+
+
+class TestLogsumGravity:
+    def test_the_logsum_time_lies_between_the_shortest_and_the_mean_time(self):
+        gravity = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=False)
+        travel_times_min = torch.tensor([[10.0, 50.0, 1.0, 1.0], [30.0, 30.0, 1.0, 1.0]])
+
+        for theta in [0.01, 0.1, 1.0]:
+            logsum = gravity._logsum_times(travel_times_min, theta)
+
+            assert (logsum >= torch.tensor([10.0, 30.0]) - 1e-4).all()
+            assert (logsum <= torch.tensor([30.0, 30.0]) + 1e-4).all()
+
+    def test_a_large_scale_brings_the_logsum_time_near_the_shortest_time(self):
+        gravity = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=False)
+        travel_times_min = torch.tensor([[10.0, 50.0, 1.0, 1.0]])
+
+        logsum = gravity._logsum_times(travel_times_min, theta=1.0)
+
+        torch.testing.assert_close(logsum, torch.tensor([10.0 - math.log(0.5)]), atol=1e-3, rtol=0)
+
+    def test_the_fit_keeps_a_large_scale_when_visits_follow_the_shortest_time(self):
+        users, travel_times_min = simulate_shortest_mode(n_users=2000, n_nodes=60)
+        locations = make_locations(
+            torch.zeros(60, 1), torch.zeros(2, 0, dtype=torch.long), travel_times_min=travel_times_min
+        )
+
+        gravity = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=False).fit(users, users, locations)
+
+        assert gravity.theta >= 0.3
+        assert gravity.beta_log.item() > 0.5
+
+    def test_forward_scores_a_shorter_trip_by_the_faster_mode_higher(self):
+        users, travel_times_min = simulate_shortest_mode(n_users=2000, n_nodes=60)
+        locations = make_locations(
+            torch.zeros(60, 1), torch.zeros(2, 0, dtype=torch.long), travel_times_min=travel_times_min
+        )
+        gravity = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=False).fit(users, users, locations)
+        batch = join_users(locations, users)
+
+        logits = gravity(locations, batch)
+        home = int(users.home_node[0])
+        shortest_time = travel_times_min[home, :, :2].min(dim=-1).values
+        shortest_time[home] = float("inf")
+        fastest_node_idx = shortest_time.argmin()
+        shortest_time[home] = -1.0
+        slowest_node_idx = shortest_time.argmax()
+
+        assert logits[0, fastest_node_idx] > logits[0, slowest_node_idx]
+
+    def test_the_distance_term_adds_one_scale_and_one_pair_of_decays(self):
+        users, travel_times_min = simulate_shortest_mode(n_users=500, n_nodes=30)
+        distance_m = 1000.0 * travel_times_min[..., :2].min(dim=-1).values
+        locations = make_locations(
+            torch.zeros(30, 1),
+            torch.zeros(2, 0, dtype=torch.long),
+            distance_m=distance_m,
+            travel_times_min=travel_times_min,
+        )
+
+        gravity = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=True).fit(users, users, locations)
+        batch = join_users(locations, users)
+
+        assert gravity.scales.shape == (2,)
+        assert gravity.beta_log.shape == (2,)
+        assert gravity(locations, batch).shape == (users.num_users, 30)
+
+    def test_the_distance_term_keeps_the_scale_chosen_on_the_logsum_time_alone(self):
+        users, travel_times_min = simulate_shortest_mode(n_users=500, n_nodes=30)
+        distance_m = 1000.0 * travel_times_min[..., :2].mean(dim=-1)
+        locations = make_locations(
+            torch.zeros(30, 1),
+            torch.zeros(2, 0, dtype=torch.long),
+            distance_m=distance_m,
+            travel_times_min=travel_times_min,
+        )
+
+        without_distance = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=False).fit(users, users, locations)
+        with_distance = LogsumGravityBaseline(LOGSUM_SCHEMA, with_distance=True).fit(users, users, locations)
+
+        assert with_distance.theta == without_distance.theta

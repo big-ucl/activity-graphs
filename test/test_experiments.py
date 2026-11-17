@@ -85,7 +85,11 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
 
 
 def make_schema(
-    num_location_features: int = 5, num_attributes: int = 3, num_edge_features: int = 2, num_access_features: int = 4
+    num_location_features: int = 5,
+    num_attributes: int = 3,
+    num_edge_features: int = 2,
+    num_access_features: int = 4,
+    num_travel_time_features: int = 2,
 ) -> DatasetSchema:
     """The schema of a survey with continuous location, access, edge and user attribute columns."""
     return DatasetSchema(
@@ -96,6 +100,7 @@ def make_schema(
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", num_attributes),
         distances=continuous_schema("distances", 1),
+        travel_times=continuous_schema("travel_times", num_travel_time_features),
         targets=continuous_schema("targets", 1),
     )
 
@@ -116,7 +121,10 @@ def make_survey() -> tuple[Locations, Users]:
     random_walk_pe = torch.rand(num_nodes, stand_in.num_rwpe_features, generator=generator)
     distance_m = torch.rand(num_nodes, num_nodes, generator=generator) * 1000.0
     access = torch.rand(num_nodes, schema.access.width, generator=generator)
-    locations = make_graph_locations(x, edge_index, edge_attr, random_walk_pe, distance_m, access)
+    travel_times = torch.rand(num_nodes, num_nodes, schema.travel_times.width, generator=generator)
+    locations = make_graph_locations(
+        x, edge_index, edge_attr, random_walk_pe, distance_m, access, travel_times_min=travel_times
+    )
 
     visited = (torch.rand(num_users, num_nodes, generator=generator) < 0.5).float()
     home_node = torch.tensor([0, 3])
@@ -287,9 +295,10 @@ class TestBuildScorer:
 
     def test_input_width_follows_the_variant_features(self, cfg):
         locations, schema = make_locations(), make_schema()
-        plain_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False)
+        plain_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_tt=False)
         plain = build_feature_encoder(plain_features, locations, schema, HOME_PE)  # type: ignore[arg-type]
-        dist = build_feature_encoder(InputFeatures(use_home_pe=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        dist_features = InputFeatures(use_home_pe=False, use_tt=False)
+        dist = build_feature_encoder(dist_features, locations, schema, HOME_PE)  # type: ignore[arg-type]
         node_width = schema.locations.width + schema.access.width + locations.num_rwpe_features
 
         assert plain.out_dim == node_width + schema.user_nodes.width
@@ -309,6 +318,13 @@ class TestBuildScorer:
         with_access = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
 
         assert with_access.out_dim - without_access.out_dim == schema.access.width
+
+    def test_the_travel_time_flag_adds_the_travel_time_columns(self, cfg):
+        locations, schema = make_locations(), make_schema()
+        without_tt = build_feature_encoder(InputFeatures(use_tt=False), locations, schema, HOME_PE)  # type: ignore[arg-type]
+        with_tt = build_feature_encoder(InputFeatures(), locations, schema, HOME_PE)  # type: ignore[arg-type]
+
+        assert with_tt.out_dim - without_tt.out_dim == schema.travel_times.width
 
     @pytest.mark.parametrize(
         ("features", "source_types"),
@@ -405,6 +421,7 @@ EXPECTED_VARIANTS = {
     "depth_sweep": ["MLP", "GATv2-1", "GATv2-2", "GATv2-4", "GATv2-8"],
     "headline": ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"],
     "network_hops": ["MLP", "MLP-nonet", "MLP-nohpe"],
+    "travel_times": ["MLP", "MLP-nott", "TwoTower-4", "TwoTower-4-nott"],
     "overfit_health": ["MLP-nohpe", "GATv2-8-nohpe"],
     "two_tower_ablation": [
         "MLP",
@@ -556,6 +573,13 @@ class TestDropEmptyColumns:
 
         assert _drop_empty_columns(df).columns == ["kept"]
 
+    def test_keeps_an_all_null_seed(self):
+        df = pl.DataFrame(
+            {"seed": [None, None], "dropped": [None, None]}, schema={"seed": pl.Int64, "dropped": pl.Int64}
+        )
+
+        assert _drop_empty_columns(df).columns == ["seed"]
+
     def test_empty_frame_is_returned_unchanged(self):
         df = pl.DataFrame({"a": [], "b": []})
 
@@ -688,6 +712,11 @@ class TestSaveResults:
 
         assert per_user["seed"].to_list() == [1, 1, 2, 2]
         assert per_user["user_idx"].to_list() == [7, 9, 7, 9]
+
+    def test_a_run_of_baselines_alone_keeps_the_null_seed(self, tmp_path):
+        _, per_user = self._saved(tmp_path, make_model_frame("Gravity", seed=None))
+
+        assert per_user["seed"].null_count() == per_user.height
 
     def test_writes_only_the_aggregate_file_when_no_per_user_rows(self, tmp_path):
         aggregate_only = make_model_frame("MLP").filter(pl.col("stage") != PER_USER_STAGE)

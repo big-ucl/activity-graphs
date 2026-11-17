@@ -1,0 +1,9 @@
+# @package _global_
+# The MLP and the two-tower model, each with and without the travel times from home, beside the baselines.
+experiment:
+  name: travel_times
+  variants:
+    - { model: mlp }
+    - { model: mlp, features: { use_tt: false } }
+    - { model: two_tower }
+    - { model: two_tower, features: { use_tt: false } }

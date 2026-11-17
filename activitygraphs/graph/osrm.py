@@ -19,7 +19,7 @@ import pandas as pd
 
 from activitygraphs.base import CRS
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES
-from activitygraphs.graph.travel_times import MAX_TRAVEL_TIME, WALK_SPEED_KMH, nearest_walkable_points
+from activitygraphs.graph.travel_times import MAX_TRAVEL_TIME, WALK_SPEED_KMH, walkable_candidate_points
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,13 @@ NETWORK_NAME = "network"
 TABLE_BLOCK_SIZE = 100
 """Number of origins per OSRM table request. Every request holds all zones as destinations."""
 
+MAX_RELINK_CANDIDATES = 300
+"""Largest number of walkable OSM ways tried, nearest first, for a zone that reaches no other zone."""
+
+NUM_TEST_ZONES_FOR_RELINK = 50
+"""Number of zones routed to from each point tried for a zone that reaches no other zone. The zone is moved to the first
+point tried that reaches one of these zones."""
+
 SERVER_START_TIMEOUT_S = 300
 """Longest wait in seconds for an OSRM server to answer after it starts."""
 
@@ -47,8 +54,8 @@ def build_road_travel_times(nodes_gdf: gpd.GeoDataFrame, osm_path: Path, osrm_di
 
     Car times are free-flow. The walk profile walks at ``WALK_SPEED_KMH``, the speed of the walks routed by R5. The
     bike profile keeps the OSRM defaults. The OSRM files of each mode are built once and cached in ``osrm_dir``. A
-    zone that reaches no other zone by a mode is moved, for that mode, to the nearest walkable OSM way and routed
-    again.
+    zone that reaches no other zone by a mode is moved, for that mode, to the nearest walkable OSM way that can reach
+    another zone, and routed again.
 
     Args:
         nodes_gdf: Zones indexed by ``loc_id``, with the zone point in ``geometry``.
@@ -63,6 +70,7 @@ def build_road_travel_times(nodes_gdf: gpd.GeoDataFrame, osm_path: Path, osrm_di
     zone_points = nodes_gdf.geometry.to_crs(CRS)
     zone_ids = nodes_gdf.index.to_numpy()
     zone_coords = _coord_strings(zone_points)
+
     all_rows = np.arange(len(zone_ids))
 
     mode_times = []
@@ -72,20 +80,32 @@ def build_road_travel_times(nodes_gdf: gpd.GeoDataFrame, osm_path: Path, osrm_di
 
         with _osrm_server(mode_dir, len(zone_ids)) as base_url:
             durations_s = _route_table(base_url, zone_coords, all_rows, None)
-            unlinked_rows = _unlinked_rows(durations_s)
 
+            # Handle unlinked zones (zones that cannot reach other zones)
+            unlinked_rows = _unlinked_rows(durations_s)
             if unlinked_rows.size > 0:
                 unlinked_points = gpd.GeoSeries(zone_points.iloc[unlinked_rows], crs=CRS)
-                moved_points, moved_distance_m = nearest_walkable_points(unlinked_points, osm_path)
-                moved_distance_list = np.round(moved_distance_m).astype(int).tolist()
-                moved_distances = dict(zip(zone_ids[unlinked_rows], moved_distance_list, strict=True))
-                log.info(
-                    "Zone points moved for %s to the nearest walkable OSM way, in metres: %s", mode, moved_distances
-                )
+                candidates_by_zone = walkable_candidate_points(unlinked_points, osm_path, MAX_RELINK_CANDIDATES)
+
+                linked_rows = np.setdiff1d(all_rows, unlinked_rows)[:NUM_TEST_ZONES_FOR_RELINK]
+                test_coords = [zone_coords[row] for row in linked_rows]
 
                 moved_coords = list(zone_coords)
-                for row, coord in zip(unlinked_rows, _coord_strings(moved_points), strict=True):
-                    moved_coords[row] = coord
+                moved_distances = {}
+                for row in unlinked_rows:
+                    zone_id = zone_ids[row]
+                    candidate_points, candidate_distance_m = candidates_by_zone[zone_id]
+                    candidate_coords = _coord_strings(candidate_points)
+                    linked_idx = _first_linked_candidate(base_url, candidate_coords, test_coords)
+                    if linked_idx is not None:
+                        moved_coords[row] = candidate_coords[linked_idx]
+                        moved_distances[zone_id] = round(float(candidate_distance_m[linked_idx]))
+
+                log.info(
+                    "Zone points moved for %s to the nearest walkable OSM way that reaches another zone, in metres: %s",
+                    mode,
+                    moved_distances,
+                )
                 durations_s[unlinked_rows, :] = _route_table(base_url, moved_coords, unlinked_rows, None)
                 durations_s[:, unlinked_rows] = _route_table(base_url, moved_coords, all_rows, unlinked_rows)
 
@@ -209,6 +229,28 @@ def _route_table(base_url: str, coords: list[str], sources: np.ndarray, destinat
         blocks.append(np.asarray(block_durations, dtype=np.float64))
 
     return np.vstack(blocks)
+
+
+def _first_linked_candidate(base_url: str, candidate_coords: list[str], test_coords: list[str]) -> int | None:
+    """Return the position of the first point of ``candidate_coords`` from which OSRM reaches a zone of ``test_coords``.
+
+    Return ``None`` when no point of ``candidate_coords`` reaches one of these zones.
+
+    Args:
+        base_url: The base URL of the OSRM server.
+        candidate_coords: The ``lon,lat`` string of each point tried, in the order they are tried.
+        test_coords: The ``lon,lat`` string of each zone routed to.
+    """
+    coords = [*candidate_coords, *test_coords]
+    candidate_rows = np.arange(len(candidate_coords))
+    test_rows = np.arange(len(candidate_coords), len(coords))
+    durations_s = _route_table(base_url, coords, candidate_rows, test_rows)
+    reaches_any = ~np.isnan(durations_s).all(axis=1)
+
+    if not reaches_any.any():
+        return None
+
+    return int(np.argmax(reaches_any))
 
 
 def _unlinked_rows(durations_s: np.ndarray) -> np.ndarray:

@@ -2,6 +2,7 @@
 
 import io
 import zipfile
+from contextlib import contextmanager
 
 import geopandas as gpd
 import numpy as np
@@ -12,16 +13,18 @@ from shapely.geometry import Point, box
 
 from activitygraphs.base import CRS
 from activitygraphs.config import GTFSFeeds
-from activitygraphs.graph.osrm import _duration_table, _foot_profile, _unlinked_rows
+from activitygraphs.graph import osrm
+from activitygraphs.graph.osrm import _coord_strings, _duration_table, _foot_profile, _unlinked_rows
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES
 from activitygraphs.graph.travel_times import (
     MAX_TRAVEL_TIME,
     WALK_SPEED_KMH,
     _is_walkable,
+    _nearest_walkable_points,
     _pt_time_table,
     _replace_pairs,
     _unlinked_zone_ids,
-    nearest_walkable_points,
+    walkable_candidate_points,
 )
 from activitygraphs.surveys.gtfs import write_feed_subsets
 
@@ -65,6 +68,17 @@ OSM_XML = """<?xml version="1.0" encoding="UTF-8"?>
   <node id="4" version="1" lat="46.2010" lon="6.1100"/>
   <way id="10" version="1"><nd ref="1"/><nd ref="2"/><tag k="highway" v="motorway"/></way>
   <way id="11" version="1"><nd ref="3"/><nd ref="4"/><tag k="highway" v="residential"/></way>
+</osm>
+"""
+
+TWO_STREETS_OSM_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <node id="1" version="1" lat="46.2005" lon="6.0900"/>
+  <node id="2" version="1" lat="46.2005" lon="6.1100"/>
+  <node id="3" version="1" lat="46.2020" lon="6.0900"/>
+  <node id="4" version="1" lat="46.2020" lon="6.1100"/>
+  <way id="10" version="1"><nd ref="3"/><nd ref="4"/><tag k="highway" v="residential"/></way>
+  <way id="11" version="1"><nd ref="1"/><nd ref="2"/><tag k="highway" v="service"/></way>
 </osm>
 """
 
@@ -128,6 +142,36 @@ class TestWriteFeedSubsets:
         far_polygon = box(10.0, 50.0, 10.1, 50.1)
 
         assert write_feed_subsets(gtfs_feeds, tmp_path, far_polygon, tmp_path / "subsets") == []
+
+    def test_two_source_feeds_of_one_feed_name_get_different_file_names(self, tmp_path):
+        gtfs_feeds = write_feed(tmp_path, {})
+        (tmp_path / "other").mkdir()
+        other_feeds = write_feed(tmp_path / "other", {})
+
+        (feed_path,) = write_feed_subsets(gtfs_feeds, tmp_path, CLIP_POLYGON, tmp_path / "subsets")
+        (other_path,) = write_feed_subsets(other_feeds, tmp_path / "other", CLIP_POLYGON, tmp_path / "other-subsets")
+
+        assert feed_path.name.startswith("tpg-")
+        assert other_path.name.startswith("tpg-")
+        assert feed_path.name != other_path.name
+
+    def test_writing_one_subset_again_gives_the_same_file_name(self, tmp_path):
+        gtfs_feeds = write_feed(tmp_path, {})
+
+        (first_path,) = write_feed_subsets(gtfs_feeds, tmp_path, CLIP_POLYGON, tmp_path / "first")
+        (second_path,) = write_feed_subsets(gtfs_feeds, tmp_path, CLIP_POLYGON, tmp_path / "second")
+
+        assert first_path.name == second_path.name
+
+    def test_writing_the_subsets_again_leaves_one_zip_per_feed(self, tmp_path):
+        gtfs_feeds = write_feed(tmp_path, {})
+        out_dir = tmp_path / "subsets"
+        write_feed_subsets(gtfs_feeds, tmp_path, CLIP_POLYGON, out_dir)
+        (out_dir / "stale.zip").write_bytes(b"")
+
+        (feed_path,) = write_feed_subsets(gtfs_feeds, tmp_path, CLIP_POLYGON, out_dir)
+
+        assert list(out_dir.glob("*.zip")) == [feed_path]
 
     def test_fields_beyond_the_header_are_dropped(self, tmp_path):
         agency = FEED["agency.txt"].replace("Europe/Zurich\n", "Europe/Zurich,,\n").encode()
@@ -193,12 +237,32 @@ class TestNearestWalkablePoints:
         osm_path.write_text(OSM_XML)
         points = gpd.GeoSeries([Point(6.1000, 46.2000)], index=["zone"], crs=CRS)
 
-        moved, distance_m = nearest_walkable_points(points, osm_path)
+        moved, distance_m = _nearest_walkable_points(points, osm_path)
 
         assert moved.index.tolist() == ["zone"]
         assert moved.iloc[0].y == pytest.approx(46.2010, abs=1e-6)
         assert moved.iloc[0].x == pytest.approx(6.1000, abs=1e-6)
         assert distance_m[0] == pytest.approx(111, abs=2)
+
+    def test_the_candidate_points_lie_on_every_walkable_way_nearest_first(self, tmp_path):
+        osm_path = tmp_path / "streets.osm"
+        osm_path.write_text(TWO_STREETS_OSM_XML)
+        points = gpd.GeoSeries([Point(6.1000, 46.2000)], index=["zone"], crs=CRS)
+
+        candidates = walkable_candidate_points(points, osm_path, max_candidates=5)
+        candidate_points, distance_m = candidates["zone"]
+
+        assert candidate_points.y.tolist() == pytest.approx([46.2005, 46.2020], abs=1e-6)
+        assert distance_m.tolist() == pytest.approx([56, 222], abs=2)
+
+    def test_the_candidate_points_stop_at_the_largest_number_asked(self, tmp_path):
+        osm_path = tmp_path / "streets.osm"
+        osm_path.write_text(TWO_STREETS_OSM_XML)
+        points = gpd.GeoSeries([Point(6.1000, 46.2000)], index=["zone"], crs=CRS)
+
+        candidate_points, _ = walkable_candidate_points(points, osm_path, max_candidates=1)["zone"]
+
+        assert candidate_points.y.tolist() == pytest.approx([46.2005], abs=1e-6)
 
     @pytest.mark.parametrize(
         ("tags", "walkable"),
@@ -239,3 +303,50 @@ class TestOSRMTables:
         durations_s = np.array([[0.0, 60.0, np.nan], [np.nan, 0.0, np.nan], [30.0, np.nan, 0.0]])
 
         assert _unlinked_rows(durations_s).tolist() == [1]
+
+
+class TestRoadTravelTimeFallback:
+    def test_every_zone_that_reaches_nothing_is_moved_to_its_first_linked_candidate(self, monkeypatch, tmp_path):
+        zone_points = gpd.GeoSeries(
+            [Point(6.10, 46.20), Point(6.11, 46.20), Point(6.12, 46.20), Point(6.13, 46.20)],
+            index=["a", "b", "c", "d"],
+            crs=CRS,
+        )
+        nodes_gdf = gpd.GeoDataFrame(geometry=zone_points)
+        cut_off_candidates = gpd.GeoSeries([Point(6.12, 46.21), Point(6.13, 46.21)], crs=CRS)
+        linked_candidates = gpd.GeoSeries([Point(6.12, 46.22), Point(6.13, 46.22)], crs=CRS)
+        cut_off_coords = set(_coord_strings(zone_points.loc[["c", "d"]])) | set(_coord_strings(cut_off_candidates))
+
+        def fake_route_table(base_url, coords, sources, destinations):
+            destinations = np.arange(len(coords)) if destinations is None else destinations
+            durations_s = np.full((len(sources), len(destinations)), 600.0)
+            for i, source in enumerate(sources):
+                for j, destination in enumerate(destinations):
+                    if coords[source] in cut_off_coords or coords[destination] in cut_off_coords:
+                        durations_s[i, j] = np.nan
+            return durations_s
+
+        def fake_candidates(points, osm_path, max_candidates):
+            candidates = {}
+            for position, label in enumerate(points.index):
+                candidate_points = gpd.GeoSeries(
+                    [cut_off_candidates.iloc[position], linked_candidates.iloc[position]], crs=CRS
+                )
+                candidates[label] = (candidate_points, np.array([10.0, 50.0]))
+            return candidates
+
+        @contextmanager
+        def fake_server(mode_dir, num_zones):
+            yield "http://osrm"
+
+        monkeypatch.setattr(osrm, "_prepare_network", lambda mode, osm_path, mode_dir: None)
+        monkeypatch.setattr(osrm, "_osrm_server", fake_server)
+        monkeypatch.setattr(osrm, "_route_table", fake_route_table)
+        monkeypatch.setattr(osrm, "walkable_candidate_points", fake_candidates)
+
+        travel_times = osrm.build_road_travel_times(nodes_gdf, tmp_path / "extract.osm.pbf", tmp_path)
+
+        for mode in osrm.OSRM_PROFILES:
+            assert travel_times[f"{mode}_reachable"].all()
+            assert travel_times.loc[("c", "a"), f"{mode}_time_min"] == 10.0
+            assert travel_times.loc[("a", "d"), f"{mode}_time_min"] == 10.0

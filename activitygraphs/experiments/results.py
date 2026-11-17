@@ -21,6 +21,9 @@ from activitygraphs.runs import (
     create_run_dir,
 )
 
+KEPT_EMPTY_COLUMNS = ("seed",)
+"""Columns kept by ``save_results`` even when null for every row, since the analysis groups by them."""
+
 
 def create_output_dir(cfg: Config, started: datetime) -> Path | None:
     """Create the run directory.
@@ -88,8 +91,10 @@ def save_results(run_dir: Path, *results: pl.DataFrame):
 
 
 def _drop_empty_columns(df: pl.DataFrame) -> pl.DataFrame:
-    """Drop columns that are null for every row (an artefact of the diagonal concat)."""
+    """Drop columns that are null for every row (an artefact of the diagonal concat), except ``KEPT_EMPTY_COLUMNS``."""
     if df.is_empty():
         return df
 
-    return df.select([col for col in df.columns if df[col].null_count() < df.height])
+    kept_cols = [col for col in df.columns if col in KEPT_EMPTY_COLUMNS or df[col].null_count() < df.height]
+
+    return df.select(kept_cols)

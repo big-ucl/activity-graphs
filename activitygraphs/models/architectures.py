@@ -22,6 +22,7 @@ from activitygraphs.models.features import (
     FeatureSource,
     HomeAnchoredPE,
     HomeDistance,
+    HomeTravelTimes,
     InputFeatures,
     ProjectedLocationFeatures,
     build_feature_encoder,
@@ -194,8 +195,8 @@ def _build_two_tower(
     Features inputs are given to the model components as follows:
     - Node tower: accessibility features (``use_access``) and random-walk PE (``use_rwpe``).
     - User tower: user attributes (``use_demographics``)
-    - Pairwise block: home-anchored PE (``use_home_pe``, over the network hops with ``use_network_hops``) and
-      distance from home (``use_dist``).
+    - Pairwise block: home-anchored PE (``use_home_pe``, over the network hops with ``use_network_hops``),
+      distance from home (``use_dist``) and travel times from home (``use_tt``).
 
     Raises:
         ValueError: If ``config.bias`` is not one of ``TWO_TOWER_BIASES``.
@@ -232,6 +233,8 @@ def _build_two_tower(
         pair_sources.append(HomeAnchoredPE(home_pe_cfg.bins, home_pe_cfg.max_hops, features.use_network_hops))
     if features.use_dist:
         pair_sources.append(HomeDistance(schema.distances))
+    if features.use_tt:
+        pair_sources.append(HomeTravelTimes(schema.travel_times))
 
     pair_encoder = FeatureEncoder(pair_sources) if pair_sources else None
     pair_in_channels = 2 * embedding_dim + (0 if pair_encoder is None else pair_encoder.out_dim)

@@ -25,6 +25,7 @@ class InputFeatures:
         use_rwpe: Append the random-walk positional encoding to each node's features.
         use_access: Append the accessibility features of each node to its features.
         use_network_hops: Instead of counting using contiguity edges in ``home_pe``, use all edge types (contiguity, rail) .
+        use_tt: Append the travel time and reachability by each mode from home to each node's features.
     """
 
     use_home_pe: bool = True
@@ -33,6 +34,7 @@ class InputFeatures:
     use_rwpe: bool = True
     use_access: bool = True
     use_network_hops: bool = True
+    use_tt: bool = True
 
     @property
     def departures(self) -> list[str]:
@@ -224,6 +226,19 @@ class HomeDistance(FeatureSource):
         return batch.home_distance.unsqueeze(-1)
 
 
+class HomeTravelTimes(FeatureSource):
+    """The travel times from the user's home to each node as fed to the model, ``batch.home_travel_times``."""
+
+    def __init__(self, schema: TensorSchema):
+        super().__init__()
+        self.schema = schema
+        self.out_dim = schema.width
+
+    def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
+        """Return ``batch.home_travel_times``, ``[num_users, num_nodes, out_dim]``."""
+        return batch.home_travel_times
+
+
 class FeatureEncoder(torch.nn.Module):
     """Encodes the model input: encodes the columns of every source, concatenated together in order.
 
@@ -272,8 +287,9 @@ def build_feature_encoder(
       1. node features (location and accessibility features and random-walk PE), as in ``build_node_feature_encoder``,
       2. per-user node features,
       3. home-anchored PE, over the network hops when ``features.use_network_hops`` is set,
-      4. demographics, and
-      5. distance from home.
+      4. demographics,
+      5. distance from home, and
+      6. travel times from home.
 
     Args:
         features: The input features to encode.
@@ -292,6 +308,8 @@ def build_feature_encoder(
         sources.append(Demographics(schema.user_attributes))
     if features.use_dist:
         sources.append(HomeDistance(schema.distances))
+    if features.use_tt:
+        sources.append(HomeTravelTimes(schema.travel_times))
 
     return FeatureEncoder(sources)
 

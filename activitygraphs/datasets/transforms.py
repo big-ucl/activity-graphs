@@ -71,7 +71,13 @@ class GroupTransform:
     scaler: StandardScaler | None
 
     @classmethod
-    def fit(cls, schema: TensorSchema, transforms: tuple[Transform, ...], values: torch.Tensor) -> Self:
+    def fit(
+        cls,
+        schema: TensorSchema,
+        transforms: tuple[Transform, ...],
+        values: torch.Tensor,
+        row_weights: torch.Tensor | None = None,
+    ) -> Self:
         """Fit the scaler for a group on ``values``.
 
         Warns about every constant z-scored column.
@@ -80,13 +86,16 @@ class GroupTransform:
             schema: Schema of the group.
             transforms: Transform of each column of the group.
             values: tensor of values to fit the scaler, shape ``[..., num_columns]`` .
+            row_weights: Weight of each row, ``[num_rows]``. The rows are those of ``values`` flattened to
+                ``[num_rows, num_columns]``. ``None`` weighs every row alike.
         """
         scaled_idx = _scaled_column_indices(transforms)
         if not scaled_idx:
             return cls(transforms, None)
 
         flat = _log1p(values, transforms)[:, scaled_idx]
-        scaler = StandardScaler().fit(flat.numpy())
+        sample_weight = None if row_weights is None else row_weights.numpy()
+        scaler = StandardScaler().fit(flat.numpy(), sample_weight=sample_weight)
         variances = cast(np.ndarray, scaler.var_)
 
         for column, variance in zip(scaled_idx, variances, strict=True):
@@ -166,6 +175,8 @@ def fit_transforms(
         raise ValueError("The `user_nodes` columns are built from the home node and cannot be transformed.")
 
     train_homes = users.home_node[train_idx]
+    train_home_node_idx, num_train_residents = torch.unique(train_homes, return_counts=True)
+    travel_time_weights = num_train_residents.repeat_interleave(locations.num_nodes)
 
     # Location and edge features: no need to separate between train and test, the graph is the same.
     values = {
@@ -175,7 +186,9 @@ def fit_transforms(
         "rail_edges": locations.rail_edge_attr,
         "user_attributes": users.attributes[train_idx],
         "distances": locations.distance_m[train_homes].unsqueeze(-1),
+        "travel_times": locations.travel_times_min[train_home_node_idx],
     }
+    row_weights = {"travel_times": travel_time_weights}
 
     groups = {"user_nodes": GroupTransform(user_node_transforms, None)}
     for group_schema in schema.feature_groups:
@@ -184,7 +197,8 @@ def fit_transforms(
 
         numeric = group_schema.numeric
         transforms = policy.column_transforms(numeric)
-        groups[group_schema.group] = GroupTransform.fit(numeric, transforms, values[group_schema.group])
+        group = group_schema.group
+        groups[group] = GroupTransform.fit(numeric, transforms, values[group], row_weights.get(group))
 
     return FeatureTransforms(groups=groups, policy=policy, fingerprint=fingerprint)
 

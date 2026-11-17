@@ -37,6 +37,9 @@ def dataset_schema() -> DatasetSchema:
         user_nodes=TensorSchema("user_nodes", (ColumnSpec("is_home", BINARY),)),
         user_attributes=user_attributes(),
         distances=TensorSchema("distances", (ColumnSpec("distance", COUNT),)),
+        travel_times=TensorSchema(
+            "travel_times", (ColumnSpec("pt_time_min", COUNT), ColumnSpec("pt_reachable", BINARY))
+        ),
         targets=TensorSchema("targets", (ColumnSpec("is_visited", BINARY),)),
     )
 
@@ -142,6 +145,7 @@ class TestDatasetSchema:
             "user_nodes",
             "user_attributes",
             "distances",
+            "travel_times",
         ]
 
     def test_a_schema_must_sit_in_its_own_group(self):

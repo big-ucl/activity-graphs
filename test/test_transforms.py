@@ -99,6 +99,17 @@ class TestGroupTransform:
 
         torch.testing.assert_close(out, torch.tensor([[0.0], [3.0]]))
 
+    def test_a_row_weight_counts_as_that_many_repeated_rows(self):
+        schema = TensorSchema("travel_times", (ColumnSpec("pt_time_min", COUNT),))
+        rows = torch.tensor([[10.0], [30.0], [90.0]])
+        row_weights = torch.tensor([3, 1, 2])
+        repeated_rows = rows.repeat_interleave(row_weights, dim=0)
+
+        weighted_fit_output = GroupTransform.fit(schema, (LOG1P_ZSCORE,), rows, row_weights).apply(rows)
+        repeated_fit_output = GroupTransform.fit(schema, (LOG1P_ZSCORE,), repeated_rows).apply(rows)
+
+        torch.testing.assert_close(weighted_fit_output, repeated_fit_output)
+
     def test_warns_about_a_constant_zscored_column(self, caplog):
         schema = TensorSchema("user_attributes", (ColumnSpec("constant", BINARY),))
         values = torch.ones(5, 1)

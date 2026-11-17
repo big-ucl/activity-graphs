@@ -1,5 +1,6 @@
 """GTFS reader: the feeds of a dataset, read into one set of tables with every id prefixed by its feed."""
 
+import hashlib
 import io
 import zipfile
 from collections.abc import Callable
@@ -222,7 +223,9 @@ def write_feed_subsets(
         gtfs_feeds: The paths of the feeds within ``gtfs_dir`` and the service date.
         gtfs_dir: Root directory of the GTFS feed paths.
         clip_polygon: The area of the trips to keep, in longitude and latitude.
-        out_dir: Directory of the zipped feeds, one ``{feed name}.zip`` per feed.
+        out_dir: Directory of the zipped feeds, one ``{feed name}-{subset hash}.zip`` per feed. The subset hash is a
+            hash of the source feed path, the service date and the kept ids. The zip files already in ``out_dir`` are
+            deleted.
 
     Returns:
         The path of each non-empty zipped feed, in the order of ``gtfs_feeds.feeds``.
@@ -231,6 +234,9 @@ def write_feed_subsets(
     subset_ids = _subset_ids(gtfs, clip_polygon)
     service_date = gtfs.service_date.strftime("%Y%m%d")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    for stale_path in out_dir.glob("*.zip"):
+        stale_path.unlink()
 
     feed_paths = []
     for feed_name, path in gtfs_feeds.feeds.items():
@@ -242,8 +248,12 @@ def write_feed_subsets(
         if feed_ids["trip"].is_empty():
             continue
 
-        feed_path = out_dir / f"{feed_name}.zip"
-        _write_feed_subset(gtfs_dir / path, feed_ids, service_date, feed_path)
+        source_path = gtfs_dir / path
+        # r5py caches each feed by file name alone, so feeds cannot share a filename.
+        subset_hash = _subset_hash(source_path, service_date, feed_ids)
+
+        feed_path = out_dir / f"{feed_name}-{subset_hash}.zip"
+        _write_feed_subset(source_path, feed_ids, service_date, feed_path)
         feed_paths.append(feed_path)
 
     return feed_paths
@@ -357,6 +367,27 @@ def _write_feed_subset(feed_path: Path, feed_ids: dict[str, pl.Series], service_
 
             if subset_rows.height > 0:
                 archive.writestr(f"{table_name}.txt", subset_rows.write_csv())
+
+
+def _subset_hash(feed_path: Path, service_date: str, feed_ids: dict[str, pl.Series]) -> str:
+    """Return a hash of the inputs of the subset of one feed: the source feed path, the service date and the kept ids.
+
+    Args:
+        feed_path: Path of the source feed, a directory or a zip file.
+        service_date: The service date, as ``YYYYMMDD``.
+        feed_ids: The kept ids of each id kind, without the feed prefix.
+
+    Returns:
+        A 16-character hexadecimal hash.
+    """
+    subset_hash = hashlib.blake2b(digest_size=8)
+    subset_hash.update(f"{feed_path}\n{service_date}\n".encode())
+
+    for feed_kind in sorted(feed_ids):
+        kept_ids = sorted(feed_ids[feed_kind].to_list())
+        subset_hash.update(f"{feed_kind}:{','.join(kept_ids)}\n".encode())
+
+    return subset_hash.hexdigest()
 
 
 def _table_subset(raw_table: pl.LazyFrame, subset_ids: dict[str, pl.Series]) -> pl.LazyFrame:

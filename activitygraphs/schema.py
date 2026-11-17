@@ -155,6 +155,7 @@ class DatasetSchema:
         user_nodes: Per-user node features.
         user_attributes: Per-user attributes.
         distances: Per-user distance from home of every node.
+        travel_times: Travel time and reachability by each mode between every pair of nodes.
         targets: Per-user visit labels.
 
     Raises:
@@ -168,6 +169,7 @@ class DatasetSchema:
     user_nodes: TensorSchema
     user_attributes: TensorSchema
     distances: TensorSchema
+    travel_times: TensorSchema
     targets: TensorSchema
 
     def __post_init__(self) -> None:

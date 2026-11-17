@@ -36,6 +36,11 @@ class Locations:
         distance_m: Distance between the centroids of every pair of nodes in metres, never scaled,
             ``[num_nodes, num_nodes]``. Row ``i`` holds the distances from node ``i`` to every node.
         distance: Scaled and transformed ``distance_m`, used as a model feature, ``[num_nodes, num_nodes]``.
+        travel_times_min: Travel time in minutes and reachability by each mode from every node to every node, never
+            scaled, ``[num_nodes, num_nodes, num_travel_time_features]``. Row ``i`` holds the travel times from node
+            ``i``.
+        travel_times: Scaled and transformed ``travel_times_min``, used as a model feature,
+            ``[num_nodes, num_nodes, num_travel_time_features]``.
         node_ids: Survey ``loc_id`` of each node, one row per node.
     """
 
@@ -50,6 +55,8 @@ class Locations:
     network_hop_distance: torch.Tensor
     distance_m: torch.Tensor
     distance: torch.Tensor
+    travel_times_min: torch.Tensor
+    travel_times: torch.Tensor
     node_ids: pl.DataFrame
 
     @classmethod
@@ -74,6 +81,7 @@ class Locations:
                 tensors.distance_m,
             )
             rail_edge_attr = tensors.rail_edge_attr
+            travel_times = tensors.travel_times_min
         else:
             distance_m = tensors.distance_m.unsqueeze(-1)
             x = transforms.groups["locations"].apply(tensors.x)
@@ -81,6 +89,7 @@ class Locations:
             contiguity_edge_attr = transforms.groups["contiguity_edges"].apply(tensors.contiguity_edge_attr)
             rail_edge_attr = transforms.groups["rail_edges"].apply(tensors.rail_edge_attr)
             distance = transforms.groups["distances"].apply(distance_m).squeeze(-1)
+            travel_times = transforms.groups["travel_times"].apply(tensors.travel_times_min)
 
         return cls(
             x=x,
@@ -94,6 +103,8 @@ class Locations:
             network_hop_distance=network_hop_distance,
             distance_m=tensors.distance_m,
             distance=distance,
+            travel_times_min=tensors.travel_times_min,
+            travel_times=travel_times,
             node_ids=tensors.node_ids,
         )
 

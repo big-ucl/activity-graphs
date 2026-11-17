@@ -23,12 +23,14 @@ def make_locations(
     distance_m: torch.Tensor | None = None,
     access: torch.Tensor | None = None,
     rail_edge_index: torch.Tensor | None = None,
+    travel_times_min: torch.Tensor | None = None,
 ) -> Locations:
     """Return the locations over ``x`` and ``contiguity_edge_index``, with the hop distances computed from the contiguity and rail edges.
 
     A missing ``contiguity_edge_attr``, ``random_walk_pe`` or ``access`` has no columns, and a missing ``distance_m`` puts every node at 0 m
     from every node. A missing ``rail_edge_index`` has no edges, and the rail edges have no columns. The scaled
-    ``distance`` equals ``distance_m``.
+    ``distance`` equals ``distance_m``. Missing ``travel_times_min`` have no columns. The scaled
+    ``travel_times`` equal ``travel_times_min``.
     """
     num_nodes = x.shape[0]
     if contiguity_edge_attr is None:
@@ -41,6 +43,8 @@ def make_locations(
         access = torch.zeros(num_nodes, 0)
     if rail_edge_index is None:
         rail_edge_index = torch.zeros(2, 0, dtype=torch.long)
+    if travel_times_min is None:
+        travel_times_min = torch.zeros(num_nodes, num_nodes, 0)
 
     return Locations(
         x=x,
@@ -56,6 +60,8 @@ def make_locations(
         ),
         distance_m=distance_m,
         distance=distance_m,
+        travel_times_min=travel_times_min,
+        travel_times=travel_times_min,
         node_ids=pl.DataFrame({"loc_id": [f"z{node}" for node in range(num_nodes)]}),
     )
 

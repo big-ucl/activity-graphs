@@ -29,6 +29,7 @@ from activitygraphs.datasets import GraphBatch, HouseholdSplit, Locations, UserD
 from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.graph import GraphTables
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES
+from activitygraphs.graph.travel_times import TRAVEL_TIME_SCHEMA
 from activitygraphs.models.features import InputFeatures, build_feature_encoder
 from activitygraphs.models.schema_encoder import _default_emb_dim
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
@@ -63,7 +64,7 @@ USERS_PER_HOUSEHOLD = 2
 NUM_USERS = NUM_HOUSEHOLDS * USERS_PER_HOUSEHOLD
 TRAIN_IDX = list(range(10))
 VISIT_PURPOSES = [Purpose.WORK_MAIN, Purpose.SHOP, Purpose.LEISURE_OTHER, Purpose.STUDY]
-FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe", "use_access", "use_network_hops")
+FLAGS = ("use_dist", "use_demographics", "use_home_pe", "use_rwpe", "use_access", "use_network_hops", "use_tt")
 SURVEYS = ("cmap", "no_demographics")
 HOME_PE = HomePEConfig(bins=8, max_hops=40)
 
@@ -341,7 +342,7 @@ def test_an_item_carries_the_rows_of_one_user(tmp_path):
 def test_each_graph_copy_carries_the_location_and_user_node_features_apart(tmp_path):
     locations, users, schema = build_survey("cmap", tmp_path)
     batch = join_users(locations, users)
-    features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False)
+    features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False, use_tt=False)
     encoder = build_feature_encoder(features, locations, schema, HOME_PE)
     graphs = GraphBatch.expand(encoder(locations, batch), locations)
     num_nodes = locations.num_nodes
@@ -364,6 +365,32 @@ def test_a_joined_batch_carries_the_distances_in_metres_beside_the_scaled_ones(t
     scaled = transforms.groups["distances"].apply(distances).squeeze(-1)
     torch.testing.assert_close(batch.home_distance_m[3], metres)
     torch.testing.assert_close(batch.home_distance[3], scaled)
+
+
+def test_the_travel_times_hold_the_row_of_each_ordered_pair_from_its_source(tmp_path):
+    locations, _, _ = build_survey("cmap", tmp_path)
+    loc_ids = build_zones()["loc_id"].tolist()
+    travel_times = build_travel_times(loc_ids)
+    source, target = loc_ids[2], loc_ids[7]
+    expected_travel_times = torch.tensor(
+        travel_times.loc[(source, target), TRAVEL_TIME_SCHEMA.names].to_numpy(dtype=np.float32)
+    )
+
+    torch.testing.assert_close(locations.travel_times_min[2, 7], expected_travel_times, rtol=0, atol=0)
+
+
+def test_a_joined_batch_carries_the_travel_times_from_home_raw_and_scaled(tmp_path):
+    locations, users, _, transforms = build_scaled_survey("cmap", tmp_path)
+    batch = join_users(locations, users)
+    travel_times_min = locations.travel_times_min[users.home_node[3]]
+
+    scaled_travel_times = transforms.groups["travel_times"].apply(travel_times_min)
+    reachable_idx = TRAVEL_TIME_SCHEMA.indices(ColumnKind.BINARY)
+    torch.testing.assert_close(batch.home_travel_times_min[3], travel_times_min)
+    torch.testing.assert_close(batch.home_travel_times[3], scaled_travel_times)
+    torch.testing.assert_close(
+        scaled_travel_times[:, reachable_idx], travel_times_min[:, reachable_idx], rtol=0, atol=0
+    )
 
 
 @pytest.mark.parametrize(
@@ -466,6 +493,7 @@ def test_a_graph_without_an_edge_index_raises():
             locations.rail_edge_index,
             locations.rail_edge_attr,
             locations.distance_m,
+            locations.travel_times_min,
             locations.node_ids,
         )
 

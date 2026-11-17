@@ -40,6 +40,7 @@ def make_schema(n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=make_group("user_attributes", n_demo, demo_kind),
         distances=make_group("distances", 1),
+        travel_times=make_group("travel_times", 0),
         targets=make_group("targets", 1),
     )
 
@@ -70,6 +71,7 @@ def make_dataset(
         rail_edge_index=torch.zeros((2, 0), dtype=torch.long),
         rail_edge_attr=torch.zeros((0, 0)),
         distance_m=torch.zeros((n_nodes, n_nodes)),
+        travel_times_min=torch.zeros((n_nodes, n_nodes, 0)),
         node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),
     )
     users = UserTensors(

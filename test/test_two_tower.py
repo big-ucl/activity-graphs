@@ -29,8 +29,9 @@ NUM_EDGE_FEATURES = 2
 NUM_RWPE_FEATURES = 4
 NUM_ACCESS_FEATURES = 2
 NUM_ATTRIBUTES = 2
+NUM_TRAVEL_TIME_FEATURES = 2
 HOME_PE = HomePEConfig(bins=4, max_hops=5)
-FLAGS = ["use_dist", "use_home_pe", "use_demographics", "use_rwpe", "use_access", "use_network_hops"]
+FLAGS = ["use_dist", "use_home_pe", "use_demographics", "use_rwpe", "use_access", "use_network_hops", "use_tt"]
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +53,7 @@ def make_schema() -> DatasetSchema:
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", NUM_ATTRIBUTES),
         distances=continuous_schema("distances", 1),
+        travel_times=continuous_schema("travel_times", NUM_TRAVEL_TIME_FEATURES),
         targets=continuous_schema("targets", 1),
     )
 
@@ -69,7 +71,10 @@ def make_survey() -> tuple[Locations, Users]:
     home_node = torch.tensor([0, 2, 2, 5])
     attributes = torch.rand(NUM_USERS, NUM_ATTRIBUTES, generator=generator)
     access = torch.rand(NUM_NODES, NUM_ACCESS_FEATURES, generator=generator)
-    locations = make_locations(x, edge_index, edge_attr, random_walk_pe, distance_m, access)
+    travel_times = torch.rand(NUM_NODES, NUM_NODES, NUM_TRAVEL_TIME_FEATURES, generator=generator)
+    locations = make_locations(
+        x, edge_index, edge_attr, random_walk_pe, distance_m, access, travel_times_min=travel_times
+    )
 
     return locations, make_users(visited, home_node, attributes)
 
@@ -128,7 +133,7 @@ class TestTwoTowerScorer:
         locations, _ = make_survey()
         schema = make_schema()
         bare_features = InputFeatures(
-            use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False, use_access=False
+            use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False, use_access=False, use_tt=False
         )
         bare = scorer_of(config, bare_features, locations)
         full = scorer_of(config, InputFeatures(use_dist=True, use_home_pe=True), locations)
@@ -139,7 +144,7 @@ class TestTwoTowerScorer:
         assert full_node_width - bare_node_width == schema.access.width + locations.num_rwpe_features
         assert bare.pair_encoder is None
         assert full.pair_encoder is not None
-        assert full.pair_encoder.out_dim == HOME_PE.bins + schema.distances.width
+        assert full.pair_encoder.out_dim == HOME_PE.bins + schema.distances.width + schema.travel_times.width
 
     @pytest.mark.parametrize("use_demographics", [False, True])
     def test_the_user_attributes_change_the_scores_only_with_the_demographics(self, config, use_demographics):
@@ -282,7 +287,7 @@ class TestPairLocationFeatures:
 
     def test_project_the_location_features_through_a_layer_of_their_own(self, config):
         locations, users = make_survey()
-        features = InputFeatures(use_home_pe=False, use_dist=False)
+        features = InputFeatures(use_home_pe=False, use_dist=False, use_tt=False)
         scorer = scorer_of(OmegaConf.merge(config, {"pair_location_features": True}), features, locations)
         batch = join_users(locations, users)
 

@@ -16,7 +16,8 @@ from activitygraphs.base import Purpose
 from activitygraphs.config import Config, DataConfig
 from activitygraphs.graph import GraphTables, load_graph
 from activitygraphs.graph.access import ACCESS_SCHEMA
-from activitygraphs.graph.rail import RAIL_EDGE_SCHEMA
+from activitygraphs.graph.rail import EDGE_INDEX_NAMES, RAIL_EDGE_SCHEMA
+from activitygraphs.graph.travel_times import TRAVEL_TIME_SCHEMA
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema, infer_schema
 from activitygraphs.surveys.base import SurveyData
 from activitygraphs.surveys.registry import load_survey
@@ -148,6 +149,25 @@ def _build_rail_edges(rail_edges: pd.DataFrame, node_ids: pl.DataFrame) -> tuple
     return edge_index, edge_values.repeat(2, 1)
 
 
+def _build_travel_times(travel_times: pd.DataFrame, node_ids: pl.DataFrame) -> torch.Tensor:
+    """Return a tensor of travel times between every ordered pair of nodes, following ``TRAVEL_TIME_SCHEMA``.
+
+    Args:
+        travel_times: Travel times between every ordered pair of zones, indexed by (``source``, ``target``) ``loc_id``.
+        node_ids: Survey ``loc_id`` of each node, in node order.
+
+    Returns:
+        Float tensor of shape ``[n_nodes, n_nodes, n_travel_time_features]``. Row ``i`` holds the travel times from
+        node ``i``.
+    """
+    loc_ids = node_ids["loc_id"].to_list()
+    pair_index = pd.MultiIndex.from_product([loc_ids, loc_ids], names=EDGE_INDEX_NAMES)
+    pair_values = travel_times.reindex(pair_index)[TRAVEL_TIME_SCHEMA.names].to_numpy(dtype=np.float32)
+    num_nodes = len(loc_ids)
+
+    return torch.from_numpy(pair_values).reshape(num_nodes, num_nodes, TRAVEL_TIME_SCHEMA.width)
+
+
 def _add_indicator_column(feature_df: pl.LazyFrame, indicator_df: pl.DataFrame, col_name: str):
     """Add an indicator column with name ``col_name`` to ``feature_df`` which is ``True`` if ``[loc_id, user_id]`` appears in ``indicator_df`` and ``False`` otherwise."""
     true_indicators = indicator_df.select("user_id", "loc_id", pl.lit(True).alias(col_name)).unique().lazy()
@@ -224,7 +244,7 @@ def build_tensors(survey: SurveyData, graph: GraphTables) -> SurveyTensors:
 
     Args:
         survey: The survey.
-        graph: The nodes, the contiguity edges and the rail edges of the graph.
+        graph: The nodes, the contiguity edges, the rail edges and the travel times of the graph.
 
     Returns:
         Tuple ``(locations, users, schema)``: the tensors of the shared graph, the per-user tensors and the dataset
@@ -250,8 +270,9 @@ def build_tensors(survey: SurveyData, graph: GraphTables) -> SurveyTensors:
     distance_m = _build_node_distances(nodes_gdf)
     node_ids = _build_node_ids(survey, nodes_gdf)
     rail_edge_index, rail_edge_attr = _build_rail_edges(graph.rail_edges, node_ids)
+    travel_times_min = _build_travel_times(graph.travel_times, node_ids)
     locations = _build_location_tensors(
-        cast(pyg.data.Data, pyg_graph), access, rail_edge_index, rail_edge_attr, distance_m, node_ids
+        cast(pyg.data.Data, pyg_graph), access, rail_edge_index, rail_edge_attr, distance_m, travel_times_min, node_ids
     )
 
     attributes, attributes_cat = _build_user_attributes(survey)
@@ -330,6 +351,7 @@ def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=survey.demographics_schema,
         distances=DISTANCE_SCHEMA,
+        travel_times=TRAVEL_TIME_SCHEMA,
         targets=TARGET_SCHEMA,
     )
 
@@ -340,6 +362,7 @@ def _build_location_tensors(
     rail_edge_index: torch.Tensor,
     rail_edge_attr: torch.Tensor,
     distance_m: torch.Tensor,
+    travel_times_min: torch.Tensor,
     node_ids: pl.DataFrame,
 ) -> LocationTensors:
     """Return the location tensors of the PyG graph built by city2graph.
@@ -358,6 +381,7 @@ def _build_location_tensors(
         rail_edge_index=rail_edge_index,
         rail_edge_attr=rail_edge_attr,
         distance_m=distance_m,
+        travel_times_min=travel_times_min,
         node_ids=node_ids,
     )
 

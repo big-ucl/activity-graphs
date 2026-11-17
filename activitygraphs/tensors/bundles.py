@@ -21,6 +21,7 @@ class LocationFile(StrEnum):
     RAIL_EDGE_INDEX = "rail_edge_index.pt"
     RAIL_EDGE_ATTR = "rail_edge_attr.pt"
     DISTANCE_M = "distance_m.pt"
+    TRAVEL_TIMES_MIN = "travel_times_min.pt"
     NODE_IDS = "node_ids.parquet"
 
 
@@ -48,6 +49,9 @@ class LocationTensors:
         rail_edge_attr: Rail edge features, ``[num_rail_edges, num_rail_edge_features]``.
         distance_m: Distance between the centroids of every pair of nodes in metres, ``[num_nodes, num_nodes]``.
             Row ``i`` holds the distances from node ``i`` to every node.
+        travel_times_min: Travel time in minutes and reachability from every node to every node by each node,
+            following ``TRAVEL_TIME_SCHEMA``, ``[num_nodes, num_nodes, num_travel_time_features]``. Row ``i`` holds the
+            travel times from node ``i``.
         node_ids: Survey ``loc_id`` of each node, one row per node.
     """
 
@@ -58,6 +62,7 @@ class LocationTensors:
     rail_edge_index: torch.Tensor
     rail_edge_attr: torch.Tensor
     distance_m: torch.Tensor
+    travel_times_min: torch.Tensor
     node_ids: pl.DataFrame
 
     @property
@@ -76,6 +81,7 @@ class LocationTensors:
             LocationFile.RAIL_EDGE_INDEX: self.rail_edge_index,
             LocationFile.RAIL_EDGE_ATTR: self.rail_edge_attr,
             LocationFile.DISTANCE_M: self.distance_m,
+            LocationFile.TRAVEL_TIMES_MIN: self.travel_times_min,
         }
         for file, tensor in tensor_files.items():
             torch.save(tensor, directory / file)
@@ -93,6 +99,7 @@ class LocationTensors:
             rail_edge_index=torch.load(directory / LocationFile.RAIL_EDGE_INDEX, weights_only=True),
             rail_edge_attr=torch.load(directory / LocationFile.RAIL_EDGE_ATTR, weights_only=True),
             distance_m=torch.load(directory / LocationFile.DISTANCE_M, weights_only=True),
+            travel_times_min=torch.load(directory / LocationFile.TRAVEL_TIMES_MIN, weights_only=True),
             node_ids=pl.read_parquet(directory / LocationFile.NODE_IDS),
         )
 
@@ -180,6 +187,8 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
             "visited": users.visited.shape[1],
             "distance_m (rows)": locations.distance_m.shape[0],
             "distance_m (columns)": locations.distance_m.shape[1],
+            "travel_times_min (rows)": locations.travel_times_min.shape[0],
+            "travel_times_min (columns)": locations.travel_times_min.shape[1],
             "node_ids": locations.node_ids.height,
         },
     )
@@ -198,6 +207,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
         "rail_edges": (locations.rail_edge_attr.shape[-1], 0),
         "user_attributes": (users.attributes.shape[-1], users.attributes_cat.shape[-1]),
         "distances": (1, 0),
+        "travel_times": (locations.travel_times_min.shape[-1], 0),
         "targets": (1, 0),
     }
 
@@ -223,6 +233,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
         "contiguity_edge_attr": locations.contiguity_edge_attr,
         "rail_edge_attr": locations.rail_edge_attr,
         "distance_m": locations.distance_m,
+        "travel_times_min": locations.travel_times_min,
         "attributes": users.attributes,
     })
 

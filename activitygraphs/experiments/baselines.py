@@ -14,10 +14,13 @@ from activitygraphs.models.baselines import (
     GlobalBaseline,
     GravityBaseline,
     GravityBinnedBaseline,
+    LogsumGravityBaseline,
+    TravelTimeGravityBaseline,
     UniformBaseline,
     VisitFrequencyBaseline,
 )
 from activitygraphs.models.scorers import FittedScorer
+from activitygraphs.schema import TensorSchema
 from activitygraphs.training.losses import Loss
 
 
@@ -46,9 +49,10 @@ def measure_baselines(
     train_users = datamodule.train_dataset.users
     val_users = datamodule.val_dataset.users
     locations = datamodule.locations
+    travel_times = datamodule.schema.travel_times
     results = []
 
-    for spec in _closed_form_baselines(locations.num_nodes):
+    for spec in _closed_form_baselines(locations.num_nodes, travel_times):
         baseline = spec.baseline.fit(train_users, val_users, locations)
         result = evaluate_baseline(baseline, datamodule, loss, spec.name, cfg, wandb_params)
         results.append(result.with_columns(seed=pl.lit(None, dtype=pl.Int64)))
@@ -56,10 +60,15 @@ def measure_baselines(
     return results
 
 
-def _closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
+def _closed_form_baselines(num_nodes: int, travel_time_schema: TensorSchema) -> list[BaselineSpec]:
     """Return the specs of the baselines fitted once, rather than once per training seed.
 
     The baselines are returned unfitted.
+
+    Args:
+        num_nodes: Number of nodes of the location graph.
+        travel_time_schema: The column schema of the travel times, read by ``GravityTT``, ``GravityLogsum`` and
+            ``GravityLogsumDist``.
 
     Returns:
         The frequency baselines, then the distance-decay ones, in fitting order. ``ConditionalGravity`` reads the
@@ -74,6 +83,9 @@ def _closed_form_baselines(num_nodes: int) -> list[BaselineSpec]:
         BaselineSpec("ConditionalVisitFrequency", ConditionalVisitFrequencyBaseline(num_nodes)),
         BaselineSpec("DistanceDecay", DistanceDecayBaseline()),
         BaselineSpec("Gravity", gravity),
+        BaselineSpec("GravityTT", TravelTimeGravityBaseline(travel_time_schema)),
+        BaselineSpec("GravityLogsum", LogsumGravityBaseline(travel_time_schema, with_distance=False)),
+        BaselineSpec("GravityLogsumDist", LogsumGravityBaseline(travel_time_schema, with_distance=True)),
         BaselineSpec("GravityBinned", GravityBinnedBaseline()),
         BaselineSpec("ConditionalGravity", ConditionalGravityBaseline(gravity)),
     ]
