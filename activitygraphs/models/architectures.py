@@ -18,6 +18,7 @@ from activitygraphs.config import (
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.models.baselines import HomeZoneMFBaseline
 from activitygraphs.models.features import (
+    EdgeEncoder,
     FeatureEncoder,
     FeatureSource,
     HomeAnchoredPE,
@@ -25,6 +26,7 @@ from activitygraphs.models.features import (
     HomeTravelTimes,
     InputFeatures,
     ProjectedLocationFeatures,
+    build_edge_encoder,
     build_feature_encoder,
     build_node_feature_encoder,
 )
@@ -35,6 +37,7 @@ from activitygraphs.models.two_tower import LocationBias, MLPBias, NodeBias, Nod
 from activitygraphs.schema import DatasetSchema
 
 type ScorerBuilder = Callable[[ModelConfig, InputFeatures, Locations, DatasetSchema, HomePEConfig], Scorer]
+type EncodedScorerBuilder = Callable[[FeatureEncoder, torch.nn.Module, EdgeEncoder], EncodedScorer]
 
 
 @dataclass(frozen=True)
@@ -130,16 +133,16 @@ def _build_gps(config: GPSConfig, sizes: NetworkSizes) -> GraphTransformer:
 
 def _encoded_scorer(
     build_network_fn: Callable[..., torch.nn.Module],
-    scorer_cls: type[EncodedScorer],
+    build_scorer_fn: EncodedScorerBuilder,
 ) -> ScorerBuilder:
-    """Return the builder for a scorer that encodes network inputs with ``FeatureEncoder``.
+    """Return the builder for a scorer that encodes network inputs with ``FeatureEncoder`` and edges with ``EdgeEncoder``.
 
-    The builder sizes the network based on the encoder's ``out_dim`` and the widths of the schema, and wraps the encoder
-    and builds the scorer with ``scorer_cls(encoder, network)``. Every input feature is supported.
+    The builder sizes the network based on the ``out_dim`` of both encoders and the widths of the schema, and builds the
+    scorer with ``build_scorer_fn(encoder, network, edge_encoder)``. Every input feature is supported.
 
     Args:
         build_network_fn: Builds the network from its config and its ``NetworkSizes``.
-        scorer_cls: The scorer class, constructed from the ``FeatureEncoder`` and the network.
+        build_scorer_fn: Builds the scorer from the ``FeatureEncoder``, the network and the ``EdgeEncoder``.
     """
 
     def build(
@@ -150,15 +153,16 @@ def _encoded_scorer(
         home_pe_cfg: HomePEConfig,
     ) -> Scorer:
         encoder = build_feature_encoder(features, locations, schema, home_pe_cfg)
+        edge_encoder = build_edge_encoder(features, schema)
 
         sizes = NetworkSizes(
             in_channels=encoder.out_dim,
             out_channels=schema.targets.width,
-            edge_dim=schema.contiguity_edges.width,
+            edge_dim=edge_encoder.out_dim,
         )
         network = build_network_fn(config, sizes)
 
-        return scorer_cls(encoder, network)
+        return build_scorer_fn(encoder, network, edge_encoder)
 
     return build
 
@@ -183,7 +187,7 @@ def _build_home_zone_mf(
     return HomeZoneMFBaseline(locations.num_nodes, home_zone_mf.n_factors)
 
 
-def _build_two_tower(
+def _build_two_tower_scorer(
     config: ModelConfig,
     features: InputFeatures,
     locations: Locations,
@@ -193,7 +197,8 @@ def _build_two_tower(
     """Instantiate a ``TwoTowerScorer`` for the input ``features``.
 
     Features inputs are given to the model components as follows:
-    - Node tower: accessibility features (``use_access``) and random-walk PE (``use_rwpe``).
+    - Node tower: accessibility features (``use_access``) and random-walk PE (``use_rwpe``), and messages passed over
+      the contiguity edges (``use_contiguity_edges``) and the rail edges (``use_rail_edges``).
     - User tower: user attributes (``use_demographics``)
     - Pairwise block: home-anchored PE (``use_home_pe``, over the network hops with ``use_network_hops``),
       distance from home (``use_dist``) and travel times from home (``use_tt``).
@@ -213,13 +218,14 @@ def _build_two_tower(
     node_embedding_dim = embedding_dim if two_tower.node_embedding else None
     node_encoder = build_node_feature_encoder(features, locations, schema, node_embedding_dim)
 
+    edge_encoder = build_edge_encoder(features, schema)
     node_sizes = NetworkSizes(
         in_channels=node_encoder.out_dim,
         out_channels=embedding_dim,
-        edge_dim=schema.contiguity_edges.width,
+        edge_dim=edge_encoder.out_dim,
     )
     node_network = _build_gat(two_tower, node_sizes)
-    node_tower = NodeTower(node_encoder, node_network)
+    node_tower = NodeTower(node_encoder, node_network, edge_encoder)
 
     attributes = SchemaEncoder(schema.user_attributes) if features.use_demographics else None
     user_in_channels = embedding_dim + (0 if attributes is None else attributes.out_dim)
@@ -268,6 +274,16 @@ def _build_two_tower_bias(
     return MLPBias(network, projection)
 
 
+def _build_node_scorer(encoder: FeatureEncoder, network: torch.nn.Module, edge_encoder: EdgeEncoder) -> NodeScorer:
+    """Return the ``NodeScorer`` of ``encoder`` and ``network``. No message passing, so ``edge_encoder`` is ignored."""
+    return NodeScorer(encoder, network)
+
+
+def _build_graph_scorer(encoder: FeatureEncoder, network: torch.nn.Module, edge_encoder: EdgeEncoder) -> GraphScorer:
+    """Return the ``GraphScorer`` of ``encoder`` and ``network``, passing messages over the edges of ``edge_encoder``."""
+    return GraphScorer(encoder, network, edge_encoder)
+
+
 def _lookup_architecture(config: ModelConfig) -> ScorerBuilder:
     """Return the scorer builder registered in ``BUILDERS`` under ``config.architecture``.
 
@@ -281,9 +297,9 @@ def _lookup_architecture(config: ModelConfig) -> ScorerBuilder:
 
 
 BUILDERS: dict[str, ScorerBuilder] = {
-    "mlp": _encoded_scorer(_build_mlp, NodeScorer),
-    "gat": _encoded_scorer(_build_gat, GraphScorer),
-    "gps": _encoded_scorer(_build_gps, GraphScorer),
+    "mlp": _encoded_scorer(_build_mlp, _build_node_scorer),
+    "gat": _encoded_scorer(_build_gat, _build_graph_scorer),
+    "gps": _encoded_scorer(_build_gps, _build_graph_scorer),
     "home_zone_mf": _build_home_zone_mf,
-    "two_tower": _build_two_tower,
+    "two_tower": _build_two_tower_scorer,
 }

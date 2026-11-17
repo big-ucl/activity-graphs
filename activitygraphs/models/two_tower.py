@@ -9,7 +9,7 @@ from torch import Tensor
 
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.models.features import FeatureEncoder, NodeFeatureEncoder
+from activitygraphs.models.features import EdgeEncoder, FeatureEncoder, NodeFeatureEncoder
 from activitygraphs.models.schema_encoder import SchemaEncoder
 from activitygraphs.models.scorers import Scorer
 
@@ -20,17 +20,21 @@ class NodeTower(torch.nn.Module):
     Args:
         node_encoder: Encodes the node-level input of every node.
         network: A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_nodes, d]``, such as ``GAT``.
+        edge_encoder: Encodes the edges to pass messages over. With no edge source, no edges are used except
+            self-loops.
     """
 
-    def __init__(self, node_encoder: NodeFeatureEncoder, network: torch.nn.Module):
+    def __init__(self, node_encoder: NodeFeatureEncoder, network: torch.nn.Module, edge_encoder: EdgeEncoder):
         super().__init__()
         self.node_encoder = node_encoder
         self.network = network
+        self.edge_encoder = edge_encoder
 
     def forward(self, locations: Locations) -> Tensor:
         """Return the embedding of every node, ``[num_nodes, d]``."""
         x = self.node_encoder(locations)
-        return self.network(x, locations.contiguity_edge_index, locations.contiguity_edge_attr, None)
+        edges = self.edge_encoder(locations)
+        return self.network(x, edges.index, edges.attr, None)
 
 
 class UserTower(torch.nn.Module):

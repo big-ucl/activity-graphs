@@ -44,11 +44,12 @@ def _(mo):
 @app.cell
 def _(cfg, project_root):
     from activitygraphs.graph import load_graph
+    from activitygraphs.schema import EdgeKind
     from activitygraphs.surveys.registry import load_survey
 
     cmap_survey = load_survey(cfg.data, project_root).with_filter("zone")
     _graph = load_graph(cmap_survey, cfg.data, project_root)
-    nodes_gdf, edges_gdf = _graph.nodes, _graph.contiguity_edges
+    nodes_gdf, edges_gdf = _graph.nodes, _graph.edges[EdgeKind.CONTIGUITY]
     return edges_gdf, nodes_gdf
 
 

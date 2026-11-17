@@ -11,8 +11,8 @@ from omegaconf import OmegaConf
 
 from activitygraphs.datasets.dataset import _dataset_fingerprint, read_fingerprint
 from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
-from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
-from activitygraphs.tensors import Fingerprint, LocationTensors, UserTensors, tensors_path
+from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema
+from activitygraphs.tensors import EdgeTensors, Fingerprint, LocationTensors, UserTensors, tensors_path
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.tensors.bundles import UserFile
 from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR, _tensor_cache_files, _tensors_fingerprint
@@ -35,8 +35,10 @@ def make_schema(n_demo: int, demo_kind: ColumnKind) -> DatasetSchema:
     return DatasetSchema(
         locations=make_group("locations", 0),
         access=make_group("access", 0),
-        contiguity_edges=make_group("contiguity_edges", 0),
-        rail_edges=make_group("rail_edges", 0),
+        edges={
+            EdgeKind.CONTIGUITY: make_group("contiguity_edges", 0),
+            EdgeKind.RAIL: make_group("rail_edges", 0),
+        },
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=make_group("user_attributes", n_demo, demo_kind),
         distances=make_group("distances", 1),
@@ -66,10 +68,7 @@ def make_dataset(
     locations = LocationTensors(
         x=torch.zeros((n_nodes, 0)),
         access=torch.zeros((n_nodes, 0)),
-        contiguity_edge_index=torch.zeros((2, 0), dtype=torch.long),
-        contiguity_edge_attr=torch.zeros((0, 0)),
-        rail_edge_index=torch.zeros((2, 0), dtype=torch.long),
-        rail_edge_attr=torch.zeros((0, 0)),
+        edges={kind: EdgeTensors(torch.zeros((2, 0), dtype=torch.long), torch.zeros((0, 0))) for kind in EdgeKind},
         distance_m=torch.zeros((n_nodes, n_nodes)),
         travel_times_min=torch.zeros((n_nodes, n_nodes, 0)),
         node_ids=pl.DataFrame({"loc_id": [f"z{i}" for i in range(n_nodes)]}),

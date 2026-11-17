@@ -30,9 +30,9 @@ from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
 from activitygraphs.graph import GraphTables
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES
 from activitygraphs.graph.travel_times import TRAVEL_TIME_SCHEMA
-from activitygraphs.models.features import InputFeatures, build_feature_encoder
+from activitygraphs.models.features import InputFeatures, build_edge_encoder, build_feature_encoder
 from activitygraphs.models.schema_encoder import _default_emb_dim
-from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema
+from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema
 from activitygraphs.surveys.cmap import CMAPSurvey
 from activitygraphs.surveys.demographics import (
     AGE_BANDS,
@@ -43,6 +43,7 @@ from activitygraphs.surveys.demographics import (
     VEHICLE_BANDS,
 )
 from activitygraphs.tensors import (
+    EdgeTensors,
     SurveyTensors,
     build_tensors,
     check_tensors,
@@ -51,7 +52,6 @@ from activitygraphs.tensors import (
     save_tensors,
     tensors_path,
 )
-from activitygraphs.tensors.build import _build_location_tensors
 from activitygraphs.tensors.bundles import UserFile
 from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR
 from activitygraphs.utils import add_lon_lat_from_centroid
@@ -117,7 +117,9 @@ def build_graph(zones: gpd.GeoDataFrame) -> GraphTables:
     rail_edges = build_rail_edges(loc_ids)
     travel_times = build_travel_times(loc_ids)
 
-    return GraphTables(nodes=nodes, contiguity_edges=contiguity_edges, rail_edges=rail_edges, travel_times=travel_times)
+    edges = {EdgeKind.CONTIGUITY: contiguity_edges, EdgeKind.RAIL: rail_edges}
+
+    return GraphTables(nodes=nodes, edges=edges, travel_times=travel_times)
 
 
 def build_rail_edges(loc_ids: list[str]) -> pd.DataFrame:
@@ -260,9 +262,15 @@ def build_model_inputs(survey_name: str, root: Path) -> dict[str, torch.Tensor]:
 
     batch = join_users(locations, users)
 
-    edge_attr = locations.contiguity_edge_attr.repeat(batch.num_users, 1)
+    edge_attr = locations.edges[EdgeKind.CONTIGUITY].attr.repeat(batch.num_users, 1)
     y = batch.visited.reshape(-1, 1)
-    inputs = {"edge_attr": edge_attr, "y": y}
+    network_edges = build_edge_encoder(InputFeatures(), schema)(locations)
+    inputs = {
+        "edge_attr": edge_attr,
+        "network_edge_index": network_edges.index,
+        "network_edge_attr": network_edges.attr,
+        "y": y,
+    }
     for active in itertools.product([False, True], repeat=len(FLAGS)):
         flags = dict(zip(FLAGS, active, strict=True))
         key = "+".join(name for name, on in flags.items() if on) or "none"
@@ -301,17 +309,34 @@ def test_the_graph_tables_read_back_as_saved(tmp_path):
     read_graph = GraphTables.read(tmp_path)
 
     assert_geodataframe_equal(read_graph.nodes, graph.nodes)
-    assert_geodataframe_equal(read_graph.contiguity_edges, graph.contiguity_edges)
-    pd.testing.assert_frame_equal(read_graph.rail_edges, graph.rail_edges)
+    assert_geodataframe_equal(read_graph.edges[EdgeKind.CONTIGUITY], graph.edges[EdgeKind.CONTIGUITY])
+    pd.testing.assert_frame_equal(read_graph.edges[EdgeKind.RAIL], graph.edges[EdgeKind.RAIL])
     pd.testing.assert_frame_equal(read_graph.travel_times, graph.travel_times)
+
+
+def test_the_graph_tables_write_the_files_they_list(tmp_path):
+    build_graph(build_zones()).save(tmp_path)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(GraphTables.file_names())
+
+
+def test_the_tensor_bundles_write_the_files_they_list(tmp_path):
+    locations, users, _ = build_survey_tensors("cmap")
+
+    locations.save(tmp_path / "locations")
+    users.save(tmp_path / "users")
+
+    assert sorted(path.name for path in (tmp_path / "locations").iterdir()) == sorted(locations.file_names())
+    assert sorted(path.name for path in (tmp_path / "users").iterdir()) == sorted(users.file_names())
 
 
 def test_the_shared_graph_is_undirected(tmp_path):
     locations, _, _ = build_survey("cmap", tmp_path)
     graph = build_graph(build_zones())
 
-    assert pyg.utils.is_undirected(locations.contiguity_edge_index, num_nodes=locations.num_nodes)
-    assert locations.contiguity_edge_index.size(1) == 2 * len(graph.contiguity_edges)
+    contiguity_edges = locations.edges[EdgeKind.CONTIGUITY]
+    assert pyg.utils.is_undirected(contiguity_edges.index, num_nodes=locations.num_nodes)
+    assert contiguity_edges.num_edges == 2 * len(graph.edges[EdgeKind.CONTIGUITY])
     assert locations.random_walk_pe.abs().sum() > 0
 
 
@@ -344,7 +369,8 @@ def test_each_graph_copy_carries_the_location_and_user_node_features_apart(tmp_p
     batch = join_users(locations, users)
     features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_rwpe=False, use_tt=False)
     encoder = build_feature_encoder(features, locations, schema, HOME_PE)
-    graphs = GraphBatch.expand(encoder(locations, batch), locations)
+    contiguity_edges = locations.edges[EdgeKind.CONTIGUITY]
+    graphs = GraphBatch.expand(encoder(locations, batch), contiguity_edges)
     num_nodes = locations.num_nodes
     third_copy = slice(3 * num_nodes, 4 * num_nodes)
 
@@ -404,7 +430,12 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential"]
     assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2]
     assert schema.locations.width == locations.x.shape[1]
-    assert schema.contiguity_edges.width == locations.contiguity_edge_attr.shape[1]
+    for kind, edges in locations.edges.items():
+        assert schema.edges[kind].width == edges.attr.shape[1]
+    for use_contiguity_edges, use_rail_edges in itertools.product([False, True], repeat=2):
+        features = InputFeatures(use_contiguity_edges=use_contiguity_edges, use_rail_edges=use_rail_edges)
+        edge_encoder = build_edge_encoder(features, schema)
+        assert edge_encoder(locations).attr.shape[1] == edge_encoder.out_dim
     assert schema.user_nodes.names == ["is_home"]
     assert schema.user_attributes.numeric.width == users.attributes.shape[-1]
     assert schema.user_attributes.categorical.width == users.attributes_cat.shape[-1]
@@ -473,6 +504,17 @@ def test_a_home_node_outside_the_graph_raises():
         check_tensors(locations, dataclasses.replace(users, home_node=home_node), schema)
 
 
+def test_an_edge_kind_that_repeats_a_pair_of_nodes_raises():
+    locations, users, schema = build_survey_tensors("cmap")
+    rail_edges = locations.edges[EdgeKind.RAIL]
+    repeated_index = torch.cat([rail_edges.index, rail_edges.index[:, :1]], dim=1)
+    repeated_attr = torch.cat([rail_edges.attr, rail_edges.attr[:1]])
+    edges = {**locations.edges, EdgeKind.RAIL: EdgeTensors(repeated_index, repeated_attr)}
+
+    with pytest.raises(ValueError, match="`rail` edges hold 1 repeated"):
+        check_tensors(dataclasses.replace(locations, edges=edges), users, schema)
+
+
 def test_a_nan_user_attribute_raises():
     locations, users, schema = build_survey_tensors("cmap")
     attributes = users.attributes.clone()
@@ -480,22 +522,6 @@ def test_a_nan_user_attribute_raises():
 
     with pytest.raises(ValueError, match="`attributes`"):
         check_tensors(locations, dataclasses.replace(users, attributes=attributes), schema)
-
-
-def test_a_graph_without_an_edge_index_raises():
-    locations, _, _ = build_survey_tensors("cmap")
-    graph = pyg.data.Data(x=locations.x, edge_attr=locations.contiguity_edge_attr)
-
-    with pytest.raises(ValueError):
-        _build_location_tensors(
-            graph,
-            locations.access,
-            locations.rail_edge_index,
-            locations.rail_edge_attr,
-            locations.distance_m,
-            locations.travel_times_min,
-            locations.node_ids,
-        )
 
 
 def test_tensors_that_disagree_on_the_number_of_users_raise():
@@ -558,7 +584,8 @@ def test_prepare_splits_rebuilds_a_cache_missing_a_tensor_file(tmp_path, compose
 
 def test_snapshot_covers_every_flag_combination(snapshot):
     for inputs in snapshot.values():
-        assert sum(key not in ("edge_attr", "y") for key in inputs) == 2 ** len(FLAGS)
+        non_flag_keys = ("edge_attr", "network_edge_index", "network_edge_attr", "y")
+        assert sum(key not in non_flag_keys for key in inputs) == 2 ** len(FLAGS)
 
 
 if __name__ == "__main__":

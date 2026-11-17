@@ -8,7 +8,7 @@ from torch import Tensor
 from activitygraphs.datasets.batch import GraphBatch, UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.datasets.users import Users
-from activitygraphs.models.features import FeatureEncoder
+from activitygraphs.models.features import EdgeEncoder, FeatureEncoder
 
 
 class Scorer(torch.nn.Module):
@@ -63,12 +63,18 @@ class GraphScorer(EncodedScorer):
     Args:
         encoder: Builds the model input of every (user, node) pair.
         network: A GNN with ``forward(x, edge_index, edge_attr, batch) -> [num_pairs, 1]`` logits, such as ``GAT``.
+        edge_encoder: Encodes the edges to pass messages over.
     """
+
+    def __init__(self, encoder: FeatureEncoder, network: torch.nn.Module, edge_encoder: EdgeEncoder):
+        super().__init__(encoder, network)
+        self.edge_encoder = edge_encoder
 
     def forward(self, locations: Locations, batch: UserBatch) -> Tensor:
         """Return the logit of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
         x = self.encoder(locations, batch)
-        graphs = GraphBatch.expand(x, locations)
+        edges = self.edge_encoder(locations)
+        graphs = GraphBatch.expand(x, edges)
         logits = self.network(graphs.x, graphs.edge_index, graphs.edge_attr, graphs.batch)
 
         return logits.reshape(batch.num_users, batch.num_nodes)

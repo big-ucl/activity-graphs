@@ -7,6 +7,7 @@ from graphs import make_locations, make_users
 from torch.utils.data import DataLoader
 
 from activitygraphs.datasets import GraphBatch, UserBatch, UserDataset
+from activitygraphs.schema import EdgeKind
 
 DISTANCE_M = torch.tensor([[0.0, 5.0, 9.0], [5.0, 0.0, 4.0], [9.0, 4.0, 0.0]])
 
@@ -74,7 +75,8 @@ def test_the_join_reads_each_users_row_of_the_location_graph():
 
 def test_the_expansion_holds_one_copy_of_the_graph_per_user():
     x = torch.arange(12.0).reshape(2, 3, 2)
-    graph = GraphBatch.expand(x, make_path_locations())
+    contiguity_edges = make_path_locations().edges[EdgeKind.CONTIGUITY]
+    graph = GraphBatch.expand(x, contiguity_edges)
 
     assert graph.x.tolist() == [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0], [6.0, 7.0], [8.0, 9.0], [10.0, 11.0]]
     assert graph.edge_index.tolist() == [[0, 1, 1, 2, 3, 4, 4, 5], [1, 0, 2, 1, 4, 3, 5, 4]]
@@ -86,8 +88,8 @@ def test_moving_the_locations_moves_every_tensor_and_keeps_the_node_ids():
     locations = make_path_locations().to(torch.device("meta"))
 
     assert locations.x.is_meta
-    assert locations.contiguity_edge_index.is_meta
-    assert locations.contiguity_edge_attr.is_meta
+    assert locations.edges[EdgeKind.CONTIGUITY].index.is_meta
+    assert locations.edges[EdgeKind.RAIL].attr.is_meta
     assert locations.random_walk_pe.is_meta
     assert locations.hop_distance.is_meta
     assert locations.distance_m.is_meta

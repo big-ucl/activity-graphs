@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from activitygraphs.datasets.locations import Locations
+from activitygraphs.tensors import EdgeTensors
 
 
 class UserRows(NamedTuple):
@@ -121,12 +122,12 @@ class GraphBatch:
     batch: Tensor
 
     @classmethod
-    def expand(cls, x: Tensor, locations: Locations) -> "GraphBatch":
-        """Return the copies of the graph of ``locations`` that carry the model input ``x``, one copy per user.
+    def expand(cls, x: Tensor, edges: EdgeTensors) -> "GraphBatch":
+        """Return the copies of the location graph over ``edges`` that carry the model input ``x``, one copy per user.
 
         Args:
             x: Model input of every node for every user, ``[num_users, num_nodes, num_features]``.
-            locations: The location graph, on the device of ``x``.
+            edges: The edges of the location graph, on the device of ``x``.
 
         Returns:
             The copies of the graph. Copy ``i`` holds the nodes ``i * N`` to ``(i + 1) * N - 1``, in node order, with
@@ -136,11 +137,11 @@ class GraphBatch:
 
         users = torch.arange(num_users, device=x.device)
         offsets = users * num_nodes
-        edge_index = (locations.contiguity_edge_index.unsqueeze(1) + offsets.view(1, -1, 1)).reshape(2, -1)
+        edge_index = (edges.index.unsqueeze(1) + offsets.view(1, -1, 1)).reshape(2, -1)
 
         return cls(
             x=x.reshape(-1, num_features),
             edge_index=edge_index,
-            edge_attr=locations.contiguity_edge_attr.repeat(num_users, 1),
+            edge_attr=edges.attr.repeat(num_users, 1),
             batch=users.repeat_interleave(num_nodes),
         )

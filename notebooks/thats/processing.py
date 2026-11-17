@@ -68,8 +68,10 @@ def _(
     survey = THATSSurvey.load(cfg.data, project_root).with_filter("zone")
     tables = read_tables(cfg.data, project_root)
 
+    from activitygraphs.schema import EdgeKind
+
     _graph = load_graph(survey, cfg.data, project_root)
-    nodes_gdf, edges_gdf = _graph.nodes, _graph.contiguity_edges
+    nodes_gdf, edges_gdf = _graph.nodes, _graph.edges[EdgeKind.CONTIGUITY]
 
     survey_tensors = build_tensors(survey, _graph)
 

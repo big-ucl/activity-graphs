@@ -20,6 +20,8 @@ FEATURE_SUFFIXES = {
     "use_access": "noacc",
     "use_network_hops": "nonet",
     "use_tt": "nott",
+    "use_contiguity_edges": "nocontig",
+    "use_rail_edges": "norail",
 }
 """The suffix of each ``InputFeatures`` flag that differs from its default."""
 

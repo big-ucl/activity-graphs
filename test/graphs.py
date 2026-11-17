@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 
 from activitygraphs.datasets import Locations, UserBatch, UserDataset, Users
 from activitygraphs.datasets.locations import _compute_hop_distance
+from activitygraphs.schema import EdgeKind
+from activitygraphs.tensors import EdgeTensors
 
 
 def chain_edge_index(num_nodes: int) -> torch.Tensor:
@@ -46,18 +48,20 @@ def make_locations(
     if travel_times_min is None:
         travel_times_min = torch.zeros(num_nodes, num_nodes, 0)
 
+    rail_edge_attr = torch.zeros(rail_edge_index.shape[1], 0)
+    edges = {
+        EdgeKind.CONTIGUITY: EdgeTensors(contiguity_edge_index, contiguity_edge_attr),
+        EdgeKind.RAIL: EdgeTensors(rail_edge_index, rail_edge_attr),
+    }
+    network_edge_index = torch.cat([contiguity_edge_index, rail_edge_index], dim=1)
+
     return Locations(
         x=x,
         access=access,
-        contiguity_edge_index=contiguity_edge_index,
-        contiguity_edge_attr=contiguity_edge_attr,
-        rail_edge_index=rail_edge_index,
-        rail_edge_attr=torch.zeros(rail_edge_index.shape[1], 0),
+        edges=edges,
         random_walk_pe=random_walk_pe,
         hop_distance=_compute_hop_distance(contiguity_edge_index, num_nodes),
-        network_hop_distance=_compute_hop_distance(
-            torch.cat([contiguity_edge_index, rail_edge_index], dim=1), num_nodes
-        ),
+        network_hop_distance=_compute_hop_distance(network_edge_index, num_nodes),
         distance_m=distance_m,
         distance=distance_m,
         travel_times_min=travel_times_min,

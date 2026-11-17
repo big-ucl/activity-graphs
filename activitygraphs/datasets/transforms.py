@@ -179,11 +179,11 @@ def fit_transforms(
     travel_time_weights = num_train_residents.repeat_interleave(locations.num_nodes)
 
     # Location and edge features: no need to separate between train and test, the graph is the same.
+    edge_values = {kind.group: edges.attr for kind, edges in locations.edges.items()}
     values = {
         "locations": locations.x,
         "access": locations.access,
-        "contiguity_edges": locations.contiguity_edge_attr,
-        "rail_edges": locations.rail_edge_attr,
+        **edge_values,
         "user_attributes": users.attributes[train_idx],
         "distances": locations.distance_m[train_homes].unsqueeze(-1),
         "travel_times": locations.travel_times_min[train_home_node_idx],

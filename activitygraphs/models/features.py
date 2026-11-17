@@ -6,12 +6,14 @@ from typing import cast
 
 import torch
 from torch import Tensor
+from torch_geometric.utils import coalesce
 
 from activitygraphs.config import HomePEConfig
 from activitygraphs.datasets.batch import UserBatch
 from activitygraphs.datasets.locations import Locations
 from activitygraphs.models.schema_encoder import SchemaEncoder
-from activitygraphs.schema import DatasetSchema, TensorSchema
+from activitygraphs.schema import DatasetSchema, EdgeKind, TensorSchema
+from activitygraphs.tensors import EdgeTensors
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,10 @@ class InputFeatures:
         use_access: Append the accessibility features of each node to its features.
         use_network_hops: Instead of counting using contiguity edges in ``home_pe``, use all edge types (contiguity, rail) .
         use_tt: Append the travel time and reachability by each mode from home to each node's features.
+        use_contiguity_edges: Pass messages over the contiguity edges. Ignored for models without message passing.
+            Other uses (RWPE, home-anchored PE, evaluation, ...) still read the contiguity edges.
+        use_rail_edges: Pass messages over the rail edges. Ignored for models without message passing.
+            This flag is ignored by the home-anchored PE, which follows ``use_network_hops``.
     """
 
     use_home_pe: bool = True
@@ -35,6 +41,8 @@ class InputFeatures:
     use_access: bool = True
     use_network_hops: bool = True
     use_tt: bool = True
+    use_contiguity_edges: bool = True
+    use_rail_edges: bool = True
 
     @property
     def departures(self) -> list[str]:
@@ -278,6 +286,51 @@ class NodeFeatureEncoder(torch.nn.Module):
         return torch.cat(source_inputs, dim=-1)
 
 
+class EdgeSource(torch.nn.Module):
+    """Extracts the edges of one kind, ``locations.edges[kind]``.
+
+    Attributes:
+        kind: The kind of the edges.
+        out_dim: Number of features of each edge.
+    """
+
+    def __init__(self, kind: EdgeKind, schema: TensorSchema):
+        super().__init__()
+        self.kind = kind
+        self.schema = schema
+        self.out_dim = schema.width
+
+    def forward(self, locations: Locations) -> EdgeTensors:
+        """Return ``locations.edges[kind]``, with ``out_dim`` features per edge."""
+        return locations.edges[self.kind]
+
+
+class EdgeEncoder(torch.nn.Module):
+    """Encodes the edges for message passing: the edges of every source, merged into one edge per pair of nodes.
+
+    A single source keeps its own edges and features. Several sources are merged by ``_merge_edges``, with a flag per
+    source then the features of each source. No source leaves every node with no neighbour.
+
+    Attributes:
+        sources: The edge sources, in column order.
+        out_dim: Number of features of each encoded edge.
+    """
+
+    def __init__(self, sources: Sequence[EdgeSource]):
+        super().__init__()
+        self.sources = torch.nn.ModuleList(sources)
+        num_flags = 0 if len(sources) == 1 else len(sources)
+        self.out_dim = num_flags + sum(source.out_dim for source in sources)
+
+    def forward(self, locations: Locations) -> EdgeTensors:
+        """Return the encoded edges of the location graph, with ``out_dim`` features per edge."""
+        source_edges = [source(locations) for source in self.sources]
+        if len(source_edges) == 1:
+            return source_edges[0]
+
+        return _merge_edges(source_edges, locations.num_nodes, locations.x.device)
+
+
 def build_feature_encoder(
     features: InputFeatures, locations: Locations, schema: DatasetSchema, home_pe_cfg: HomePEConfig
 ) -> FeatureEncoder:
@@ -334,6 +387,24 @@ def build_node_feature_encoder(
     return NodeFeatureEncoder(sources)
 
 
+def build_edge_encoder(features: InputFeatures, schema: DatasetSchema) -> EdgeEncoder:
+    """Instantiate the ``EdgeEncoder`` of the edges selected by ``features``.
+
+    The column order goes: contiguity edges, then rail edges.
+
+    Args:
+        features: The input features to encode.
+        schema: The column schema of each tensor group.
+    """
+    sources = []
+    if features.use_contiguity_edges:
+        sources.append(EdgeSource(EdgeKind.CONTIGUITY, schema.edges[EdgeKind.CONTIGUITY]))
+    if features.use_rail_edges:
+        sources.append(EdgeSource(EdgeKind.RAIL, schema.edges[EdgeKind.RAIL]))
+
+    return EdgeEncoder(sources)
+
+
 def _node_sources(features: InputFeatures, locations: Locations, schema: DatasetSchema) -> list[NodeFeatureSource]:
     """Return the node-level sources selected by ``features``, in column order.
 
@@ -351,3 +422,37 @@ def _node_sources(features: InputFeatures, locations: Locations, schema: Dataset
         sources.append(RandomWalkPE(locations.num_rwpe_features))
 
     return sources
+
+
+def _merge_edges(edges: Sequence[EdgeTensors], num_nodes: int, device: torch.device) -> EdgeTensors:
+    """Return the edges of ``edges`` merged into one edge per ordered pair of nodes, with a flag per edge set.
+
+    Args:
+        edges: The edge sets to merge, each pair of nodes at most once per set.
+        num_nodes: Number of nodes of the graph.
+        device: Device of the edges.
+
+    Returns:
+        The merged edges, sorted by source node and then by target node. The features are a flag per edge set, followed
+        by the features of each set. The flag of a set is 1 where the pair has an edge in that set, and 0 elsewhere. The
+        columns of a set hold the features of that edge, and 0 where the pair has no edge in that set.
+    """
+    widths = [edge_set.attr.shape[1] for edge_set in edges]
+    num_columns = len(edges) + sum(widths)
+    index_blocks = [torch.zeros(2, 0, dtype=torch.long, device=device)]
+    attr_blocks = [torch.zeros(0, num_columns, device=device)]
+
+    first_column = len(edges)
+    for set_position, (edge_set, width) in enumerate(zip(edges, widths, strict=True)):
+        attr_block = torch.zeros(edge_set.num_edges, num_columns, device=device)
+        attr_block[:, set_position] = 1.0
+        attr_block[:, first_column : first_column + width] = edge_set.attr
+        index_blocks.append(edge_set.index)
+        attr_blocks.append(attr_block)
+        first_column += width
+
+    stacked_index = torch.cat(index_blocks, dim=1)
+    stacked_attr = torch.cat(attr_blocks)
+    index, attr = coalesce(stacked_index, stacked_attr, num_nodes=num_nodes, reduce="sum")
+
+    return EdgeTensors(index, attr)

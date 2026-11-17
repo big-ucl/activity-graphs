@@ -13,7 +13,7 @@ from activitygraphs.base import CRS
 from activitygraphs.config import GTFSFeeds
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES, RAIL_EDGE_SCHEMA, build_rail_edges
 from activitygraphs.surveys.gtfs import GTFSTables, read_gtfs
-from activitygraphs.tensors.build import _build_rail_edges
+from activitygraphs.tensors.build import _build_edges
 
 SERVICE_DATE = "2022-10-19"
 UTM_CRS = "EPSG:32617"
@@ -130,7 +130,8 @@ class TestRailEdgeTensors:
         rail_edges = pd.DataFrame({"rail_time_s": [480.0, 420.0], "rail_trips": [3, 2]}, index=pair_index)
         node_ids = pl.DataFrame({"loc_id": ZONE_IDS})
 
-        edge_index, edge_attr = _build_rail_edges(rail_edges, node_ids)
+        edges = _build_edges(rail_edges, node_ids, RAIL_EDGE_SCHEMA)
+        edge_index, edge_attr = edges.index, edges.attr
 
         assert edge_index.tolist() == [[0, 1, 2, 2], [2, 2, 0, 1]]
         assert edge_attr.shape == (4, RAIL_EDGE_SCHEMA.width)

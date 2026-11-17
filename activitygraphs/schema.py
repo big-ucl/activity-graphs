@@ -14,6 +14,18 @@ from pandas.api.types import is_bool_dtype, is_numeric_dtype
 log = logging.getLogger(__name__)
 
 
+class EdgeKind(StrEnum):
+    """Kind of the edges between two zones."""
+
+    CONTIGUITY = "contiguity"
+    RAIL = "rail"
+
+    @property
+    def group(self) -> str:
+        """Name of the tensor group of the edges of this kind."""
+        return f"{self}_edges"
+
+
 class ColumnKind(StrEnum):
     """Specifies the kind of data in a tensor column, for downstream processing/scaling."""
 
@@ -150,8 +162,7 @@ class DatasetSchema:
     Attributes:
         locations: Location node features.
         access: Accessibility features of the location nodes.
-        contiguity_edges: Features of the contiguity edges between zones.
-        rail_edges: Features of the rail edges between zones.
+        edges: Features of the edges between zones, one schema per edge kind.
         user_nodes: Per-user node features.
         user_attributes: Per-user attributes.
         distances: Per-user distance from home of every node.
@@ -159,13 +170,13 @@ class DatasetSchema:
         targets: Per-user visit labels.
 
     Raises:
-        ValueError: A schema's ``group`` is not the field it is stored in.
+        ValueError: The edge schemas do not cover every ``EdgeKind``, or a schema's ``group`` is not the field or the
+            edge kind it is stored under.
     """
 
     locations: TensorSchema
     access: TensorSchema
-    contiguity_edges: TensorSchema
-    rail_edges: TensorSchema
+    edges: dict[EdgeKind, TensorSchema]
     user_nodes: TensorSchema
     user_attributes: TensorSchema
     distances: TensorSchema
@@ -173,15 +184,31 @@ class DatasetSchema:
     targets: TensorSchema
 
     def __post_init__(self) -> None:
-        """Check that each schema is labelled with the group it is stored in."""
-        for field, schema in zip(fields(self), self.groups, strict=True):
-            if schema.group != field.name:
-                raise ValueError(f"The `{field.name}` schema is labelled with group `{schema.group}`.")
+        """Check that the edge schemas cover every edge kind, and that each schema is labelled with its group."""
+        if set(self.edges) != set(EdgeKind):
+            raise ValueError(f"The edge schemas cover {sorted(self.edges)}, not every kind of {list(EdgeKind)}.")
+
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, TensorSchema) and value.group != field.name:
+                raise ValueError(f"The `{field.name}` schema is labelled with group `{value.group}`.")
+
+        for kind, schema in self.edges.items():
+            if schema.group != kind.group:
+                raise ValueError(f"The `{kind}` edge schema is labelled with group `{schema.group}`.")
 
     @property
     def groups(self) -> tuple[TensorSchema, ...]:
-        """Return the schema of every tensor group, in field order."""
-        return tuple(getattr(self, field.name) for field in fields(self))
+        """Return the schema of every tensor group, in field order, with the edge schemas in ``EdgeKind`` order."""
+        groups = []
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, TensorSchema):
+                groups.append(value)
+            else:
+                groups.extend(self.edges[kind] for kind in EdgeKind)
+
+        return tuple(groups)
 
     @property
     def feature_groups(self) -> tuple[TensorSchema, ...]:
@@ -200,8 +227,12 @@ class DatasetSchema:
     def read(cls, path: Path) -> Self:
         """Read the schemas written by ``save``."""
         schemas = json.loads(path.read_text())
+        edges = {kind: TensorSchema.from_dict(schemas[kind.group]) for kind in EdgeKind}
+        other_groups = {
+            field.name: TensorSchema.from_dict(schemas[field.name]) for field in fields(cls) if field.name != "edges"
+        }
 
-        return cls(**{field.name: TensorSchema.from_dict(schemas[field.name]) for field in fields(cls)})
+        return cls(edges=edges, **other_groups)
 
 
 def infer_schema(

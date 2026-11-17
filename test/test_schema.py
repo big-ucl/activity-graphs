@@ -1,13 +1,13 @@
 """Unit tests for the column schema types and their JSON round-trip."""
 
 import logging
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema, infer_schema
+from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema, infer_schema
 
 CONTINUOUS = ColumnKind.CONTINUOUS
 COUNT = ColumnKind.COUNT
@@ -32,8 +32,10 @@ def dataset_schema() -> DatasetSchema:
     return DatasetSchema(
         locations=TensorSchema("locations", (ColumnSpec("pop_density", CONTINUOUS),)),
         access=TensorSchema("access", (ColumnSpec("has_rail_station", BINARY),)),
-        contiguity_edges=TensorSchema("contiguity_edges", (ColumnSpec("weight", CONTINUOUS),)),
-        rail_edges=TensorSchema("rail_edges", (ColumnSpec("rail_trips", COUNT),)),
+        edges={
+            EdgeKind.CONTIGUITY: TensorSchema("contiguity_edges", (ColumnSpec("weight", CONTINUOUS),)),
+            EdgeKind.RAIL: TensorSchema("rail_edges", (ColumnSpec("rail_trips", COUNT),)),
+        },
         user_nodes=TensorSchema("user_nodes", (ColumnSpec("is_home", BINARY),)),
         user_attributes=user_attributes(),
         distances=TensorSchema("distances", (ColumnSpec("distance", COUNT),)),
@@ -129,10 +131,16 @@ class TestDatasetSchema:
         assert income.categories == ("low", "mid", "high")
         assert income.kind is CATEGORICAL
 
-    def test_groups_hold_one_schema_per_field_in_field_order(self):
+    def test_groups_hold_one_schema_per_field_and_edge_kind_in_field_order(self):
         groups = dataset_schema().groups
 
-        assert [schema.group for schema in groups] == [field.name for field in fields(DatasetSchema)]
+        expected_groups = []
+        for field in fields(DatasetSchema):
+            if field.name == "edges":
+                expected_groups.extend(kind.group for kind in EdgeKind)
+            else:
+                expected_groups.append(field.name)
+        assert [schema.group for schema in groups] == expected_groups
 
     def test_feature_groups_are_every_group_but_the_targets(self):
         feature_groups = dataset_schema().feature_groups
@@ -149,11 +157,30 @@ class TestDatasetSchema:
         ]
 
     def test_a_schema_must_sit_in_its_own_group(self):
-        groups = {schema.group: schema for schema in dataset_schema().groups}
-        groups["contiguity_edges"] = TensorSchema("locations", ())
+        with pytest.raises(ValueError, match="labelled"):
+            replace(dataset_schema(), access=TensorSchema("locations", ()))
 
-        with pytest.raises(ValueError):
-            DatasetSchema(**groups)
+    def test_an_edge_schema_must_sit_in_the_group_of_its_kind(self):
+        schema = dataset_schema()
+        edges = {**schema.edges, EdgeKind.RAIL: TensorSchema("contiguity_edges", ())}
+
+        with pytest.raises(ValueError, match="labelled"):
+            replace(schema, edges=edges)
+
+    def test_the_edge_schemas_cover_every_kind(self):
+        schema = dataset_schema()
+        edges = {EdgeKind.CONTIGUITY: schema.edges[EdgeKind.CONTIGUITY]}
+
+        with pytest.raises(ValueError, match="every kind"):
+            replace(schema, edges=edges)
+
+    def test_the_schema_reads_back_as_saved(self, tmp_path):
+        schema = dataset_schema()
+        path = tmp_path / "schema.json"
+
+        schema.save(path)
+
+        assert DatasetSchema.read(path) == schema
 
 
 def location_frame() -> pd.DataFrame:

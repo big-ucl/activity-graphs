@@ -52,7 +52,7 @@ from activitygraphs.models.features import (
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.models.two_tower import TwoTowerScorer
 from activitygraphs.runs import CHECKPOINTS_DIR, CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
-from activitygraphs.schema import DatasetSchema
+from activitygraphs.schema import DatasetSchema, EdgeKind
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.training.losses import BCELoss
 from activitygraphs.utils import get_project_root
@@ -95,8 +95,10 @@ def make_schema(
     return DatasetSchema(
         locations=continuous_schema("locations", num_location_features),
         access=continuous_schema("access", num_access_features),
-        contiguity_edges=continuous_schema("contiguity_edges", num_edge_features),
-        rail_edges=continuous_schema("rail_edges", 0),
+        edges={
+            EdgeKind.CONTIGUITY: continuous_schema("contiguity_edges", num_edge_features),
+            EdgeKind.RAIL: continuous_schema("rail_edges", 0),
+        },
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", num_attributes),
         distances=continuous_schema("distances", 1),
@@ -110,20 +112,30 @@ def make_locations() -> types.SimpleNamespace:
     return types.SimpleNamespace(num_rwpe_features=2, num_nodes=6)
 
 
-def make_survey() -> tuple[Locations, Users]:
-    """A chain of nodes and two users, with random columns of the widths given by ``make_schema()``."""
+def make_survey(rail_edge_index: torch.Tensor | None = None) -> tuple[Locations, Users]:
+    """A chain of nodes and two users, with random columns of the widths given by ``make_schema()``.
+
+    ``rail_edge_index`` adds rail edges, by default none.
+    """
     generator = torch.Generator().manual_seed(0)
     schema, stand_in = make_schema(), make_locations()
     num_nodes, num_users = stand_in.num_nodes, 2
     edge_index = chain_edge_index(num_nodes)
     x = torch.rand(num_nodes, schema.locations.width, generator=generator)
-    edge_attr = torch.rand(edge_index.shape[1], schema.contiguity_edges.width, generator=generator)
+    edge_attr = torch.rand(edge_index.shape[1], schema.edges[EdgeKind.CONTIGUITY].width, generator=generator)
     random_walk_pe = torch.rand(num_nodes, stand_in.num_rwpe_features, generator=generator)
     distance_m = torch.rand(num_nodes, num_nodes, generator=generator) * 1000.0
     access = torch.rand(num_nodes, schema.access.width, generator=generator)
     travel_times = torch.rand(num_nodes, num_nodes, schema.travel_times.width, generator=generator)
     locations = make_graph_locations(
-        x, edge_index, edge_attr, random_walk_pe, distance_m, access, travel_times_min=travel_times
+        x,
+        edge_index,
+        edge_attr,
+        random_walk_pe,
+        distance_m,
+        access,
+        rail_edge_index=rail_edge_index,
+        travel_times_min=travel_times,
     )
 
     visited = (torch.rand(num_users, num_nodes, generator=generator) < 0.5).float()
@@ -293,6 +305,33 @@ class TestBuildScorer:
     def test_every_architecture_builds(self, cfg, key):
         assert isinstance(scorer_of(cfg.models[key]), torch.nn.Module)
 
+    @pytest.mark.parametrize("key", ["gat", "two_tower"])
+    @pytest.mark.parametrize("use_contiguity_edges", [False, True])
+    @pytest.mark.parametrize("use_rail_edges", [False, True])
+    def test_one_layer_passes_messages_along_the_edges_of_each_kind_in_use(
+        self, cfg, key, use_contiguity_edges, use_rail_edges
+    ):
+        rail_edge_index = torch.tensor([[0, 5], [5, 0]])
+        locations, users = make_survey(rail_edge_index)
+        model = with_overrides(cfg.models[key], {"num_gcn_layers": 1})
+        features = InputFeatures(use_contiguity_edges=use_contiguity_edges, use_rail_edges=use_rail_edges)
+        torch.manual_seed(0)
+        scorer = build_scorer(model, features, locations, make_schema(), HOME_PE).eval()
+        far_end_x = locations.x.clone()
+        far_end_x[0] += 1.0
+        moved_locations = dataclasses.replace(locations, x=far_end_x)
+
+        with torch.no_grad():
+            logits = scorer(locations, join_users(locations, users))
+            moved_logits = scorer(moved_locations, join_users(moved_locations, users))
+
+        away_user = 1
+        rail_end_moved = not torch.allclose(moved_logits[away_user, 5], logits[away_user, 5])
+        contiguous_node_moved = not torch.allclose(moved_logits[away_user, 1], logits[away_user, 1])
+        assert users.home_node[away_user] == 3
+        assert rail_end_moved == use_rail_edges
+        assert contiguous_node_moved == use_contiguity_edges
+
     def test_input_width_follows_the_variant_features(self, cfg):
         locations, schema = make_locations(), make_schema()
         plain_features = InputFeatures(use_home_pe=False, use_dist=False, use_demographics=False, use_tt=False)
@@ -422,6 +461,15 @@ EXPECTED_VARIANTS = {
     "headline": ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"],
     "network_hops": ["MLP", "MLP-nonet", "MLP-nohpe"],
     "travel_times": ["MLP", "MLP-nott", "TwoTower-4", "TwoTower-4-nott"],
+    "edge_ablation": [
+        "MLP",
+        "GATv2-2",
+        "GATv2-2-norail",
+        "GATv2-2-nocontig-norail",
+        "TwoTower-4",
+        "TwoTower-4-norail",
+        "TwoTower-4-nocontig-norail",
+    ],
     "overfit_health": ["MLP-nohpe", "GATv2-8-nohpe"],
     "two_tower_ablation": [
         "MLP",

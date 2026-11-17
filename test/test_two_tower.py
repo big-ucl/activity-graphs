@@ -16,7 +16,7 @@ from activitygraphs.experiments.variants import Variant
 from activitygraphs.models.architectures import build_scorer
 from activitygraphs.models.features import InputFeatures
 from activitygraphs.models.two_tower import LocationBias, MLPBias, NodeBias, TwoTowerScorer
-from activitygraphs.schema import DatasetSchema
+from activitygraphs.schema import DatasetSchema, EdgeKind
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.training.lightning_module import RankingModule
 from activitygraphs.training.losses import build_loss
@@ -31,7 +31,17 @@ NUM_ACCESS_FEATURES = 2
 NUM_ATTRIBUTES = 2
 NUM_TRAVEL_TIME_FEATURES = 2
 HOME_PE = HomePEConfig(bins=4, max_hops=5)
-FLAGS = ["use_dist", "use_home_pe", "use_demographics", "use_rwpe", "use_access", "use_network_hops", "use_tt"]
+FLAGS = [
+    "use_dist",
+    "use_home_pe",
+    "use_demographics",
+    "use_rwpe",
+    "use_access",
+    "use_network_hops",
+    "use_tt",
+    "use_contiguity_edges",
+    "use_rail_edges",
+]
 
 
 @pytest.fixture(scope="module")
@@ -48,8 +58,10 @@ def make_schema() -> DatasetSchema:
     return DatasetSchema(
         locations=continuous_schema("locations", NUM_LOCATION_FEATURES),
         access=continuous_schema("access", NUM_ACCESS_FEATURES),
-        contiguity_edges=continuous_schema("contiguity_edges", NUM_EDGE_FEATURES),
-        rail_edges=continuous_schema("rail_edges", 0),
+        edges={
+            EdgeKind.CONTIGUITY: continuous_schema("contiguity_edges", NUM_EDGE_FEATURES),
+            EdgeKind.RAIL: continuous_schema("rail_edges", 0),
+        },
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=continuous_schema("user_attributes", NUM_ATTRIBUTES),
         distances=continuous_schema("distances", 1),

@@ -7,10 +7,8 @@ from pathlib import Path
 from activitygraphs.config import DataConfig
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.bundles import (
-    LocationFile,
     LocationTensors,
     SurveyTensors,
-    UserFile,
     UserTensors,
     check_tensors,
 )
@@ -69,8 +67,8 @@ def read_tensors_fingerprint(root: Path) -> Fingerprint:
 
 def _tensor_cache_files(root: Path) -> list[Path]:
     """Return the path of every file of the tensor cache under ``root``."""
-    location_files = [root / LOCATIONS_DIR / file for file in LocationFile]
-    user_files = [root / USERS_DIR / file for file in UserFile]
+    location_files = [root / LOCATIONS_DIR / file for file in LocationTensors.file_names()]
+    user_files = [root / USERS_DIR / file for file in UserTensors.file_names()]
 
     return [*location_files, *user_files, root / SCHEMA_FILE, root / FINGERPRINT_FILE]
 

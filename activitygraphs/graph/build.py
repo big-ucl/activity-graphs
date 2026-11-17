@@ -1,5 +1,6 @@
 """Load and build the contiguity graph over the zones of a Survey, with node features, rail edges and PT travel times."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -15,6 +16,7 @@ from activitygraphs.graph.access import add_access_features, read_motorway_junct
 from activitygraphs.graph.osrm import build_road_travel_times
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES, build_rail_edges
 from activitygraphs.graph.travel_times import build_pt_travel_times
+from activitygraphs.schema import EdgeKind
 from activitygraphs.surveys.base import SurveyData, SurveyLoader
 from activitygraphs.surveys.gtfs import GTFSTables, read_gtfs, write_feed_subsets
 from activitygraphs.surveys.overture import Overture
@@ -30,9 +32,14 @@ class GraphFile(StrEnum):
     """Filenames of a ``GraphTables`` bundle, in the cache directory."""
 
     NODES = "nodes.parquet"
-    CONTIGUITY_EDGES = "contiguity_edges.parquet"
-    RAIL_EDGES = "rail_edges.parquet"
     TRAVEL_TIMES = "travel_times.parquet"
+
+
+EDGE_TABLE_READERS: dict[EdgeKind, Callable[[Path], pd.DataFrame]] = {
+    EdgeKind.CONTIGUITY: gpd.read_parquet,
+    EdgeKind.RAIL: pd.read_parquet,
+}
+"""Reader of the cached edge table of each kind. The contiguity edges contain the geometry of the shared border."""
 
 
 @dataclass(frozen=True)
@@ -43,23 +50,29 @@ class GraphTables:
 
     Attributes:
         nodes: Zones indexed by ``loc_id``, with their features.
-        contiguity_edges: Contiguity edges table.
-        rail_edges: Rail edges table.
+        edges: Edges table of every ``EdgeKind``.
         travel_times: Travel time by public transport, car, walking and bike between every ordered pair of zones,
             indexed by (source, target) ``loc_id``.
     """
 
     nodes: gpd.GeoDataFrame
-    contiguity_edges: gpd.GeoDataFrame
-    rail_edges: pd.DataFrame
+    edges: dict[EdgeKind, pd.DataFrame]
     travel_times: pd.DataFrame
+
+    @staticmethod
+    def file_names() -> list[str]:
+        """Return the name of every file written by ``save``."""
+        edge_files = [_edge_table_file(kind) for kind in EdgeKind]
+        return [GraphFile.NODES, *edge_files, GraphFile.TRAVEL_TIMES]
 
     def save(self, directory: Path) -> None:
         """Write the tables to ``directory``, one file each."""
         directory.mkdir(parents=True, exist_ok=True)
         self.nodes.to_parquet(directory / GraphFile.NODES)
-        self.contiguity_edges.to_parquet(directory / GraphFile.CONTIGUITY_EDGES)
-        self.rail_edges.to_parquet(directory / GraphFile.RAIL_EDGES)
+
+        for kind, edges in self.edges.items():
+            edges.to_parquet(directory / _edge_table_file(kind))
+
         self.travel_times.to_parquet(directory / GraphFile.TRAVEL_TIMES)
 
     @classmethod
@@ -67,8 +80,7 @@ class GraphTables:
         """Read the tables written by ``save`` to ``directory``."""
         return cls(
             nodes=gpd.read_parquet(directory / GraphFile.NODES),
-            contiguity_edges=gpd.read_parquet(directory / GraphFile.CONTIGUITY_EDGES),
-            rail_edges=pd.read_parquet(directory / GraphFile.RAIL_EDGES),
+            edges={kind: EDGE_TABLE_READERS[kind](directory / _edge_table_file(kind)) for kind in EdgeKind},
             travel_times=pd.read_parquet(directory / GraphFile.TRAVEL_TIMES),
         )
 
@@ -89,7 +101,7 @@ def load_graph(survey: SurveyData, cfg: DataConfig, project_root: Path | None = 
     root = get_project_root(project_root)
     graph_path = root / cfg.paths.processed / GRAPH_DIR
 
-    if not all((graph_path / file).exists() for file in GraphFile):
+    if not all((graph_path / file).exists() for file in GraphTables.file_names()):
         loader = survey_loader(cfg)
         zones_gdf = survey.with_filter("zone").locations_gdf
         overture = Overture.load(zones_gdf, cfg.inputs.overture, root)
@@ -168,4 +180,11 @@ def _build_graph[S](
     nodes = nodes_gdf.to_crs(CRS)
     contiguity_edges = contiguity_edges_gdf.to_crs(CRS).rename_axis(EDGE_INDEX_NAMES)
 
-    return GraphTables(nodes=nodes, contiguity_edges=contiguity_edges, rail_edges=rail_edges, travel_times=travel_times)
+    edges = {EdgeKind.CONTIGUITY: contiguity_edges, EdgeKind.RAIL: rail_edges}
+
+    return GraphTables(nodes=nodes, edges=edges, travel_times=travel_times)
+
+
+def _edge_table_file(kind: EdgeKind) -> str:
+    """Return the name of the file of the edges table of ``kind``, in the graph cache directory."""
+    return f"{kind}_edges.parquet"

@@ -12,7 +12,8 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import shortest_path
 
 from activitygraphs.datasets.transforms import FeatureTransforms
-from activitygraphs.tensors import LocationTensors
+from activitygraphs.schema import EdgeKind
+from activitygraphs.tensors import EdgeTensors, LocationTensors
 
 RWPE_WALK_LENGTH = 20
 
@@ -24,10 +25,7 @@ class Locations:
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
         access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
-        contiguity_edge_index: Edge list, ``[2, num_edges]``.
-        contiguity_edge_attr: Edge features, ``[num_edges, num_edge_features]``.
-        rail_edge_index: Rail edges between zones, in both directions, ``[2, num_rail_edges]``.
-        rail_edge_attr: Rail edge features, ``[num_rail_edges, num_rail_edge_features]``.
+        edges: Edges between the nodes with their scaled features, for every ``EdgeKind``.
         random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, num_rwpe_features]``.
         hop_distance: Graph-hop distance between every pair of nodes over the contiguity edges, ``inf`` for unreachable pairs,
             ``[num_nodes, num_nodes]``.
@@ -46,10 +44,7 @@ class Locations:
 
     x: torch.Tensor
     access: torch.Tensor
-    contiguity_edge_index: torch.Tensor
-    contiguity_edge_attr: torch.Tensor
-    rail_edge_index: torch.Tensor
-    rail_edge_attr: torch.Tensor
+    edges: dict[EdgeKind, EdgeTensors]
     random_walk_pe: torch.Tensor
     hop_distance: torch.Tensor
     network_hop_distance: torch.Tensor
@@ -67,37 +62,32 @@ class Locations:
             tensors: The location tensors.
             transforms: The transforms fitted on the training split. ``None`` leaves the features unscaled.
         """
-        graph = pyg.data.Data(edge_index=tensors.contiguity_edge_index, num_nodes=tensors.num_nodes)
+        contiguity_edge_index = tensors.edges[EdgeKind.CONTIGUITY].index
+        graph = pyg.data.Data(edge_index=contiguity_edge_index, num_nodes=tensors.num_nodes)
         random_walk_pe = T.AddRandomWalkPE(walk_length=RWPE_WALK_LENGTH)(graph).random_walk_pe
-        hop_distance = _compute_hop_distance(tensors.contiguity_edge_index, tensors.num_nodes)
-        network_edge_index = torch.cat([tensors.contiguity_edge_index, tensors.rail_edge_index], dim=1)
-        network_hop_distance = _compute_hop_distance(network_edge_index, tensors.num_nodes)
+        hop_distance = _compute_hop_distance(contiguity_edge_index, tensors.num_nodes)
 
         if transforms is None:
-            x, access, contiguity_edge_attr, distance = (
-                tensors.x,
-                tensors.access,
-                tensors.contiguity_edge_attr,
-                tensors.distance_m,
-            )
-            rail_edge_attr = tensors.rail_edge_attr
+            x, access, edges, distance = tensors.x, tensors.access, tensors.edges, tensors.distance_m
             travel_times = tensors.travel_times_min
         else:
             distance_m = tensors.distance_m.unsqueeze(-1)
             x = transforms.groups["locations"].apply(tensors.x)
             access = transforms.groups["access"].apply(tensors.access)
-            contiguity_edge_attr = transforms.groups["contiguity_edges"].apply(tensors.contiguity_edge_attr)
-            rail_edge_attr = transforms.groups["rail_edges"].apply(tensors.rail_edge_attr)
+            edges = {}
+            for kind, kind_edges in tensors.edges.items():
+                scaled_attr = transforms.groups[kind.group].apply(kind_edges.attr)
+                edges[kind] = EdgeTensors(kind_edges.index, scaled_attr)
             distance = transforms.groups["distances"].apply(distance_m).squeeze(-1)
             travel_times = transforms.groups["travel_times"].apply(tensors.travel_times_min)
+
+        network_edge_index = torch.cat([kind_edges.index for kind_edges in edges.values()], dim=1)
+        network_hop_distance = _compute_hop_distance(network_edge_index, tensors.num_nodes)
 
         return cls(
             x=x,
             access=access,
-            contiguity_edge_index=tensors.contiguity_edge_index,
-            contiguity_edge_attr=contiguity_edge_attr,
-            rail_edge_index=tensors.rail_edge_index,
-            rail_edge_attr=rail_edge_attr,
+            edges=edges,
             random_walk_pe=random_walk_pe,
             hop_distance=hop_distance,
             network_hop_distance=network_hop_distance,
@@ -120,11 +110,13 @@ class Locations:
 
     def to(self, device: torch.device) -> Self:
         """Return the locations with every tensor on ``device``."""
-        moved = {}
+        moved: dict[str, torch.Tensor | dict[EdgeKind, EdgeTensors]] = {}
         for field in fields(self):
             value = getattr(self, field.name)
             if isinstance(value, torch.Tensor):
                 moved[field.name] = value.to(device)
+            elif isinstance(value, dict):
+                moved[field.name] = {kind: edges.to(device) for kind, edges in value.items()}
 
         return replace(self, **moved)
 

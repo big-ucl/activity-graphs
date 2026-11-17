@@ -1,0 +1,17 @@
+# @package _global_
+# The GAT and the two-tower model, each passing messages over the contiguity and rail edges, over the contiguity edges
+# alone and over no edge, and the MLP, beside the baselines.
+experiment:
+  name: edge_ablation
+  variants:
+    - { model: mlp }
+    - { model: gat }
+    - { model: gat, features: { use_rail_edges: false } }
+    - { model: gat, features: { use_contiguity_edges: false, use_rail_edges: false } }
+    - { model: two_tower }
+    - { model: two_tower, features: { use_rail_edges: false } }
+    - { model: two_tower, features: { use_contiguity_edges: false, use_rail_edges: false } }
+
+models:
+  gat:
+    num_gcn_layers: 2

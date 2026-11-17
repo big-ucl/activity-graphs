@@ -8,7 +8,7 @@ It is split into the following modules:
 """
 
 from activitygraphs.tensors.build import USER_NODE_SCHEMA, build_tensors, load_tensors
-from activitygraphs.tensors.bundles import LocationTensors, SurveyTensors, UserTensors, check_tensors
+from activitygraphs.tensors.bundles import EdgeTensors, LocationTensors, SurveyTensors, UserTensors, check_tensors
 from activitygraphs.tensors.cache import (
     Fingerprint,
     read_tensors,
@@ -19,6 +19,7 @@ from activitygraphs.tensors.cache import (
 
 __all__ = [
     "USER_NODE_SCHEMA",
+    "EdgeTensors",
     "Fingerprint",
     "LocationTensors",
     "SurveyTensors",

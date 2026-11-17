@@ -8,7 +8,7 @@ from typing import Self
 import polars as pl
 import torch
 
-from activitygraphs.schema import DatasetSchema
+from activitygraphs.schema import DatasetSchema, EdgeKind
 
 
 class LocationFile(StrEnum):
@@ -16,10 +16,6 @@ class LocationFile(StrEnum):
 
     X = "x.pt"
     ACCESS = "access.pt"
-    CONTIGUITY_EDGE_INDEX = "contiguity_edge_index.pt"
-    CONTIGUITY_EDGE_ATTR = "contiguity_edge_attr.pt"
-    RAIL_EDGE_INDEX = "rail_edge_index.pt"
-    RAIL_EDGE_ATTR = "rail_edge_attr.pt"
     DISTANCE_M = "distance_m.pt"
     TRAVEL_TIMES_MIN = "travel_times_min.pt"
     NODE_IDS = "node_ids.parquet"
@@ -37,16 +33,50 @@ class UserFile(StrEnum):
 
 
 @dataclass(frozen=True)
+class EdgeTensors:
+    """The edges of one kind between the nodes, in both directions, with their features.
+
+    Attributes:
+        index: Source and target node of each edge, int64, ``[2, num_edges]``.
+        attr: Features of each edge, ``[num_edges, num_edge_features]``.
+    """
+
+    index: torch.Tensor
+    attr: torch.Tensor
+
+    @property
+    def num_edges(self) -> int:
+        """Number of edges, counting each direction."""
+        return self.index.shape[1]
+
+    def to(self, device: torch.device) -> Self:
+        """Return the edges on ``device``."""
+        return type(self)(self.index.to(device), self.attr.to(device))
+
+    def save(self, directory: Path, kind: EdgeKind) -> None:
+        """Write the edges of ``kind`` to ``directory``, one file per tensor."""
+        index_file, attr_file = _edge_files(kind)
+        torch.save(self.index, directory / index_file)
+        torch.save(self.attr, directory / attr_file)
+
+    @classmethod
+    def read(cls, directory: Path, kind: EdgeKind) -> Self:
+        """Read the edges of ``kind`` written by ``save`` to ``directory``."""
+        index_file, attr_file = _edge_files(kind)
+        index = torch.load(directory / index_file, weights_only=True)
+        attr = torch.load(directory / attr_file, weights_only=True)
+
+        return cls(index, attr)
+
+
+@dataclass(frozen=True)
 class LocationTensors:
     """The raw tensors of the shared location graph of a survey.
 
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
         access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
-        contiguity_edge_index: Edge list, ``[2, num_edges]``.
-        contiguity_edge_attr: Edge features, ``[num_edges, num_edge_features]``.
-        rail_edge_index: Rail edges between zones, in both directions, ``[2, num_rail_edges]``.
-        rail_edge_attr: Rail edge features, ``[num_rail_edges, num_rail_edge_features]``.
+        edges: Edges between the nodes with their unscaled features, for every ``EdgeKind``.
         distance_m: Distance between the centroids of every pair of nodes in metres, ``[num_nodes, num_nodes]``.
             Row ``i`` holds the distances from node ``i`` to every node.
         travel_times_min: Travel time in minutes and reachability from every node to every node by each node,
@@ -57,10 +87,7 @@ class LocationTensors:
 
     x: torch.Tensor
     access: torch.Tensor
-    contiguity_edge_index: torch.Tensor
-    contiguity_edge_attr: torch.Tensor
-    rail_edge_index: torch.Tensor
-    rail_edge_attr: torch.Tensor
+    edges: dict[EdgeKind, EdgeTensors]
     distance_m: torch.Tensor
     travel_times_min: torch.Tensor
     node_ids: pl.DataFrame
@@ -70,21 +97,26 @@ class LocationTensors:
         """Number of nodes of the graph."""
         return self.node_ids.height
 
+    @staticmethod
+    def file_names() -> list[str]:
+        """Return the name of every file written by ``save``."""
+        edge_files = [file for kind in EdgeKind for file in _edge_files(kind)]
+        return [*LocationFile, *edge_files]
+
     def save(self, directory: Path) -> None:
         """Write the tensors to ``directory``, one file each."""
         directory.mkdir(parents=True, exist_ok=True)
         tensor_files = {
             LocationFile.X: self.x,
             LocationFile.ACCESS: self.access,
-            LocationFile.CONTIGUITY_EDGE_INDEX: self.contiguity_edge_index,
-            LocationFile.CONTIGUITY_EDGE_ATTR: self.contiguity_edge_attr,
-            LocationFile.RAIL_EDGE_INDEX: self.rail_edge_index,
-            LocationFile.RAIL_EDGE_ATTR: self.rail_edge_attr,
             LocationFile.DISTANCE_M: self.distance_m,
             LocationFile.TRAVEL_TIMES_MIN: self.travel_times_min,
         }
         for file, tensor in tensor_files.items():
             torch.save(tensor, directory / file)
+
+        for kind, edges in self.edges.items():
+            edges.save(directory, kind)
 
         self.node_ids.write_parquet(directory / LocationFile.NODE_IDS)
 
@@ -94,10 +126,7 @@ class LocationTensors:
         return cls(
             x=torch.load(directory / LocationFile.X, weights_only=True),
             access=torch.load(directory / LocationFile.ACCESS, weights_only=True),
-            contiguity_edge_index=torch.load(directory / LocationFile.CONTIGUITY_EDGE_INDEX, weights_only=True),
-            contiguity_edge_attr=torch.load(directory / LocationFile.CONTIGUITY_EDGE_ATTR, weights_only=True),
-            rail_edge_index=torch.load(directory / LocationFile.RAIL_EDGE_INDEX, weights_only=True),
-            rail_edge_attr=torch.load(directory / LocationFile.RAIL_EDGE_ATTR, weights_only=True),
+            edges={kind: EdgeTensors.read(directory, kind) for kind in EdgeKind},
             distance_m=torch.load(directory / LocationFile.DISTANCE_M, weights_only=True),
             travel_times_min=torch.load(directory / LocationFile.TRAVEL_TIMES_MIN, weights_only=True),
             node_ids=pl.read_parquet(directory / LocationFile.NODE_IDS),
@@ -128,6 +157,11 @@ class UserTensors:
     def num_users(self) -> int:
         """Number of users."""
         return self.user_ids.height
+
+    @staticmethod
+    def file_names() -> list[str]:
+        """Return the name of every file written by ``save``."""
+        return list(UserFile)
 
     def save(self, directory: Path) -> None:
         """Write the tensors to ``directory``, one file each."""
@@ -164,9 +198,9 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
     """Check that the bundles agree on the number of users and nodes, and that their widths match ``schema``.
 
     Raises:
-        ValueError: The tensors and ids disagree on the number of users, nodes or rail edges, a group's tensors
-            have a different number of numeric or categorical columns than its schema, a home node is not a node of
-            the graph, or a feature tensor holds a NaN or infinite value.
+        ValueError: The tensors and ids disagree on the number of users, nodes or edges of a kind, an edge kind holds
+            a pair of nodes more than once, a group's tensors have a different number of numeric or categorical columns
+            than its schema, a home node is not a node of the graph, or a feature tensor holds a NaN or infinite value.
     """
     _require_equal_counts(
         "User",
@@ -192,19 +226,14 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
             "node_ids": locations.node_ids.height,
         },
     )
-    _require_equal_counts(
-        "Rail edge",
-        {
-            "rail_edge_index": locations.rail_edge_index.shape[1],
-            "rail_edge_attr": locations.rail_edge_attr.shape[0],
-        },
-    )
+    for kind, edges in locations.edges.items():
+        _require_equal_counts(f"{kind} edge", {"index": edges.num_edges, "attr": edges.attr.shape[0]})
+        _require_distinct_pairs(kind, edges.index, locations.num_nodes)
 
     numeric_and_categorical_widths = {
         "locations": (locations.x.shape[-1], 0),
         "access": (locations.access.shape[-1], 0),
-        "contiguity_edges": (locations.contiguity_edge_attr.shape[-1], 0),
-        "rail_edges": (locations.rail_edge_attr.shape[-1], 0),
+        **{kind.group: (edges.attr.shape[-1], 0) for kind, edges in locations.edges.items()},
         "user_attributes": (users.attributes.shape[-1], users.attributes_cat.shape[-1]),
         "distances": (1, 0),
         "travel_times": (locations.travel_times_min.shape[-1], 0),
@@ -230,8 +259,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
     _require_finite({
         "x": locations.x,
         "access": locations.access,
-        "contiguity_edge_attr": locations.contiguity_edge_attr,
-        "rail_edge_attr": locations.rail_edge_attr,
+        **{f"{kind}_edge_attr": edges.attr for kind, edges in locations.edges.items()},
         "distance_m": locations.distance_m,
         "travel_times_min": locations.travel_times_min,
         "attributes": users.attributes,
@@ -253,6 +281,18 @@ def _require_equal_counts(count_name: str, counts: dict[str, int]) -> None:
         raise ValueError(f"{count_name} count mismatch: {listed}.")
 
 
+def _require_distinct_pairs(kind: EdgeKind, edge_index: torch.Tensor, num_nodes: int) -> None:
+    """Raise if the edges of ``kind`` hold each ordered pair of nodes more than once.
+
+    Raises:
+        ValueError: The edges of ``kind`` hold a pair of nodes more than once.
+    """
+    pair_keys = edge_index[0] * num_nodes + edge_index[1]
+    num_repeated = pair_keys.numel() - pair_keys.unique().numel()
+    if num_repeated:
+        raise ValueError(f"The `{kind}` edges hold {num_repeated} repeated pairs of nodes.")
+
+
 def _require_finite(tensors: dict[str, torch.Tensor]) -> None:
     """Raise unless every value of every tensor in ``tensors`` is finite.
 
@@ -266,3 +306,8 @@ def _require_finite(tensors: dict[str, torch.Tensor]) -> None:
         num_not_finite = int((~torch.isfinite(tensor)).sum())
         if num_not_finite:
             raise ValueError(f"The `{name}` tensor holds {num_not_finite} NaN or infinite values.")
+
+
+def _edge_files(kind: EdgeKind) -> tuple[str, str]:
+    """Return the names of the files of the edge index and the edge features of ``kind``, in a cache directory."""
+    return f"{kind}_edge_index.pt", f"{kind}_edge_attr.pt"

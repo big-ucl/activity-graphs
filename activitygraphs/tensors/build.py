@@ -2,15 +2,13 @@
 
 from collections.abc import Collection
 from pathlib import Path
-from typing import cast
 
-import city2graph as c2g
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import polars as pl
 import torch
-import torch_geometric as pyg
+from torch_geometric.utils import to_undirected
 
 from activitygraphs.base import Purpose
 from activitygraphs.config import Config, DataConfig
@@ -18,10 +16,10 @@ from activitygraphs.graph import GraphTables, load_graph
 from activitygraphs.graph.access import ACCESS_SCHEMA
 from activitygraphs.graph.rail import EDGE_INDEX_NAMES, RAIL_EDGE_SCHEMA
 from activitygraphs.graph.travel_times import TRAVEL_TIME_SCHEMA
-from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, TensorSchema, infer_schema
+from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema, infer_schema
 from activitygraphs.surveys.base import SurveyData
 from activitygraphs.surveys.registry import load_survey
-from activitygraphs.tensors.bundles import LocationTensors, SurveyTensors, UserTensors, check_tensors
+from activitygraphs.tensors.bundles import EdgeTensors, LocationTensors, SurveyTensors, UserTensors, check_tensors
 from activitygraphs.tensors.cache import read_tensors, save_tensors, tensors_path
 from activitygraphs.utils import get_project_root
 
@@ -42,6 +40,7 @@ USER_NODE_SCHEMA = TensorSchema("user_nodes", (ColumnSpec("is_home", ColumnKind.
 CONTIGUITY_EDGE_SCHEMA = TensorSchema("contiguity_edges", (ColumnSpec("weight", ColumnKind.COUNT),))
 DISTANCE_SCHEMA = TensorSchema("distances", (ColumnSpec("home_distance", ColumnKind.COUNT),))
 TARGET_SCHEMA = TensorSchema("targets", (ColumnSpec("is_visited", ColumnKind.BINARY),))
+EDGE_SCHEMAS = {EdgeKind.CONTIGUITY: CONTIGUITY_EDGE_SCHEMA, EdgeKind.RAIL: RAIL_EDGE_SCHEMA}
 
 
 # =========================================
@@ -127,26 +126,41 @@ def _build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
     return torch.from_numpy(distances)
 
 
-def _build_rail_edges(rail_edges: pd.DataFrame, node_ids: pl.DataFrame) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the rail edges as node indices in both directions, with their ``RAIL_EDGE_SCHEMA`` columns.
+def _build_edges(edges: pd.DataFrame, node_ids: pl.DataFrame, schema: TensorSchema) -> EdgeTensors:
+    """Return the edges of one kind as node indices in both directions, with their ``schema`` columns.
 
     Args:
-        rail_edges: Rail edges between the zones, as returned by ``build_rail_edges``.
+        edges: Edges between the zones, indexed by (``source``, ``target``) ``loc_id``, one row per pair of zones.
         node_ids: Survey ``loc_id`` of each node, in node order.
+        schema: The columns of the edge features, in tensor column order.
 
     Returns:
-        Tuple ``(rail_edge_index, rail_edge_attr)``: the edges, ``[2, 2 * num_edges]``, the second half reversing
-        the first, and their columns, ``[2 * num_edges, num_rail_edge_features]``.
+        The edges, ``[2, 2 * num_edges]``, sorted by source node and then by target node, and their features,
+        ``[2 * num_edges, schema.width]``.
+
+    Raises:
+        ValueError: ``edges`` holds a pair of zones in more than one row, or a zone paired with itself.
     """
-    node_index = pd.Series(np.arange(node_ids.height), index=node_ids["loc_id"].to_list())
-    source_ids = rail_edges.index.get_level_values("source")
-    target_ids = rail_edges.index.get_level_values("target")
+    num_nodes = node_ids.height
+    node_index = pd.Series(np.arange(num_nodes), index=node_ids["loc_id"].to_list())
+    source_ids = edges.index.get_level_values("source")
+    target_ids = edges.index.get_level_values("target")
     source = node_index.loc[source_ids].to_numpy()
     target = node_index.loc[target_ids].to_numpy()
-    edge_index = torch.from_numpy(np.stack([np.concatenate([source, target]), np.concatenate([target, source])]))
-    edge_values = torch.from_numpy(rail_edges[RAIL_EDGE_SCHEMA.names].to_numpy(dtype=np.float32))
+    one_way_index = torch.from_numpy(np.stack([source, target]))
+    one_way_values = torch.tensor(edges[schema.names].to_numpy(dtype=np.float32))
+    edge_index, edge_values = to_undirected(one_way_index, one_way_values, num_nodes=num_nodes)
 
-    return edge_index, edge_values.repeat(2, 1)
+    if edge_index.shape[1] != 2 * len(edges):
+        raise ValueError(f"The `{schema.group}` table holds a pair of zones in more than one row, or a self loop.")
+
+    return EdgeTensors(edge_index, edge_values)
+
+
+def _build_location_features(nodes_gdf: gpd.GeoDataFrame, node_feature_cols: list[str]) -> torch.Tensor:
+    """Return the location features of every node, in node order, ``[n_nodes, n_location_features]``."""
+    feature_values = nodes_gdf[node_feature_cols].to_numpy().astype(np.float32)
+    return torch.from_numpy(feature_values)
 
 
 def _build_travel_times(travel_times: pd.DataFrame, node_ids: pl.DataFrame) -> torch.Tensor:
@@ -244,35 +258,28 @@ def build_tensors(survey: SurveyData, graph: GraphTables) -> SurveyTensors:
 
     Args:
         survey: The survey.
-        graph: The nodes, the contiguity edges, the rail edges and the travel times of the graph.
+        graph: The nodes, the edges of every kind and the travel times of the graph.
 
     Returns:
         Tuple ``(locations, users, schema)``: the tensors of the shared graph, the per-user tensors and the dataset
         schema.
 
     Raises:
-        ValueError: The graph has no edge index, or the tensors fail ``check_tensors``.
+        ValueError: The tensors fail ``check_tensors``.
     """
     nodes_gdf = graph.nodes
     excluded_cols = [*COLS_EXCLUDED_FROM_FEATURES, *ACCESS_SCHEMA.names]
     node_feature_cols = [col for col in nodes_gdf.columns if col not in excluded_cols]
 
-    pyg_graph = c2g.gdf_to_pyg(
-        nodes_gdf,
-        graph.contiguity_edges,
-        node_feature_cols=node_feature_cols,
-        edge_feature_cols=CONTIGUITY_EDGE_SCHEMA.names,
-        keep_geom=False,
-        device="cpu",
-    )
-
-    access = _build_access(nodes_gdf)
-    distance_m = _build_node_distances(nodes_gdf)
     node_ids = _build_node_ids(survey, nodes_gdf)
-    rail_edge_index, rail_edge_attr = _build_rail_edges(graph.rail_edges, node_ids)
-    travel_times_min = _build_travel_times(graph.travel_times, node_ids)
-    locations = _build_location_tensors(
-        cast(pyg.data.Data, pyg_graph), access, rail_edge_index, rail_edge_attr, distance_m, travel_times_min, node_ids
+    edges = {kind: _build_edges(graph.edges[kind], node_ids, EDGE_SCHEMAS[kind]) for kind in EdgeKind}
+    locations = LocationTensors(
+        x=_build_location_features(nodes_gdf, node_feature_cols),
+        access=_build_access(nodes_gdf),
+        edges=edges,
+        distance_m=_build_node_distances(nodes_gdf),
+        travel_times_min=_build_travel_times(graph.travel_times, node_ids),
+        node_ids=node_ids,
     )
 
     attributes, attributes_cat = _build_user_attributes(survey)
@@ -346,43 +353,12 @@ def _build_schema(survey: SurveyData, nodes_gdf: gpd.GeoDataFrame, node_feature_
     return DatasetSchema(
         locations=locations_schema,
         access=ACCESS_SCHEMA,
-        contiguity_edges=CONTIGUITY_EDGE_SCHEMA,
-        rail_edges=RAIL_EDGE_SCHEMA,
+        edges=EDGE_SCHEMAS,
         user_nodes=USER_NODE_SCHEMA,
         user_attributes=survey.demographics_schema,
         distances=DISTANCE_SCHEMA,
         travel_times=TRAVEL_TIME_SCHEMA,
         targets=TARGET_SCHEMA,
-    )
-
-
-def _build_location_tensors(
-    pyg_graph: pyg.data.Data,
-    access: torch.Tensor,
-    rail_edge_index: torch.Tensor,
-    rail_edge_attr: torch.Tensor,
-    distance_m: torch.Tensor,
-    travel_times_min: torch.Tensor,
-    node_ids: pl.DataFrame,
-) -> LocationTensors:
-    """Return the location tensors of the PyG graph built by city2graph.
-
-    Raises:
-        ValueError: The graph has no edge index.
-    """
-    if pyg_graph.edge_index is None:
-        raise ValueError("The graph has no edge index.")
-
-    return LocationTensors(
-        x=cast(torch.Tensor, pyg_graph.x),
-        access=access,
-        contiguity_edge_index=pyg_graph.edge_index,
-        contiguity_edge_attr=cast(torch.Tensor, pyg_graph.edge_attr),
-        rail_edge_index=rail_edge_index,
-        rail_edge_attr=rail_edge_attr,
-        distance_m=distance_m,
-        travel_times_min=travel_times_min,
-        node_ids=node_ids,
     )
 
 
