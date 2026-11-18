@@ -6,11 +6,12 @@ import pytest
 import torch
 from encoders import make_encoder
 from graphs import chain_edge_index, loader_of, make_locations, make_users
+from lightning.pytorch.loggers import Logger
 
 from activitygraphs.experiments.training import _aggregate_frame
 from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
-from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.lightning_module import LEARNING_RATE_KEY, RankingModule
 from activitygraphs.training.loggers import MetricsLogger
 from activitygraphs.training.losses import BCELoss
 
@@ -37,8 +38,8 @@ def make_survey(num_users: int = 8):
     return locations, users
 
 
-def fit_and_test(num_epochs: int) -> list[dict]:
-    """Rows logged by a real ``Trainer`` fitting a small ``RankingModule`` for ``num_epochs`` and testing it."""
+def fit_and_test(num_epochs: int, loggers: list[Logger]) -> None:
+    """Fit a small ``RankingModule`` with a real ``Trainer`` for ``num_epochs`` and test it, logging to ``loggers``."""
     locations, users = make_survey()
     encoder = make_encoder(NUM_FEATURES - 1, 1)
     module = RankingModule(
@@ -52,11 +53,10 @@ def fit_and_test(num_epochs: int) -> list[dict]:
         recall_ks=[1, 3],
     )
     loader = loader_of(users, batch_size=4)
-    metrics_logger = MetricsLogger()
     trainer = L.Trainer(
         max_epochs=num_epochs,
         accelerator="cpu",
-        logger=[metrics_logger],
+        logger=loggers,
         enable_checkpointing=False,
         enable_progress_bar=False,
         enable_model_summary=False,
@@ -65,7 +65,27 @@ def fit_and_test(num_epochs: int) -> list[dict]:
     trainer.fit(module, train_dataloaders=loader, val_dataloaders=loader)
     trainer.test(module, dataloaders=loader, verbose=False)
 
-    return metrics_logger.rows
+
+class RecordingLogger(Logger):
+    """Keeps every dict of metrics it receives, as received."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[dict[str, float]] = []
+
+    @property
+    def name(self) -> str:
+        return "recording"
+
+    @property
+    def version(self) -> int:
+        return 0
+
+    def log_hyperparams(self, params, *args, **kwargs) -> None:
+        pass
+
+    def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
+        self.records.append(dict(metrics))
 
 
 class TestMetricsLogger:
@@ -93,7 +113,9 @@ class TestMetricsLogger:
 
     def test_a_trainer_logs_every_epoch_and_the_test_after_the_epoch_end_hooks(self):
         """The ranking and calibration metrics are logged in or after the epoch-end hooks and must still arrive."""
-        rows = fit_and_test(num_epochs=2)
+        metrics_logger = MetricsLogger()
+        fit_and_test(num_epochs=2, loggers=[metrics_logger])
+        rows = metrics_logger.rows
 
         assert [(row["stage"], row["epoch"]) for row in rows] == [("fit", 0), ("fit", 1), ("test", None)]
         assert {"train_loss", "val_bce", "val_avg_recall@3", "val_calibration_l1"} <= set(rows[0])
@@ -123,3 +145,13 @@ class TestAggregateFrame:
         frame = _aggregate_frame(self._rows(3), "MLP")
 
         assert frame["name"].to_list() == ["MLP"] * 4
+
+
+def test_the_learning_rate_of_every_epoch_arrives_with_its_epoch():
+    recorder = RecordingLogger()
+
+    fit_and_test(num_epochs=2, loggers=[recorder])
+
+    learning_rate_records = [record for record in recorder.records if LEARNING_RATE_KEY in record]
+    assert [record["epoch"] for record in learning_rate_records] == [0, 1]
+    assert all(record[LEARNING_RATE_KEY] == pytest.approx(1e-2) for record in learning_rate_records)

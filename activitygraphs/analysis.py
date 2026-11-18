@@ -25,6 +25,7 @@ from activitygraphs.config import AnalysisConfig
 from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, latest_run, run_dir
 from activitygraphs.training.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_band_auc
+from activitygraphs.wandb_tables import band_seed_means
 
 # Baseline model representing node popularity.
 POPULARITY_MODEL = "VisitFrequency"
@@ -826,6 +827,116 @@ def distance_band_recall_table(band_recall: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def within_band_auc(
+    per_user_results: pl.DataFrame,
+    score_vectors: pl.DataFrame,
+    home_distances: pl.DataFrame,
+    bands: Sequence[float],
+) -> pl.DataFrame:
+    """Each user's mean AUC against the unvisited nodes of a distance band, over their positives in that band.
+
+    Args:
+        per_user_results: Per-user results frame from ``read_report_run``.
+        score_vectors: Per-user score vectors from ``read_score_vectors``.
+        home_distances: Per-user distances from home from ``read_home_distances``.
+        bands: Upper band edges in km.
+
+    Returns:
+        Frame of ``name, stage, seed, user_idx, band, band_lo, auc, n_band_pos, n_band_neg``, one row per model, seed,
+        user and band the user has a positive in. Positives whose band holds no unvisited node are dropped.
+    """
+    lower_edges, upper_edges = _band_edges(bands)
+    distance_by_user = dict(home_distances.select("user_idx", "distances").iter_rows())
+    per_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
+
+    rows = []
+
+    for name, seed in score_vectors.select("name", "seed").unique().sort("name", "seed").iter_rows():
+        model_rows = _model_seed_rows(per_user, name, seed).join(
+            _model_seed_rows(score_vectors, name, seed).select("user_idx", "scores"), on="user_idx"
+        )
+        user_indices = model_rows["user_idx"].to_list()
+        band_index = _distance_band_index(
+            np.asarray([distance_by_user[user] for user in user_indices], dtype=np.float64), bands
+        )
+        positives = model_rows[PER_POSITIVE_NODE_COLUMN].to_list()
+
+        auc, n_negatives = _per_positive_band_auc(
+            np.asarray(model_rows["scores"].to_list(), dtype=np.float64),
+            positives,
+            model_rows[HOME_NODE_COLUMN].to_numpy(),
+            band_index,
+        )
+        positive_user = np.repeat(np.arange(len(user_indices)), [len(nodes) for nodes in positives])
+        positive_band = band_index[positive_user, np.concatenate(positives).astype(int)]
+
+        rows.append(
+            pl.DataFrame({
+                "name": pl.Series([name] * len(auc), dtype=pl.String),
+                "seed": pl.Series([seed] * len(auc), dtype=pl.Int64),
+                "user_idx": np.asarray(user_indices)[positive_user],
+                "band_lo": lower_edges[positive_band],
+                "band_hi": upper_edges[positive_band],
+                "auc": auc,
+                "n_band_neg": n_negatives,
+            })
+        )
+
+    return (
+        pl
+        .concat(rows)
+        .filter(pl.col("auc").is_not_nan())
+        .with_columns(band=_distance_band_label(pl.col("band_lo"), pl.col("band_hi")))
+        .group_by("name", "seed", "user_idx", "band", "band_lo")
+        .agg(auc=pl.col("auc").mean(), n_band_pos=pl.len(), n_band_neg=pl.col("n_band_neg").mean())
+        .with_columns(stage=pl.lit(PER_USER_STAGE))
+        .select("name", "stage", "seed", "user_idx", "band", "band_lo", "auc", "n_band_pos", "n_band_neg")
+        .sort("band_lo", "name", "user_idx")
+    )
+
+
+def paired_within_band_auc(
+    band_auc: pl.DataFrame,
+    reference_model: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` run on each distance band's within-band AUC.
+
+    Args:
+        band_auc: Per-user within-band AUC from ``within_band_auc``.
+        reference_model: Model every other model is compared against.
+        n_bootstrap: Bootstrap resamples behind the confidence interval.
+        seed: Seed of the bootstrap.
+
+    Returns:
+        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
+        ``mean_diff`` (descending).
+    """
+    return _paired_by_distance_band(band_auc, reference_model, "auc", n_bootstrap, seed)
+
+
+def paired_distance_band_recall(
+    band_recall: pl.DataFrame,
+    reference_model: str,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """``paired_comparison`` run on each distance band's ``band_recall``.
+
+    Args:
+        band_recall: Per-user band recall from ``distance_band_recall``.
+        reference_model: Model every other model is compared against.
+        n_bootstrap: Bootstrap resamples behind the confidence interval.
+        seed: Seed of the bootstrap.
+
+    Returns:
+        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
+        ``mean_diff`` (descending).
+    """
+    return _paired_by_distance_band(band_recall, reference_model, "band_recall", n_bootstrap, seed)
+
+
 def _edge_label(edge: pl.Expr) -> pl.Expr:
     """Return a band edge in km as a string, without the trailing zero of a whole number of km."""
     return pl.when(edge == edge.round(0)).then(edge.cast(pl.Int64).cast(pl.String)).otherwise(edge.cast(pl.String))
@@ -905,74 +1016,6 @@ def _per_positive_band_auc(
     )
 
 
-def _within_band_auc(
-    per_user_results: pl.DataFrame,
-    score_vectors: pl.DataFrame,
-    home_distances: pl.DataFrame,
-    bands: Sequence[float],
-) -> pl.DataFrame:
-    """Each user's mean AUC against the unvisited nodes of a distance band, over their positives in that band.
-
-    Args:
-        per_user_results: Per-user results frame from ``read_report_run``.
-        score_vectors: Per-user score vectors from ``read_score_vectors``.
-        home_distances: Per-user distances from home from ``read_home_distances``.
-        bands: Upper band edges in km.
-
-    Returns:
-        Frame of ``name, stage, seed, user_idx, band, band_lo, auc, n_band_pos, n_band_neg``, one row per model, seed,
-        user and band the user has a positive in. Positives whose band holds no unvisited node are dropped.
-    """
-    lower_edges, upper_edges = _band_edges(bands)
-    distance_by_user = dict(home_distances.select("user_idx", "distances").iter_rows())
-    per_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
-
-    rows = []
-
-    for name, seed in score_vectors.select("name", "seed").unique().sort("name", "seed").iter_rows():
-        model_rows = _model_seed_rows(per_user, name, seed).join(
-            _model_seed_rows(score_vectors, name, seed).select("user_idx", "scores"), on="user_idx"
-        )
-        user_indices = model_rows["user_idx"].to_list()
-        band_index = _distance_band_index(
-            np.asarray([distance_by_user[user] for user in user_indices], dtype=np.float64), bands
-        )
-        positives = model_rows[PER_POSITIVE_NODE_COLUMN].to_list()
-
-        auc, n_negatives = _per_positive_band_auc(
-            np.asarray(model_rows["scores"].to_list(), dtype=np.float64),
-            positives,
-            model_rows[HOME_NODE_COLUMN].to_numpy(),
-            band_index,
-        )
-        positive_user = np.repeat(np.arange(len(user_indices)), [len(nodes) for nodes in positives])
-        positive_band = band_index[positive_user, np.concatenate(positives).astype(int)]
-
-        rows.append(
-            pl.DataFrame({
-                "name": pl.Series([name] * len(auc), dtype=pl.String),
-                "seed": pl.Series([seed] * len(auc), dtype=pl.Int64),
-                "user_idx": np.asarray(user_indices)[positive_user],
-                "band_lo": lower_edges[positive_band],
-                "band_hi": upper_edges[positive_band],
-                "auc": auc,
-                "n_band_neg": n_negatives,
-            })
-        )
-
-    return (
-        pl
-        .concat(rows)
-        .filter(pl.col("auc").is_not_nan())
-        .with_columns(band=_distance_band_label(pl.col("band_lo"), pl.col("band_hi")))
-        .group_by("name", "seed", "user_idx", "band", "band_lo")
-        .agg(auc=pl.col("auc").mean(), n_band_pos=pl.len(), n_band_neg=pl.col("n_band_neg").mean())
-        .with_columns(stage=pl.lit(PER_USER_STAGE))
-        .select("name", "stage", "seed", "user_idx", "band", "band_lo", "auc", "n_band_pos", "n_band_neg")
-        .sort("band_lo", "name", "user_idx")
-    )
-
-
 def _model_seed_rows(results: pl.DataFrame, name: str, seed: int | None) -> pl.DataFrame:
     """Rows of one model and seed, the seedless rows being the baselines'."""
     rows = results.filter(pl.col("name") == name)
@@ -984,7 +1027,7 @@ def _within_band_auc_table(band_auc: pl.DataFrame) -> pl.DataFrame:
     """Within-band AUC of each model in each distance band, mean +- sd over training seeds.
 
     Args:
-        band_auc: Per-user within-band AUC from ``_within_band_auc``.
+        band_auc: Per-user within-band AUC from ``within_band_auc``.
 
     Returns:
         Frame of ``band, name, n_seeds, mean, sd, n_users, n_pos, n_unvisited``, ordered by band then ``mean``
@@ -1012,48 +1055,6 @@ def _within_band_auc_table(band_auc: pl.DataFrame) -> pl.DataFrame:
         .sort("band_lo", "mean", descending=[False, True])
         .select("band", "name", "n_seeds", "mean", "sd", "n_users", "n_pos", "n_unvisited")
     )
-
-
-def _paired_within_band_auc(
-    band_auc: pl.DataFrame,
-    reference_model: str,
-    n_bootstrap: int = 10_000,
-    seed: int = 0,
-) -> pl.DataFrame:
-    """``paired_comparison`` run on each distance band's within-band AUC.
-
-    Args:
-        band_auc: Per-user within-band AUC from ``_within_band_auc``.
-        reference_model: Model every other model is compared against.
-        n_bootstrap: Bootstrap resamples behind the confidence interval.
-        seed: Seed of the bootstrap.
-
-    Returns:
-        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
-        ``mean_diff`` (descending).
-    """
-    return _paired_by_distance_band(band_auc, reference_model, "auc", n_bootstrap, seed)
-
-
-def _paired_distance_band_recall(
-    band_recall: pl.DataFrame,
-    reference_model: str,
-    n_bootstrap: int = 10_000,
-    seed: int = 0,
-) -> pl.DataFrame:
-    """``paired_comparison`` run on each distance band's ``band_recall``.
-
-    Args:
-        band_recall: Per-user band recall from ``distance_band_recall``.
-        reference_model: Model every other model is compared against.
-        n_bootstrap: Bootstrap resamples behind the confidence interval.
-        seed: Seed of the bootstrap.
-
-    Returns:
-        Frame of ``band, name, n_users, mean_diff, ci_lo, ci_hi, wilcoxon_p, per_seed_sd``, ordered by band then
-        ``mean_diff`` (descending).
-    """
-    return _paired_by_distance_band(band_recall, reference_model, "band_recall", n_bootstrap, seed)
 
 
 def _paired_by_distance_band(
@@ -1238,7 +1239,7 @@ def print_report(
     distance_bands: Sequence[float],
     run: int | None = None,
     analysis: AnalysisConfig | None = None,
-) -> None:
+) -> pl.DataFrame:
     """Print results analyses for a run of the whole comparison experiment.
 
     Covers aggregate results, paired comparison, hop bands and distance bands.
@@ -1250,6 +1251,9 @@ def print_report(
         distance_bands: Upper edges in km of the distance bands, for the band split and the within-band AUC.
         run: Run number ``n`` of the run directory ``{name}-{n}-{timestamp}``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None.
+
+    Returns:
+        The band means of every model, seed and distance band, from ``band_seed_means``.
     """
     runs_path = Path(runs_path)
     run = run if run is not None else latest_run(runs_path, name)
@@ -1305,7 +1309,7 @@ def print_report(
         print(distance_band_recall_table(by_distance))
 
         print(f"\n-- paired per-user {metric} by distance band of each positive, vs {reference} --")
-        print(_paired_distance_band_recall(by_distance, reference))
+        print(paired_distance_band_recall(by_distance, reference))
 
         print("\n-- home coverage of test users --")
         print(home_coverage_summary(per_user))
@@ -1313,16 +1317,19 @@ def print_report(
         print(f"\n-- paired per-user {metric}, vs {reference}, by home coverage --")
         print(paired_comparison_by_home_coverage(per_user, reference, metric))
 
+        band_auc = None
         if (run_path / SCORES_FILE).exists():
             scores = read_score_vectors(run_path)
             home_distances = read_home_distances(run_path)
-            band_auc = _within_band_auc(per_user, scores, home_distances, distance_bands)
+            band_auc = within_band_auc(per_user, scores, home_distances, distance_bands)
 
             print(f"\n-- AUC within each positive's distance band, edges {distance_bands} km, avg over seeds --")
             print(_within_band_auc_table(band_auc))
 
             print(f"\n-- paired AUC within each positive's distance band, vs {reference} --")
-            print(_paired_within_band_auc(band_auc, reference))
+            print(paired_within_band_auc(band_auc, reference))
 
             print("\n-- model health checks --")
             print(check_model_health(scores, per_user, POPULARITY_MODEL))
+
+    return band_seed_means(by_distance, band_auc)

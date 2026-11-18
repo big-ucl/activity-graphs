@@ -461,6 +461,12 @@ EXPECTED_VARIANTS = {
     "headline": ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"],
     "network_hops": ["MLP", "MLP-nonet", "MLP-nohpe"],
     "travel_times": ["MLP", "MLP-nott", "TwoTower-4", "TwoTower-4-nott"],
+    "rail_redundancy": [
+        "MLP-nonet-nott",
+        "GATv2-2-nonet-nott",
+        "GATv2-2-nonet-nott-norail",
+        "GATv2-2-nonet-nott-nocontig-norail",
+    ],
     "edge_ablation": [
         "MLP",
         "GATv2-2",

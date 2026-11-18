@@ -20,10 +20,7 @@ from activitygraphs.analysis import (
     _check_popularity_correlation,
     _check_user_invariance,
     _diff_sd_per_seed,
-    _paired_distance_band_recall,
-    _paired_within_band_auc,
     _with_ranking_metrics,
-    _within_band_auc,
     _within_band_auc_table,
     aggregate_metrics,
     band_decomposition,
@@ -37,6 +34,8 @@ from activitygraphs.analysis import (
     paired_comparison,
     paired_comparison_by_band,
     paired_comparison_by_k,
+    paired_distance_band_recall,
+    paired_within_band_auc,
     per_user_metric_summary,
     read_run,
     read_score_vectors,
@@ -44,6 +43,7 @@ from activitygraphs.analysis import (
     recall_at_ks,
     recall_curve,
     restrict_to_realised_size,
+    within_band_auc,
 )
 from activitygraphs.base import PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.models.networks import NodeMLP
@@ -654,7 +654,7 @@ def make_band_home_distances() -> pl.DataFrame:
 
 
 def band_auc_frame(bands: list[float] | None = None) -> pl.DataFrame:
-    return _within_band_auc(
+    return within_band_auc(
         make_band_per_user(), make_band_score_vectors(), make_band_home_distances(), bands or BAND_EDGES
     )
 
@@ -693,7 +693,7 @@ class TestWithinBandAUC:
         assert table["n_seeds"].to_list() == [2, 2]
 
     def test_paired_comparison_keeps_only_the_users_scored_in_the_band(self):
-        by_band = _paired_within_band_auc(band_auc_frame(), "Baseline", n_bootstrap=200)
+        by_band = paired_within_band_auc(band_auc_frame(), "Baseline", n_bootstrap=200)
 
         assert by_band["band"].to_list() == ["0-1", "1-5"]
         assert by_band["mean_diff"].to_list() == pytest.approx([0.5, 0.0])
@@ -736,7 +736,7 @@ class TestDistanceBandRecall:
         assert table["share_of_pos"].to_list() == pytest.approx([0.25, 0.5, 0.25])
 
     def test_paired_comparison_keeps_only_the_users_with_a_positive_in_the_band(self):
-        by_band = _paired_distance_band_recall(by_distance_frame(), "Baseline", n_bootstrap=200)
+        by_band = paired_distance_band_recall(by_distance_frame(), "Baseline", n_bootstrap=200)
 
         assert by_band["band"].to_list() == ["0-1", "1-5", "5+"]
         assert by_band["mean_diff"].to_list() == pytest.approx([0.4, 0.2, 0.0])

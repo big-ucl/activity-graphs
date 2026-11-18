@@ -1,0 +1,14 @@
+# @package _global_
+# The GAT over the contiguity and rail edges, over the contiguity edges alone and over no edge, and the MLP, all four
+# without the hops over the rail edges and the travel times from home, beside the baselines.
+experiment:
+  name: rail_redundancy
+  variants:
+    - { model: mlp, features: { use_network_hops: false, use_tt: false } }
+    - { model: gat, features: { use_network_hops: false, use_tt: false } }
+    - { model: gat, features: { use_network_hops: false, use_tt: false, use_rail_edges: false } }
+    - { model: gat, features: { use_network_hops: false, use_tt: false, use_contiguity_edges: false, use_rail_edges: false } }
+
+models:
+  gat:
+    num_gcn_layers: 2
