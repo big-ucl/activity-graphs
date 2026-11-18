@@ -25,6 +25,8 @@ from activitygraphs.training.metrics import (
 )
 
 CALIBRATION_BINS = 15
+LEARNING_RATE_KEY = "lr-AdamW"
+"""Key of the learning rate logged at the start of every training epoch."""
 
 
 @dataclass(frozen=True)
@@ -315,6 +317,12 @@ class RankingModule(L.LightningModule):
         self.per_user_columns = self.per_user_columns | self.test_per_user.positive_columns()
         self.per_user_score_vectors = self.test_per_user.score_vectors().cpu().tolist()
         self.test_per_user.reset()
+
+    def on_train_epoch_start(self) -> None:
+        """Log the learning rate of the epoch."""
+        optimizer = cast(torch.optim.Optimizer, self.optimizers(use_pl_optimizer=False))
+        learning_rate = optimizer.param_groups[0]["lr"]
+        self.log(LEARNING_RATE_KEY, learning_rate, on_step=False, on_epoch=True)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Return AdamW, with a plateau LR scheduler when scheduling is on and not overfitting."""

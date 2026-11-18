@@ -6,7 +6,7 @@ from typing import cast
 
 import lightning as L
 import polars as pl
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from omegaconf import OmegaConf
 
@@ -328,12 +328,12 @@ def _build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: st
         debug: Flag that adds the ``OverfitDebugCallback``.
 
     Returns:
-        The epoch learning-rate monitor, then the best and the last checkpoint when ``run_dir`` is set, early stopping
-        unless its patience is None or the run is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
+        The best and the last checkpoint when ``run_dir`` is set, early stopping unless its patience is None or the run
+        is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
         ``best.ckpt`` holds the epoch with the best monitored metric, and ``last.ckpt`` the latest epoch. The best
         checkpoint comes first, since ``ckpt_path="best"`` reads the first checkpoint callback.
     """
-    callbacks: list[L.Callback] = [LearningRateMonitor(logging_interval="epoch")]
+    callbacks: list[L.Callback] = []
 
     if run_dir is not None:
         checkpoint_dir = str(run_dir / CHECKPOINTS_DIR / run_name)
