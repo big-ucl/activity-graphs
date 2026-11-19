@@ -41,7 +41,13 @@ from activitygraphs.schema import EdgeKind
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = PROJECT_ROOT / "reports" / "logs" / "edge-figures"
 
-RUNS = {"tts2016": 21, "cmap": 28, "tpg": 11}
+RUNS = {
+    "tts2016 edge_ablation": ("tts2016", 21),
+    "tts2016 rail_redundancy": ("tts2016", 22),
+    "cmap edge_ablation": ("cmap", 28),
+    "tpg edge_ablation": ("tpg", 11),
+}
+"""The runs shown, each named by its dataset and experiment, as the dataset config name and the run number."""
 METRICS = ("within-band AUC", "recall by distance band", "recall by hop band")
 N_BOOTSTRAP = 1000
 DEFAULT_MIN_ZONE_COUNT = 20

@@ -44,15 +44,16 @@ def _():
 
 @app.cell
 def _():
-    dataset_dropdown = mo.ui.dropdown(list(ef.RUNS), value="tts2016", label="Dataset:")
-    dataset_dropdown
-    return (dataset_dropdown,)
+    run_dropdown = mo.ui.dropdown(list(ef.RUNS), value="tts2016 edge_ablation", label="Run:")
+    run_dropdown
+    return (run_dropdown,)
 
 
 @app.cell
-def _(dataset_dropdown):
-    with mo.status.spinner(title=f"Loading {dataset_dropdown.value} run {ef.RUNS[dataset_dropdown.value]}"):
-        reads = ef.load_run_reads(dataset_dropdown.value, ef.RUNS[dataset_dropdown.value])
+def _(run_dropdown):
+    _data, _run = ef.RUNS[run_dropdown.value]
+    with mo.status.spinner(title=f"Loading {_data} run {_run}"):
+        reads = ef.load_run_reads(_data, _run)
     trained_names = [name for name in reads.names if name.startswith(("MLP", "GATv2", "TwoTower", "GTransformer"))]
     norail_names = [name for name in reads.names if name.endswith("-norail") and "nocontig" not in name]
     return norail_names, reads, trained_names
@@ -97,7 +98,8 @@ def _():
 
 @app.cell
 def _(reads, trained_names):
-    _default_model = "GATv2-2" if "GATv2-2" in reads.names else trained_names[0]
+    _railed_names = [name for name in trained_names if f"{name}-norail" in reads.names]
+    _default_model = _railed_names[0] if _railed_names else trained_names[0]
     _default_reference = f"{_default_model}-norail" if f"{_default_model}-norail" in reads.names else "Gravity"
     model_dropdown = mo.ui.dropdown(reads.names, value=_default_model, label="Model:")
     map_reference_dropdown = mo.ui.dropdown(reads.names, value=_default_reference, label="Minus:")
