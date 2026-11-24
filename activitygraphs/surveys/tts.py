@@ -49,6 +49,24 @@ DA_ID_COLUMN = "DAUID"
 PROVINCE_COLUMN = "PRUID"
 ONTARIO_PROVINCE_ID = "35"
 
+TRACT_ID_COLUMN = "CTUID"
+TRACT_NAME_COLUMN = "CTNAME"
+TRACT_DGUID_COLUMN = "DGUID"
+CMA_ID_COLUMN = "CMAUID"
+CMA_NAME_COLUMN = "CMANAME"
+
+JOBS_2016_GEOGRAPHY_COLUMN = "Geography"
+JOBS_2016_TOTAL_COLUMN = "Total - Industry - North American Industry Classification System (NAICS) 2012"
+JOBS_2016_TRACT_PATTERN = r"^(\d{4}\.\d{2}) "
+JOBS_2016_CMA_PATTERN = r"^(.*?) \d{5} \("
+JOBS_2016_ENCODING = "cp1252"
+
+JOBS_2021_ARRIVAL_COLUMN = "Time arriving at work (16)"
+JOBS_2021_ARRIVAL_TOTAL = "Total - Time arriving at work"
+JOBS_2021_MODE_COLUMN = "Main mode of commuting (21)"
+JOBS_2021_MODE_TOTAL = "Total - Main mode of commuting"
+JOBS_2021_TOTAL_COLUMN = "Commuting duration (7):Total - Commuting duration[1]"
+
 MODE_MAP = invert_mapping({
     Mode.BUS: ["B", "S"],
     Mode.TRAIN: ["G", "J"],
@@ -288,52 +306,78 @@ def _build_tts_survey(inputs: TTSTables) -> TTSSurvey:
 
 @dataclass(frozen=True)
 class TTSStatistics:
-    """The census population and the polygon of each Ontario dissemination area."""
+    """The census population of each Ontario dissemination area and the census workers of each Ontario tract of work.
+
+    Attributes:
+        dissemination_areas: The ``population`` and the polygon of each dissemination area.
+        census_tracts: The ``jobs`` and the polygon of each census tract. ``jobs`` counts the workers with a usual
+            place of work in the tract.
+    """
 
     dissemination_areas: gpd.GeoDataFrame
+    census_tracts: gpd.GeoDataFrame
 
 
 def _read_tts_statistics(cfg: TTSDataConfig, project_root: Path | None = None) -> TTSStatistics:
-    """Read the population of the Ontario dissemination areas, from the census of the survey version of ``cfg``.
+    """Read the population of the Ontario dissemination areas and the workers of the Ontario census tracts of work.
 
     Raises:
-        ValueError: No dissemination area of the boundary file has a population row.
+        ValueError: No dissemination area of the boundary file has a population row, or no census tract of the
+            boundary file has a workers row.
     """
     project_root = get_project_root(project_root)
     census = VERSION_FORMATS[cfg.survey_version].census_population
+    boundaries_dir = project_root / cfg.inputs.boundaries.directory
+    statistics_dir = project_root / cfg.inputs.statistics.directory
 
-    boundaries_path = project_root / cfg.inputs.boundaries.directory / cfg.inputs.boundaries.dissemination_areas
-    areas = gpd.read_file(boundaries_path)
+    areas_path = boundaries_dir / cfg.inputs.boundaries.dissemination_areas
+    areas = gpd.read_file(areas_path)
     areas = areas[areas[PROVINCE_COLUMN] == ONTARIO_PROVINCE_ID][[DA_ID_COLUMN, "geometry"]]
 
-    population_path = project_root / cfg.inputs.statistics.directory / cfg.inputs.statistics.population
+    population_path = statistics_dir / cfg.inputs.statistics.population
     population = _read_census_population(population_path, census).to_pandas()
     areas = areas.merge(population, on=DA_ID_COLUMN, how="inner")
 
     if areas.empty:
-        raise ValueError(f"No dissemination area of `{boundaries_path.name}` has a row in `{population_path.name}`.")
+        raise ValueError(f"No dissemination area of `{areas_path.name}` has a row in `{population_path.name}`.")
 
-    return TTSStatistics(areas)
+    tracts_path = boundaries_dir / cfg.inputs.boundaries.census_tracts
+    tracts = gpd.read_file(tracts_path)
+    tracts = tracts[tracts[PROVINCE_COLUMN] == ONTARIO_PROVINCE_ID]
+
+    jobs_path = statistics_dir / cfg.inputs.statistics.jobs
+    read_jobs = JOBS_READERS[cfg.inputs.statistics.jobs_census_year]
+    jobs = read_jobs(jobs_path, tracts).to_pandas()
+    tracts = tracts[[TRACT_ID_COLUMN, "geometry"]].merge(jobs, on=TRACT_ID_COLUMN, how="inner")
+
+    if tracts.empty:
+        raise ValueError(f"No census tract of `{tracts_path.name}` has a row in `{jobs_path.name}`.")
+
+    return TTSStatistics(areas, tracts)
 
 
-def _add_tts_population_statistics(
+def _add_tts_population_job_statistics(
     locations_gdf: gpd.GeoDataFrame, statistics: TTSStatistics, normalise: bool = True
 ) -> gpd.GeoDataFrame:
-    """Add the census population of each TTS zone, splitting each dissemination area by its share of area in the zone.
+    """Add the census population and the census jobs of each TTS zone.
+
+    Each dissemination area and each census tract is split by its share of area in the zone.
 
     Args:
         locations_gdf: TTS zones, with a ``loc_id`` column, in a projected CRS.
-        statistics: Census population from ``_read_tts_statistics``.
-        normalise: If True, divide the population by the zone area to obtain a density.
+        statistics: Census population and jobs from ``_read_tts_statistics``.
+        normalise: If True, divide the population and the jobs by the zone area to obtain densities.
     """
     utm_crs = locations_gdf.estimate_utm_crs()
     population = overlap_counts(locations_gdf, statistics.dissemination_areas, "population")
+    jobs = overlap_counts(locations_gdf, statistics.census_tracts, "jobs")
 
     locations_gdf = locations_gdf.copy()
     locations_gdf["population"] = population.to_numpy()
+    locations_gdf["jobs"] = jobs.to_numpy()
     locations_gdf["area"] = locations_gdf.to_crs(utm_crs).geometry.area
 
-    return normalise_statistics(locations_gdf, normalise, columns=("population",))
+    return normalise_statistics(locations_gdf, normalise)
 
 
 def _read_census_population(path: Path, census: CensusPopulationFormat) -> pl.DataFrame:
@@ -347,6 +391,70 @@ def _read_census_population(path: Path, census: CensusPopulationFormat) -> pl.Da
         .select(pl.col(census.da_id_col).alias(DA_ID_COLUMN), population=population)
         .collect()
     )
+
+
+def _read_census_jobs_2016(path: Path, tracts: gpd.GeoDataFrame) -> pl.DataFrame:
+    """Return the workers of each census tract of work in the 2016 custom tabulation EO2768, 0 where suppressed.
+
+    Args:
+        path: The CSV export of the Beyond 20/20 table, with the geography on the rows. Each tract row names the
+            tract only, under the row of the CMA of the tract.
+        tracts: The 2016 census tracts, with their id, tract name, CMA id and CMA name.
+
+    Returns:
+        A data frame with the tract id and ``jobs`` of each tract of a CMA named in ``tracts``.
+    """
+    geography = pl.col(JOBS_2016_GEOGRAPHY_COLUMN)
+    tract_name = geography.str.extract(JOBS_2016_TRACT_PATTERN)
+    cma_name = pl.when(tract_name.is_null()).then(geography.str.extract(JOBS_2016_CMA_PATTERN)).forward_fill()
+    num_workers = pl.col(JOBS_2016_TOTAL_COLUMN).cast(pl.Float64, strict=False).fill_null(0.0)
+
+    csv_bytes = path.read_bytes().decode(JOBS_2016_ENCODING).encode()
+    tract_names = pl.from_pandas(tracts[[TRACT_ID_COLUMN, TRACT_NAME_COLUMN, CMA_NAME_COLUMN]])
+
+    return (
+        pl
+        .read_csv(csv_bytes, infer_schema=False)
+        .select(
+            pl.col(JOBS_2016_GEOGRAPHY_COLUMN),
+            cma_name.alias(CMA_NAME_COLUMN),
+            tract_name.alias(TRACT_NAME_COLUMN),
+            jobs=num_workers,
+        )
+        .filter(pl.col(TRACT_NAME_COLUMN).is_not_null())
+        .join(tract_names, on=[CMA_NAME_COLUMN, TRACT_NAME_COLUMN], how="inner")
+        .select(TRACT_ID_COLUMN, "jobs")
+    )
+
+
+def _read_census_jobs_2021(path: Path, tracts: gpd.GeoDataFrame) -> pl.DataFrame:
+    """Return the workers of each census tract of work in table 98-10-0504-01 of the 2021 census, 0 where suppressed.
+
+    Args:
+        path: The CSV of the full table.
+        tracts: The 2021 census tracts, with their id and DGUID.
+
+    Returns:
+        A data frame with the tract id and ``jobs`` of each tract in ``tracts``.
+    """
+    num_workers = pl.col(JOBS_2021_TOTAL_COLUMN).cast(pl.Float64, strict=False).fill_null(0.0)
+    tract_dguids = pl.from_pandas(tracts[[TRACT_ID_COLUMN, TRACT_DGUID_COLUMN]])
+
+    return (
+        pl
+        .scan_csv(path, infer_schema=False)
+        .filter(
+            pl.col(JOBS_2021_ARRIVAL_COLUMN) == JOBS_2021_ARRIVAL_TOTAL,
+            pl.col(JOBS_2021_MODE_COLUMN) == JOBS_2021_MODE_TOTAL,
+        )
+        .select(TRACT_DGUID_COLUMN, jobs=num_workers)
+        .collect()
+        .join(tract_dguids, on=TRACT_DGUID_COLUMN, how="inner")
+        .select(TRACT_ID_COLUMN, "jobs")
+    )
+
+
+JOBS_READERS = {2016: _read_census_jobs_2016, 2021: _read_census_jobs_2021}
 
 
 # =========================================
@@ -385,7 +493,7 @@ def _build_tts_island_edges(nodes_gdf: gpd.GeoDataFrame, edges_gdf: gpd.GeoDataF
 LOADER = SurveyLoader(
     load=TTSSurvey.load,
     read_statistics=_read_tts_statistics,
-    add_statistics=_add_tts_population_statistics,
+    add_statistics=_add_tts_population_job_statistics,
     build_extra_edges=_build_tts_island_edges,
 )
 

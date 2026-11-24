@@ -19,7 +19,14 @@ from activitygraphs.graph.travel_times import TRAVEL_TIME_SCHEMA
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema, infer_schema
 from activitygraphs.surveys.base import SurveyData
 from activitygraphs.surveys.registry import load_survey
-from activitygraphs.tensors.bundles import EdgeTensors, LocationTensors, SurveyTensors, UserTensors, check_tensors
+from activitygraphs.tensors.bundles import (
+    OPPORTUNITY_COLUMNS,
+    EdgeTensors,
+    LocationTensors,
+    SurveyTensors,
+    UserTensors,
+    check_tensors,
+)
 from activitygraphs.tensors.cache import read_tensors, save_tensors, tensors_path
 from activitygraphs.utils import get_project_root
 
@@ -41,6 +48,8 @@ CONTIGUITY_EDGE_SCHEMA = TensorSchema("contiguity_edges", (ColumnSpec("weight", 
 DISTANCE_SCHEMA = TensorSchema("distances", (ColumnSpec("home_distance", ColumnKind.COUNT),))
 TARGET_SCHEMA = TensorSchema("targets", (ColumnSpec("is_visited", ColumnKind.BINARY),))
 EDGE_SCHEMAS = {EdgeKind.CONTIGUITY: CONTIGUITY_EDGE_SCHEMA, EdgeKind.RAIL: RAIL_EDGE_SCHEMA}
+
+AREA_COLUMN = "area"
 
 
 # =========================================
@@ -104,6 +113,20 @@ def _build_access(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
     """Return the ``ACCESS_SCHEMA`` columns of the nodes, in node order, ``[n_nodes, n_access_features]``."""
     access_values = nodes_gdf[ACCESS_SCHEMA.names].to_numpy(dtype=np.float32)
     return torch.from_numpy(access_values)
+
+
+def _build_opportunities(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
+    """Return the number of jobs and of residents of each node, following ``OPPORTUNITY_COLUMNS``.
+
+    Each number is the density of the node times the area of the node.
+
+    Returns:
+        Float32 tensor of shape ``[n_nodes, n_opportunity_columns]``.
+    """
+    densities = nodes_gdf[list(OPPORTUNITY_COLUMNS)].to_numpy(dtype=np.float32)
+    areas = nodes_gdf[[AREA_COLUMN]].to_numpy(dtype=np.float32)
+
+    return torch.from_numpy(densities * areas)
 
 
 def _build_node_distances(nodes_gdf: gpd.GeoDataFrame) -> torch.Tensor:
@@ -282,6 +305,7 @@ def build_tensors(survey: SurveyData, graph: GraphTables, excluded_location_feat
     locations = LocationTensors(
         x=_build_location_features(nodes_gdf, node_feature_cols),
         access=_build_access(nodes_gdf),
+        opportunities=_build_opportunities(nodes_gdf),
         edges=edges,
         distance_m=_build_node_distances(nodes_gdf),
         travel_times_min=_build_travel_times(graph.travel_times, node_ids),

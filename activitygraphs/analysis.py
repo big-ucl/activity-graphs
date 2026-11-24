@@ -20,9 +20,16 @@ import polars as pl
 import torch
 from scipy.stats import rankdata, wilcoxon
 
-from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.base import FITTED_PARAM_STAGE, HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
-from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, run_dir
+from activitygraphs.runs import (
+    DISTANCES_FILE,
+    FITTED_PARAMS_FILE,
+    PER_USER_FILE,
+    RESULTS_FILE,
+    SCORES_FILE,
+    run_dir,
+)
 from activitygraphs.training.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_band_auc
 from activitygraphs.wandb_tables import band_seed_means
@@ -114,6 +121,35 @@ def read_home_distances(run_path: str | Path) -> pl.DataFrame:
     distances = pl.read_parquet(Path(run_path) / DISTANCES_FILE)
 
     return distances.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
+
+
+def read_fitted_params(run_path: str | Path) -> pl.DataFrame:
+    """Read the fitted parameters of the baselines of a run: ``name, parameter, value``, one row per parameter.
+
+    Raises:
+        FileNotFoundError: The run fitted no baseline with parameters to report.
+    """
+    params_path = Path(run_path) / FITTED_PARAMS_FILE
+
+    if not params_path.exists():
+        raise FileNotFoundError(f"{params_path} not found; the run fitted no baseline with parameters to report")
+
+    return (
+        pl.read_parquet(params_path).filter(pl.col("stage") == FITTED_PARAM_STAGE).select("name", "parameter", "value")
+    )
+
+
+def fitted_params_table(fitted_params: pl.DataFrame) -> pl.DataFrame:
+    """Return a table of the fitted parameters, one row per baseline and one column per parameter.
+
+    Args:
+        fitted_params: The fitted parameters from ``read_fitted_params``.
+
+    Returns:
+        A table with the baseline ``name`` and one column per parameter, in the order of first appearance. A
+        parameter that a baseline does not have is null.
+    """
+    return fitted_params.pivot(on="parameter", index="name", values="value", sort_columns=False)
 
 
 def read_report_run(run_path: str | Path, max_recall_k: int) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -1315,6 +1351,10 @@ def print_report(
 
         print("\n-- home coverage of test users --")
         print(home_coverage_summary(per_user))
+
+        if (run_path / FITTED_PARAMS_FILE).exists():
+            print("\n-- fitted parameters of the baselines --")
+            print(fitted_params_table(read_fitted_params(run_path)))
 
         print(f"\n-- paired per-user {metric}, vs {reference}, by home coverage --")
         print(paired_comparison_by_home_coverage(per_user, reference, metric))

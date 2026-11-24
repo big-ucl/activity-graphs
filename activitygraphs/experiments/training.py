@@ -12,7 +12,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 from omegaconf import OmegaConf
 
-from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.base import FITTED_PARAM_STAGE, HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, ModelConfig
 from activitygraphs.datasets import SurveyDataModule
 from activitygraphs.models.scorers import FittedScorer, Scorer
@@ -119,6 +119,9 @@ def evaluate_baseline(
 ) -> pl.DataFrame:
     """Evaluate a fitted baseline and return its result frame, in the layout of ``evaluate_model``.
 
+    The frame also holds one ``stage="fitted_params"`` row per fitted parameter of the baseline, with its
+    ``parameter`` name and ``value``. The parameters are also logged to W&B under ``fitted/``.
+
     Args:
         baseline: Fitted baseline module to evaluate.
         datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
@@ -128,9 +131,16 @@ def evaluate_baseline(
         wandb_params: parameters to configure WandB logging.
     """
     hyperparams = {"model": name, "run_tag": None, "model_type": "baseline"}
+    fitted_params = baseline.fitted_params()
 
     with model_logger(name, hyperparams, wandb_params, log_dir=None) as logger:
         results = evaluate_model(baseline, name, datamodule, loss, cfg, logger, fit_rows=None)
+        if logger is not None and fitted_params:
+            logged_params = {f"fitted/{param}": value for param, value in fitted_params.items()}
+            logger.log_metrics(logged_params)
+
+    param_rows = _fitted_param_frame(fitted_params, name)
+    results = pl.concat([results, param_rows], how="diagonal")
 
     return results.with_columns(is_baseline=pl.lit(True))
 
@@ -264,6 +274,25 @@ def evaluate_model(
     other_cols = [c for c in results.columns if c not in first_cols]
 
     return results.select(first_cols + other_cols)
+
+
+def _fitted_param_frame(fitted_params: dict[str, float], name: str) -> pl.DataFrame:
+    """Return the fitted parameters of the model ``name`` as ``stage="fitted_params"`` rows, one row per parameter.
+
+    Args:
+        fitted_params: The fitted parameters of the model, keyed by name.
+        name: Name of the model in the returned frame.
+    """
+    params = pl.DataFrame(
+        {"parameter": list(fitted_params), "value": list(fitted_params.values())},
+        schema={"parameter": pl.String, "value": pl.Float64},
+    )
+
+    return params.with_columns(
+        name=pl.lit(name),
+        stage=pl.lit(FITTED_PARAM_STAGE),
+        epoch=pl.lit(None, dtype=pl.Int64),
+    )
 
 
 def _score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:

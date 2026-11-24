@@ -14,7 +14,7 @@ from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, r
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema
 from activitygraphs.tensors import EdgeTensors, Fingerprint, LocationTensors, UserTensors, tensors_path
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
-from activitygraphs.tensors.bundles import UserFile
+from activitygraphs.tensors.bundles import OPPORTUNITY_COLUMNS, UserFile
 from activitygraphs.tensors.cache import FINGERPRINT_FILE, USERS_DIR, _tensor_cache_files, _tensors_fingerprint
 
 
@@ -68,6 +68,7 @@ def make_dataset(
     locations = LocationTensors(
         x=torch.zeros((n_nodes, 0)),
         access=torch.zeros((n_nodes, 0)),
+        opportunities=torch.zeros((n_nodes, len(OPPORTUNITY_COLUMNS))),
         edges={kind: EdgeTensors(torch.zeros((2, 0), dtype=torch.long), torch.zeros((0, 0))) for kind in EdgeKind},
         distance_m=torch.zeros((n_nodes, n_nodes)),
         travel_times_min=torch.zeros((n_nodes, n_nodes, 0)),

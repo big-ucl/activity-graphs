@@ -106,6 +106,7 @@ project-includes = ["activitygraphs"]
 python-version = "3.12"
 
 [tool.pytest.ini_options]
+testpaths = ["test"]
 markers = [
     "integration: tests that need processed data on disk; skipped automatically when absent",
 ]

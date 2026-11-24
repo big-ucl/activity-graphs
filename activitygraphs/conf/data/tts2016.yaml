@@ -11,6 +11,8 @@ inputs:
   statistics:
     directory: ${...paths.external}/statistics/${...name}
     population: 98-401-X2016044_ONTARIO_eng_CSV/98-401-X2016044_ONTARIO_English_CSV_data.csv
+    jobs: EO2768_Table1.csv
+    jobs_census_year: 2016
 
   overture:
     directory: ${...paths.external}/overture/TTS
@@ -22,6 +24,7 @@ inputs:
 
     zones: tts2022_2006zn_v2_shapefile.zip
     dissemination_areas: lda_000b16a_e.zip
+    census_tracts: lct_000b16a_e.zip
 
   osm_extract: tts2016-170101-clipped.osm.pbf
   osm_clip_polygon: hulls/tts2016-hull-10km.geojson

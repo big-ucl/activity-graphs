@@ -68,11 +68,12 @@ class CMAPBoundaryPaths:
 
 @dataclass
 class TTSBoundaryPaths:
-    """Boundary files of the TTS traffic zones and of the census dissemination areas."""
+    """Boundary files of the TTS traffic zones, of the census dissemination areas and of the census tracts."""
 
     directory: str
     zones: str
     dissemination_areas: str
+    census_tracts: str
 
 
 @dataclass
@@ -107,9 +108,17 @@ class CMAPStatsPaths(StatsPaths):
 
 @dataclass
 class TTSStatsPaths(StatsPaths):
-    """Census statistics file config for one TTS survey version (the population of each dissemination area)."""
+    """Census statistics file config for one TTS survey version.
+
+    Attributes:
+        population: The census profile CSV with the population of each dissemination area.
+        jobs: The census CSV with the workers of each census tract of work.
+        jobs_census_year: The census year of ``jobs``, 2016 or 2021. The year picks the reader of the file.
+    """
 
     population: str
+    jobs: str
+    jobs_census_year: int
 
 
 # ===================================================
@@ -385,7 +394,7 @@ class VariantConfig:
 
 
 VALID_SCALING_SOURCES = ("source", "target")
-"""Valid sources for the scaling of the features transforms given to a restored variant, 
+"""Valid sources for the scaling of the features transforms given to a restored variant,
 the ``scalings`` of ``TransferConfig``."""
 
 
@@ -398,7 +407,7 @@ class TransferConfig:
     Attributes:
         source_run: Id of the recorded run, ``{dataset}-{experiment}-{YYYYmmdd-HHMMSS}``. Variants are not restored if ``None``.
         variants: Names of the variants to be restored, as reported by the recorded run.
-        scalings: The feature transforms applied to the inputs of each restored variant, each one of ``SCALINGS``.
+        scalings: The feature transforms applied to the inputs of each restored variant, each one of ``VALID_SCALING_SOURCES``.
             ``source`` reads the transforms fitted on the training split of the recorded run's dataset. ``target``
             reads the transforms of the dataset of this run. A recorded run of this run's dataset takes ``source``
             alone.
@@ -406,7 +415,9 @@ class TransferConfig:
         fine_tune: Train each restored variant on the training split of this run, then test it.
         fine_tune_lr_scale: Factor applied to the learning rate of a fine-tuned restored variant.
         fit_baselines_on_source: Also fit the baselines on the dataset of the recorded run. Each one is then tested on
-            this run's test users under its own name suffixed with ``-from{dataset}``.
+            this run's test users under its own name suffixed with ``-from{dataset}``. On a dataset with other nodes,
+            only the baselines that hold no value per node are fitted: ``Uniform``, ``GlobalMarginal``,
+            ``DistanceDecay`` and ``GravityJobsPop``.
         test_on_all_users: Test on every user of this run's dataset, the training and validation users included. The
             experiment then does not train variants, and every restored variant comes from another dataset and is only
             tested. The baselines fitted on this run's dataset are restricted to only ones that do not read visits,

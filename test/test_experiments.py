@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
 from torch.utils.data import DataLoader
 
-from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.base import FITTED_PARAM_STAGE, HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, HomePEConfig, TransferConfig, read_config
 from activitygraphs.datasets import HouseholdSplit, Locations, Users
 from activitygraphs.datasets.datamodule import _compute_home_coverage
@@ -51,6 +51,7 @@ from activitygraphs.experiments.setup import ExperimentSetup, _check_tested_acro
 from activitygraphs.experiments.training import (
     WandBParams,
     _build_callbacks,
+    _fitted_param_frame,
     _trainer_arguments,
     evaluate_model,
     train_model,
@@ -76,7 +77,15 @@ from activitygraphs.models.features import (
 )
 from activitygraphs.models.scorers import GraphScorer, NodeScorer
 from activitygraphs.models.two_tower import TwoTowerScorer
-from activitygraphs.runs import CHECKPOINTS_DIR, CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
+from activitygraphs.runs import (
+    CHECKPOINTS_DIR,
+    CONFIG_FILE,
+    DISTANCES_FILE,
+    FITTED_PARAMS_FILE,
+    PER_USER_FILE,
+    RESULTS_FILE,
+    SCORES_FILE,
+)
 from activitygraphs.schema import DatasetSchema, EdgeKind
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
 from activitygraphs.training.losses import _build_bce_loss, build_loss
@@ -870,6 +879,26 @@ class TestSaveResults:
         assert scores["stage"].unique().to_list() == [SCORE_VECTOR_STAGE]
         assert scores["scores"].to_list() == [[0.1, 0.9, 0.4], [0.7, 0.2, 0.5]]
         assert {"name", "seed", "user_idx"}.issubset(scores.columns)
+
+    def test_fitted_parameters_go_to_their_own_file(self, tmp_path):
+        params = _fitted_param_frame({"alpha": -3.0, "mass_jobs": 0.4}, "GravityJobsPop")
+        combined = pl.concat([make_model_frame("GravityJobsPop", seed=None), params], how="diagonal")
+        save_results(tmp_path, combined)
+
+        assert self._written(tmp_path) == [FITTED_PARAMS_FILE, PER_USER_FILE, RESULTS_FILE]
+
+        saved = pl.read_parquet(tmp_path / FITTED_PARAMS_FILE)
+        assert saved["stage"].unique().to_list() == [FITTED_PARAM_STAGE]
+        assert saved["parameter"].to_list() == ["alpha", "mass_jobs"]
+        assert saved["value"].to_list() == [-3.0, 0.4]
+        assert "parameter" not in pl.read_parquet(tmp_path / RESULTS_FILE).columns
+
+    def test_no_fitted_parameters_file_when_no_baseline_reports_any(self, tmp_path):
+        params = _fitted_param_frame({}, "Uniform")
+        combined = pl.concat([make_model_frame("Uniform", seed=None), params], how="diagonal")
+        save_results(tmp_path, combined)
+
+        assert self._written(tmp_path) == [PER_USER_FILE, RESULTS_FILE]
 
     def test_score_rows_are_absent_from_the_other_two_files(self, tmp_path):
         combined = pl.concat([make_model_frame("MLP"), make_score_frame("MLP")], how="diagonal")

@@ -95,3 +95,7 @@ class FittedScorer(Scorer):
             locations: The location graph.
         """
         return self
+
+    def fitted_params(self) -> dict[str, float]:
+        """Return the fitted parameters of the scorer, keyed by name. A scorer with none to report returns ``{}``."""
+        return {}

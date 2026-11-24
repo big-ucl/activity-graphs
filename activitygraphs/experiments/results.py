@@ -7,11 +7,12 @@ import polars as pl
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
-from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
+from activitygraphs.base import FITTED_PARAM_STAGE, HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import Config, ModelConfig
 from activitygraphs.runs import (
     CONFIG_FILE,
     DISTANCES_FILE,
+    FITTED_PARAMS_FILE,
     HYDRA_LINK,
     PER_USER_FILE,
     RESULTS_FILE,
@@ -66,7 +67,8 @@ def save_results(run_dir: Path, *results: pl.DataFrame):
 
     The aggregate rows (``stage`` of ``fit``/``test``) go to ``results.parquet``, the
     per-user summary rows to ``per-user.parquet``, the full per-user score vectors to
-    ``scores.parquet`` and the per-user distances from home to ``distances.parquet``.
+    ``scores.parquet``, the per-user distances from home to ``distances.parquet`` and the fitted parameters of the
+    baselines to ``fitted-params.parquet``.
     They are split because they are
     different sizes, so only they only need to be loaded when required for analysis.
     """
@@ -74,7 +76,9 @@ def save_results(run_dir: Path, *results: pl.DataFrame):
     per_user = combined.filter(pl.col("stage") == PER_USER_STAGE)
     score_vectors = combined.filter(pl.col("stage") == SCORE_VECTOR_STAGE)
     home_distances = combined.filter(pl.col("stage") == HOME_DISTANCE_STAGE)
-    aggregate = combined.filter(~pl.col("stage").is_in([PER_USER_STAGE, SCORE_VECTOR_STAGE, HOME_DISTANCE_STAGE]))
+    fitted_params = combined.filter(pl.col("stage") == FITTED_PARAM_STAGE)
+    split_stages = [PER_USER_STAGE, SCORE_VECTOR_STAGE, HOME_DISTANCE_STAGE, FITTED_PARAM_STAGE]
+    aggregate = combined.filter(~pl.col("stage").is_in(split_stages))
 
     _drop_empty_columns(aggregate).write_parquet(run_dir / RESULTS_FILE)
 
@@ -86,6 +90,9 @@ def save_results(run_dir: Path, *results: pl.DataFrame):
 
     if not home_distances.is_empty():
         _drop_empty_columns(home_distances).write_parquet(run_dir / DISTANCES_FILE)
+
+    if not fitted_params.is_empty():
+        _drop_empty_columns(fitted_params).write_parquet(run_dir / FITTED_PARAMS_FILE)
 
 
 def _drop_empty_columns(df: pl.DataFrame) -> pl.DataFrame:

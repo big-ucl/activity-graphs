@@ -25,6 +25,8 @@ class Locations:
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
         access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
+        opportunities: The number of jobs and of residents of each node, following ``OPPORTUNITY_COLUMNS``, never
+            scaled, ``[num_nodes, num_opportunity_columns]``.
         edges: Edges between the nodes with their scaled features, for every ``EdgeKind``.
         random_walk_pe: Random-walk positional encoding of each node, ``[num_nodes, num_rwpe_features]``.
         hop_distance: Graph-hop distance between every pair of nodes over the contiguity edges, ``inf`` for unreachable pairs,
@@ -44,6 +46,7 @@ class Locations:
 
     x: torch.Tensor
     access: torch.Tensor
+    opportunities: torch.Tensor
     edges: dict[EdgeKind, EdgeTensors]
     random_walk_pe: torch.Tensor
     hop_distance: torch.Tensor
@@ -87,6 +90,7 @@ class Locations:
         return cls(
             x=x,
             access=access,
+            opportunities=tensors.opportunities,
             edges=edges,
             random_walk_pe=random_walk_pe,
             hop_distance=hop_distance,

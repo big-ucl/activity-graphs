@@ -15,6 +15,7 @@ from activitygraphs.models.baselines import (
     GravityBaseline,
     GravityBinnedBaseline,
     LogsumGravityBaseline,
+    OpportunityGravityBaseline,
     TravelTimeGravityBaseline,
     UniformBaseline,
     VisitFrequencyBaseline,
@@ -32,11 +33,14 @@ class BaselineSpec:
         name: The reported name.
         baseline: The baseline, unfitted.
         reads_visits: Whether fitting the baseline reads the visits of the training users.
+        fits_per_node: Whether the fitted baseline holds a value per node. Such a baseline only scores the nodes it
+            was fitted on.
     """
 
     name: str
     baseline: FittedScorer
     reads_visits: bool = True
+    fits_per_node: bool = True
 
 
 def measure_baselines(
@@ -57,24 +61,21 @@ def measure_baselines(
         loss: ``Loss`` instance, used for training and validation.
         cfg: The config used by the experiment.
         wandb_params: parameters to configure WandB logging.
-        fit_datamodule: The datamodule of the users the baselines are `fitted` on, such as another survey over the same
-            nodes. Fits on ``datamodule`` if ``None``.
+        fit_datamodule: The datamodule of the users the baselines are `fitted` on, such as another survey. Fits on
+            ``datamodule`` if ``None``. When the nodes differ from those of ``datamodule``, or come in another order,
+            only the baselines that do not hold a value per node are fitted and evaluated (non-transferable).
         name_suffix: Suffix appended to the name of every baseline.
         visit_free_only: Fit and evaluate only the baselines that do not read visits.
 
     Returns:
         One result frame per baseline, in order.
-
-    Raises:
-        ValueError: If ``fit_datamodule`` has other nodes than ``datamodule``, in another order.
     """
     datamodule.setup()
     fit_datamodule = datamodule if fit_datamodule is None else fit_datamodule
     fit_datamodule.setup()
 
     locations = fit_datamodule.locations
-    if not locations.node_ids.equals(datamodule.locations.node_ids):
-        raise ValueError("Baselines must be fit on the same nodes they are scored on.")
+    is_same_nodes = locations.node_ids.equals(datamodule.locations.node_ids)
 
     train_users = fit_datamodule.train_dataset.users
     val_users = fit_datamodule.val_dataset.users
@@ -83,6 +84,8 @@ def measure_baselines(
 
     for spec in _closed_form_baselines(locations.num_nodes, travel_times):
         if visit_free_only and spec.reads_visits:
+            continue
+        if not is_same_nodes and spec.fits_per_node:
             continue
 
         name = f"{spec.name}{name_suffix}"
@@ -112,12 +115,13 @@ def _closed_form_baselines(num_nodes: int, travel_time_schema: TensorSchema) -> 
     gravity = GravityBaseline()
 
     return [
-        BaselineSpec("Uniform", UniformBaseline(), reads_visits=False),
-        BaselineSpec("GlobalMarginal", GlobalBaseline()),
+        BaselineSpec("Uniform", UniformBaseline(), reads_visits=False, fits_per_node=False),
+        BaselineSpec("GlobalMarginal", GlobalBaseline(), fits_per_node=False),
         BaselineSpec("VisitFrequency", VisitFrequencyBaseline(num_nodes)),
         BaselineSpec("ConditionalVisitFrequency", ConditionalVisitFrequencyBaseline(num_nodes)),
-        BaselineSpec("DistanceDecay", DistanceDecayBaseline(), reads_visits=False),
+        BaselineSpec("DistanceDecay", DistanceDecayBaseline(), reads_visits=False, fits_per_node=False),
         BaselineSpec("Gravity", gravity),
+        BaselineSpec("GravityJobsPop", OpportunityGravityBaseline(), fits_per_node=False),
         BaselineSpec("GravityTT", TravelTimeGravityBaseline(travel_time_schema)),
         BaselineSpec("GravityLogsum", LogsumGravityBaseline(travel_time_schema, with_distance=False)),
         BaselineSpec("GravityLogsumDist", LogsumGravityBaseline(travel_time_schema, with_distance=True)),

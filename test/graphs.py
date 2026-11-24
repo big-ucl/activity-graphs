@@ -8,6 +8,7 @@ from activitygraphs.datasets import Locations, UserBatch, UserDataset, Users
 from activitygraphs.datasets.locations import _compute_hop_distance
 from activitygraphs.schema import EdgeKind
 from activitygraphs.tensors import EdgeTensors
+from activitygraphs.tensors.bundles import OPPORTUNITY_COLUMNS
 
 
 def chain_edge_index(num_nodes: int) -> torch.Tensor:
@@ -26,13 +27,14 @@ def make_locations(
     access: torch.Tensor | None = None,
     rail_edge_index: torch.Tensor | None = None,
     travel_times_min: torch.Tensor | None = None,
+    opportunities: torch.Tensor | None = None,
 ) -> Locations:
     """Return the locations over ``x`` and ``contiguity_edge_index``, with the hop distances computed from the contiguity and rail edges.
 
     A missing ``contiguity_edge_attr``, ``random_walk_pe`` or ``access`` has no columns, and a missing ``distance_m`` puts every node at 0 m
     from every node. A missing ``rail_edge_index`` has no edges, and the rail edges have no columns. The scaled
     ``distance`` equals ``distance_m``. Missing ``travel_times_min`` have no columns. The scaled
-    ``travel_times`` equal ``travel_times_min``.
+    ``travel_times`` equal ``travel_times_min``. Missing ``opportunities`` are 0 for every node.
     """
     num_nodes = x.shape[0]
     if contiguity_edge_attr is None:
@@ -47,6 +49,8 @@ def make_locations(
         rail_edge_index = torch.zeros(2, 0, dtype=torch.long)
     if travel_times_min is None:
         travel_times_min = torch.zeros(num_nodes, num_nodes, 0)
+    if opportunities is None:
+        opportunities = torch.zeros(num_nodes, len(OPPORTUNITY_COLUMNS))
 
     rail_edge_attr = torch.zeros(rail_edge_index.shape[1], 0)
     edges = {
@@ -58,6 +62,7 @@ def make_locations(
     return Locations(
         x=x,
         access=access,
+        opportunities=opportunities,
         edges=edges,
         random_walk_pe=random_walk_pe,
         hop_distance=_compute_hop_distance(contiguity_edge_index, num_nodes),

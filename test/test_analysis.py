@@ -28,6 +28,7 @@ from activitygraphs.analysis import (
     check_overfit_health,
     distance_band_recall,
     distance_band_recall_table,
+    fitted_params_table,
     home_zone_summary,
     lift_over_reference,
     num_scored_dropped_users,
@@ -123,6 +124,21 @@ class TestLoadScoreVectors:
 
         with pytest.raises(FileNotFoundError):
             read_score_vectors(tmp_path)
+
+
+class TestFittedParams:
+    def test_the_table_has_one_row_per_baseline_and_one_column_per_parameter(self):
+        fitted_params = pl.DataFrame({
+            "name": ["Gravity", "Gravity", "GravityJobsPop", "GravityJobsPop", "GravityJobsPop"],
+            "parameter": ["alpha", "beta_log", "alpha", "beta_log", "mass_jobs"],
+            "value": [-4.0, 0.9, -6.0, 0.8, 0.4],
+        })
+
+        table = fitted_params_table(fitted_params)
+
+        assert table.columns == ["name", "alpha", "beta_log", "mass_jobs"]
+        assert table["name"].to_list() == ["Gravity", "GravityJobsPop"]
+        assert table["mass_jobs"].to_list() == [None, 0.4]
 
 
 class TestUserInvariance:

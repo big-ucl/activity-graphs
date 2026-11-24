@@ -13,6 +13,7 @@ from activitygraphs.models.baselines.gravity import (
     GravityBaseline,
     GravityBinnedBaseline,
     LogsumGravityBaseline,
+    OpportunityGravityBaseline,
     TravelTimeGravityBaseline,
 )
 
@@ -23,6 +24,7 @@ __all__ = [
     "ConditionalVisitFrequencyBaseline",
     "DistanceDecayBaseline",
     "GravityBaseline",
+    "OpportunityGravityBaseline",
     "GravityBinnedBaseline",
     "ConditionalGravityBaseline",
     "TravelTimeGravityBaseline",

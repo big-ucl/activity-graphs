@@ -10,12 +10,16 @@ import torch
 
 from activitygraphs.schema import DatasetSchema, EdgeKind
 
+OPPORTUNITY_COLUMNS = ("jobs", "population")
+"""Density columns of the graph nodes counted in the opportunities of each node, in tensor column order."""
+
 
 class LocationFile(StrEnum):
     """Names of the files of a ``LocationTensors`` bundle, in its cache directory."""
 
     X = "x.pt"
     ACCESS = "access.pt"
+    OPPORTUNITIES = "opportunities.pt"
     DISTANCE_M = "distance_m.pt"
     TRAVEL_TIMES_MIN = "travel_times_min.pt"
     NODE_IDS = "node_ids.parquet"
@@ -76,6 +80,8 @@ class LocationTensors:
     Attributes:
         x: Location features, ``[num_nodes, num_location_features]``.
         access: Accessibility features of the locations, ``[num_nodes, num_access_features]``.
+        opportunities: The number of jobs and of residents of each node, following ``OPPORTUNITY_COLUMNS``,
+            ``[num_nodes, num_opportunity_columns]``.
         edges: Edges between the nodes with their unscaled features, for every ``EdgeKind``.
         distance_m: Distance between the centroids of every pair of nodes in metres, ``[num_nodes, num_nodes]``.
             Row ``i`` holds the distances from node ``i`` to every node.
@@ -87,6 +93,7 @@ class LocationTensors:
 
     x: torch.Tensor
     access: torch.Tensor
+    opportunities: torch.Tensor
     edges: dict[EdgeKind, EdgeTensors]
     distance_m: torch.Tensor
     travel_times_min: torch.Tensor
@@ -109,6 +116,7 @@ class LocationTensors:
         tensor_files = {
             LocationFile.X: self.x,
             LocationFile.ACCESS: self.access,
+            LocationFile.OPPORTUNITIES: self.opportunities,
             LocationFile.DISTANCE_M: self.distance_m,
             LocationFile.TRAVEL_TIMES_MIN: self.travel_times_min,
         }
@@ -126,6 +134,7 @@ class LocationTensors:
         return cls(
             x=torch.load(directory / LocationFile.X, weights_only=True),
             access=torch.load(directory / LocationFile.ACCESS, weights_only=True),
+            opportunities=torch.load(directory / LocationFile.OPPORTUNITIES, weights_only=True),
             edges={kind: EdgeTensors.read(directory, kind) for kind in EdgeKind},
             distance_m=torch.load(directory / LocationFile.DISTANCE_M, weights_only=True),
             travel_times_min=torch.load(directory / LocationFile.TRAVEL_TIMES_MIN, weights_only=True),
@@ -218,6 +227,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
         {
             "x": locations.x.shape[0],
             "access": locations.access.shape[0],
+            "opportunities": locations.opportunities.shape[0],
             "visited": users.visited.shape[1],
             "distance_m (rows)": locations.distance_m.shape[0],
             "distance_m (columns)": locations.distance_m.shape[1],
@@ -259,6 +269,7 @@ def check_tensors(locations: LocationTensors, users: UserTensors, schema: Datase
     _require_finite({
         "x": locations.x,
         "access": locations.access,
+        "opportunities": locations.opportunities,
         **{f"{kind}_edge_attr": edges.attr for kind, edges in locations.edges.items()},
         "distance_m": locations.distance_m,
         "travel_times_min": locations.travel_times_min,

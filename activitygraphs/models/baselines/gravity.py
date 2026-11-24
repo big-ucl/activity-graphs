@@ -19,6 +19,7 @@ from activitygraphs.models.baselines.common import fit_smoothing_strength, non_h
 from activitygraphs.models.baselines.popularity import home_excluded_visit_rate, home_visit_counts
 from activitygraphs.models.scorers import FittedScorer
 from activitygraphs.schema import ColumnKind, TensorSchema
+from activitygraphs.tensors.bundles import OPPORTUNITY_COLUMNS
 
 # A user's own home is at distance 0; clamping keeps its log-distance finite.
 MIN_DISTANCE_M = 1.0
@@ -123,6 +124,10 @@ class GravityBaseline(FittedScorer):
 
         return self
 
+    def fitted_params(self) -> dict[str, float]:
+        """Return the intercept, the two decays and the distance scale ``d0_m`` in metres."""
+        return {"alpha": self.alpha, "beta_log": self.beta_log, "beta_lin": self.beta_lin, "d0_m": self.d0}
+
     def pair_logits(self, node_idx: torch.Tensor, distance: torch.Tensor) -> torch.Tensor:
         """Compute the gravity logit of each (node, distance in metres) pair, shaped like ``node_idx``."""
         relative_distance = (distance / self.d0).unsqueeze(-1)
@@ -135,6 +140,83 @@ class GravityBaseline(FittedScorer):
     def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
         """Return the gravity logit of every node for every user, ``[num_users, num_nodes]``."""
         return self.pair_logits(_expand_node_indices(batch), _extract_home_distances(batch))
+
+
+class OpportunityGravityBaseline(FittedScorer):
+    """Gravity model with the jobs and the residents of each node as mass, and one Tanner deterrence for everyone.
+
+    ``logit P(y = 1 | h, n) = alpha + sum_k a_k * log(1 + m_kn) - beta_log * log(d / d0) - beta_lin * d / d0``, with
+    ``m_kn`` the number of jobs, then of residents, of node ``n``, and ``d0`` the median distance of the visited
+    training pairs. ``alpha``, ``a_k``, ``beta_log`` and ``beta_lin`` are fitted by maximum likelihood on every
+    training (user, non-home node) pair. No parameter is tied to a node, so the fitted model also scores the nodes of
+    another survey.
+
+    Attributes:
+        d0: Distance scale in metres.
+        alpha: Fitted intercept.
+        beta_log: Fitted log-distance decay, ``[1]``.
+        beta_lin: Fitted linear-distance decay, ``[1]``.
+        mass_weights: Fitted weight ``a_k`` of the log number of jobs, then of residents, following
+            ``OPPORTUNITY_COLUMNS``, ``[num_opportunity_columns]``.
+    """
+
+    d0: float
+    alpha: float
+    beta_log: torch.Tensor
+    beta_lin: torch.Tensor
+    mass_weights: torch.Tensor
+
+    def __init__(self, max_iter: int = 200):
+        super().__init__()
+        self.max_iter = max_iter
+
+    def fit(self, train: Users, val: Users, locations: Locations) -> Self:
+        """Fit the intercept, the mass weights and the two decay parameters on the ``train`` users with LBFGS.
+
+        The distances are read from ``locations.distance_m`` and the jobs and residents from
+        ``locations.opportunities``.
+        """
+        counts = _HomeNodeCounts.from_users(train)
+        num_homes = len(counts.home_node_idx)
+
+        distance = _clamp_distances(locations.distance_m[counts.home_node_idx]).unsqueeze(-1)
+        self.d0 = float(_median_over_visits(distance, counts))
+
+        log_opportunities = locations.opportunities.float().log1p().expand(num_homes, -1, -1)
+        features = torch.cat([_tanner_features(distance / self.d0), log_opportunities], dim=-1)
+        offset = torch.zeros(locations.num_nodes)
+        params = _fit_count_logit(features, offset, counts, self.max_iter)
+        alpha, self.beta_log, self.beta_lin, self.mass_weights = _split_params(params, 1)
+        self.alpha = float(alpha)
+
+        return self
+
+    def fitted_params(self) -> dict[str, float]:
+        """Return the intercept, the two decays, the distance scale ``d0_m`` in metres and the mass weights.
+
+        Returns:
+            The parameters by name. The weight of each opportunity column is named ``mass_{column}``, following
+            ``OPPORTUNITY_COLUMNS``.
+        """
+        params = {
+            "alpha": self.alpha,
+            "beta_log": float(self.beta_log[0]),
+            "beta_lin": float(self.beta_lin[0]),
+            "d0_m": self.d0,
+        }
+        for column, weight in zip(OPPORTUNITY_COLUMNS, self.mass_weights.tolist(), strict=True):
+            params[f"mass_{column}"] = weight
+
+        return params
+
+    def forward(self, locations: Locations, batch: UserBatch) -> torch.Tensor:
+        """Return the opportunity-gravity logit of every node for every user, ``[num_users, num_nodes]``."""
+        device = batch.visited.device
+        relative_distance = (_extract_home_distances(batch) / self.d0).unsqueeze(-1)
+        log_opportunities = locations.opportunities.to(device).float().log1p()
+        mass = log_opportunities @ self.mass_weights.to(device)
+
+        return mass + _tanner_logit(relative_distance, self.alpha, self.beta_log, self.beta_lin)
 
 
 class TravelTimeGravityBaseline(FittedScorer):

@@ -17,6 +17,7 @@ from activitygraphs.models.baselines.gravity import (
     GravityBaseline,
     GravityBinnedBaseline,
     LogsumGravityBaseline,
+    OpportunityGravityBaseline,
     TravelTimeGravityBaseline,
     _weighted_median,
 )
@@ -113,6 +114,83 @@ class TestGravity:
             - gravity.beta_lin * relative
         )
         assert float(out[node]) == pytest.approx(expected, rel=1e-4)
+
+
+def simulate_opportunities(
+    n_users: int, n_nodes: int, mass_weights: tuple[float, float], beta_log: float, seed: int = 0
+) -> tuple[Users, torch.Tensor, torch.Tensor]:
+    """Draw labels from a gravity model with the jobs and residents of each node as mass.
+
+    Node ``n`` is ``offsets[(n - h) % n_nodes]`` metres from home ``h``, as in ``simulate``.
+
+    Returns:
+        ``(users, distance_m, opportunities)``, with ``opportunities`` the ``[n_nodes, 2]`` jobs and residents.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    offsets = 200.0 + 19_800.0 * torch.rand(n_nodes, generator=generator)
+    offsets[0] = 0.0
+    nodes = torch.arange(n_nodes)
+    distance_m = offsets[(nodes[None, :] - nodes[:, None]) % n_nodes]
+    opportunities = torch.exp(8.0 * torch.rand(n_nodes, 2, generator=generator))
+
+    homes = torch.randint(0, n_nodes, (n_users,), generator=generator)
+    mass = opportunities.log1p() @ torch.tensor(mass_weights)
+    distances = distance_m[homes].clamp(min=MIN_DISTANCE_M)
+    logits = -2.0 + mass - beta_log * distances.log()
+    labels = (torch.rand(n_users, n_nodes, generator=generator) < logits.sigmoid()).float()
+    labels[torch.arange(n_users), homes] = 1.0
+
+    return make_users(labels, homes), distance_m, opportunities
+
+
+def opportunity_locations(distance_m: torch.Tensor, opportunities: torch.Tensor) -> Locations:
+    """Return a graph with no edges whose nodes are ``distance_m`` metres apart and hold ``opportunities``."""
+    num_nodes = distance_m.shape[0]
+    x = torch.zeros(num_nodes, NUM_LOCATION_FEATURES)
+    edge_index = torch.zeros(2, 0, dtype=torch.long)
+
+    return make_locations(x, edge_index, distance_m=distance_m, opportunities=opportunities)
+
+
+class TestOpportunityGravity:
+    def test_the_fit_recovers_the_simulated_mass_weights(self):
+        mass_weights = (0.5, 0.2)
+        users, distance_m, opportunities = simulate_opportunities(
+            n_users=3000, n_nodes=300, mass_weights=mass_weights, beta_log=1.0
+        )
+        locations = opportunity_locations(distance_m, opportunities)
+
+        gravity = OpportunityGravityBaseline().fit(users, users, locations)
+
+        assert gravity.mass_weights.tolist() == pytest.approx(mass_weights, abs=0.05)
+        assert float(gravity.beta_log[0]) > 0.5
+
+    def test_reports_the_mass_weight_of_each_opportunity_column(self):
+        users, distance_m, opportunities = simulate_opportunities(
+            n_users=500, n_nodes=50, mass_weights=(0.5, 0.2), beta_log=1.0
+        )
+        gravity = OpportunityGravityBaseline().fit(users, users, opportunity_locations(distance_m, opportunities))
+
+        params = gravity.fitted_params()
+
+        assert list(params) == ["alpha", "beta_log", "beta_lin", "d0_m", "mass_jobs", "mass_population"]
+        assert [params["mass_jobs"], params["mass_population"]] == gravity.mass_weights.tolist()
+
+    def test_the_fitted_model_scores_the_nodes_of_another_graph(self):
+        users, distance_m, opportunities = simulate_opportunities(
+            n_users=2000, n_nodes=200, mass_weights=(0.5, 0.2), beta_log=1.0
+        )
+        gravity = OpportunityGravityBaseline().fit(users, users, opportunity_locations(distance_m, opportunities))
+
+        other_distance_m = torch.full((4, 4), 1000.0).fill_diagonal_(0.0)
+        other_opportunities = torch.tensor([[0.0, 0.0], [10.0, 10.0], [1000.0, 10.0], [100.0, 100.0]])
+        other_locations = opportunity_locations(other_distance_m, other_opportunities)
+        batch = join_users(other_locations, make_users(torch.zeros(1, 4), torch.tensor([0])))
+
+        scores = gravity(other_locations, batch).squeeze(0)
+
+        assert scores.shape == (4,)
+        assert scores[1:].argsort(descending=True).tolist() == [1, 2, 0]
 
 
 class TestGravityBinned:

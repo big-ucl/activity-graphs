@@ -2,6 +2,7 @@
 
 import city2graph as c2g
 import geopandas as gpd
+import pandas as pd
 import polars as pl
 import pytest
 from shapely.geometry import Polygon, box
@@ -13,19 +14,32 @@ from activitygraphs.surveys.statistics import overlap_counts
 from activitygraphs.surveys.tts import (
     CENSUS_2016_POPULATION,
     CENSUS_2021_POPULATION,
+    CMA_NAME_COLUMN,
     DA_ID_COLUMN,
+    JOBS_2016_GEOGRAPHY_COLUMN,
+    JOBS_2016_TOTAL_COLUMN,
+    JOBS_2021_ARRIVAL_COLUMN,
+    JOBS_2021_ARRIVAL_TOTAL,
+    JOBS_2021_MODE_COLUMN,
+    JOBS_2021_MODE_TOTAL,
+    JOBS_2021_TOTAL_COLUMN,
     PURPOSE_MAP_2016,
     PURPOSE_MAP_2022,
     REGION_COLUMN,
+    TRACT_DGUID_COLUMN,
+    TRACT_ID_COLUMN,
+    TRACT_NAME_COLUMN,
     ZONE_ID_COLUMN,
     TTSStatistics,
     TTSTables,
-    _add_tts_population_statistics,
+    _add_tts_population_job_statistics,
     _build_tts_island_edges,
     _build_tts_journeys,
     _build_tts_locations,
     _build_tts_survey,
     _build_tts_users,
+    _read_census_jobs_2016,
+    _read_census_jobs_2021,
     _read_census_population,
 )
 from activitygraphs.tensors.build import _build_group_ids, _build_home_nodes, _build_visit_labels
@@ -355,15 +369,16 @@ class TestPopulationStatistics:
         assert counts.index.tolist() == ["a", "b", "c"]
         assert counts.tolist() == pytest.approx([50.0, 90.0, 0.0])
 
-    def test_adds_the_population_density_of_each_zone(self):
+    def test_adds_the_population_and_job_densities_of_each_zone(self):
         x, y = TORONTO_UTM
         zones = utm_zones(["a"], [(x, y, x + 100, y + 100)])
         areas = gpd.GeoDataFrame({"population": [200.0], "geometry": [box(x, y, x + 100, y + 200)]}, crs=UTM_17N)
+        tracts = gpd.GeoDataFrame({"jobs": [400.0], "geometry": [box(x, y, x + 400, y + 100)]}, crs=UTM_17N)
 
-        located = _add_tts_population_statistics(zones, TTSStatistics(areas))
+        located = _add_tts_population_job_statistics(zones, TTSStatistics(areas, tracts))
 
         assert located["population"].tolist() == pytest.approx([100.0 / 10_000])
-        assert "jobs" not in located.columns
+        assert located["jobs"].tolist() == pytest.approx([100.0 / 10_000])
 
     @pytest.mark.parametrize("census", [CENSUS_2016_POPULATION, CENSUS_2021_POPULATION])
     def test_reads_the_population_rows_of_each_census_format(self, census, tmp_path):
@@ -379,6 +394,58 @@ class TestPopulationStatistics:
 
         assert population[DA_ID_COLUMN].to_list() == ["35200001", "35200002"]
         assert population["population"].to_list() == [512.0, 0.0]
+
+
+class TestJobStatistics:
+    def test_reads_the_2016_tracts_under_the_row_of_their_cma(self, tmp_path):
+        rows = [
+            {JOBS_2016_GEOGRAPHY_COLUMN: "Toronto 00000 (  2.8%)", JOBS_2016_TOTAL_COLUMN: "2566650"},
+            {JOBS_2016_GEOGRAPHY_COLUMN: "0001.00 00000 (  1.3%)", JOBS_2016_TOTAL_COLUMN: "390"},
+            {JOBS_2016_GEOGRAPHY_COLUMN: "Hamilton 00000 (  3.1%)", JOBS_2016_TOTAL_COLUMN: "273650"},
+            {JOBS_2016_GEOGRAPHY_COLUMN: "0001.00 00000 (  4.5%)", JOBS_2016_TOTAL_COLUMN: "x"},
+            {JOBS_2016_GEOGRAPHY_COLUMN: "Trois-Rivi\u00e8res 00000 (  2.0%)", JOBS_2016_TOTAL_COLUMN: "70000"},
+            {JOBS_2016_GEOGRAPHY_COLUMN: "0001.00 00000 (  2.0%)", JOBS_2016_TOTAL_COLUMN: "50"},
+        ]
+        path = tmp_path / "EO2768.csv"
+        path.write_bytes(pl.DataFrame(rows).write_csv().encode("cp1252"))
+        tracts = pd.DataFrame({
+            TRACT_ID_COLUMN: ["5350001.00", "5370001.00"],
+            TRACT_NAME_COLUMN: ["0001.00", "0001.00"],
+            CMA_NAME_COLUMN: ["Toronto", "Hamilton"],
+        })
+
+        jobs = _read_census_jobs_2016(path, tracts).sort(TRACT_ID_COLUMN)
+
+        assert jobs[TRACT_ID_COLUMN].to_list() == ["5350001.00", "5370001.00"]
+        assert jobs["jobs"].to_list() == [390.0, 0.0]
+
+    def test_reads_the_2021_tract_totals_over_every_arrival_time_and_mode(self, tmp_path):
+        rows = [
+            {
+                TRACT_DGUID_COLUMN: dguid,
+                JOBS_2021_ARRIVAL_COLUMN: arrival,
+                JOBS_2021_MODE_COLUMN: mode,
+                JOBS_2021_TOTAL_COLUMN: count,
+            }
+            for dguid, arrival, mode, count in [
+                ("2021S0503535", JOBS_2021_ARRIVAL_TOTAL, JOBS_2021_MODE_TOTAL, "1636020"),
+                ("2021S05075350001.00", JOBS_2021_ARRIVAL_TOTAL, JOBS_2021_MODE_TOTAL, "4460"),
+                ("2021S05075350001.00", JOBS_2021_ARRIVAL_TOTAL, "Bus", "500"),
+                ("2021S05075350001.00", "Between 8 a.m. and 8:29 a.m.", JOBS_2021_MODE_TOTAL, "900"),
+                ("2021S05075350002.00", JOBS_2021_ARRIVAL_TOTAL, JOBS_2021_MODE_TOTAL, ".."),
+            ]
+        ]
+        path = tmp_path / "98100504.csv"
+        pl.DataFrame(rows).write_csv(path)
+        tracts = pd.DataFrame({
+            TRACT_ID_COLUMN: ["5350001.00", "5350002.00"],
+            TRACT_DGUID_COLUMN: ["2021S05075350001.00", "2021S05075350002.00"],
+        })
+
+        jobs = _read_census_jobs_2021(path, tracts).sort(TRACT_ID_COLUMN)
+
+        assert jobs[TRACT_ID_COLUMN].to_list() == ["5350001.00", "5350002.00"]
+        assert jobs["jobs"].to_list() == [4460.0, 0.0]
 
 
 class TestIslandEdges:

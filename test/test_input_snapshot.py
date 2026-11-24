@@ -108,6 +108,10 @@ def build_graph(zones: gpd.GeoDataFrame) -> GraphTables:
     projected["rail_station_distance_m"] = rng.uniform(100.0, 5000.0, len(zones))
     projected["peak_departures_per_hour"] = rng.poisson(20.0, len(zones)).astype(float)
     projected["motorway_junction_distance_m"] = rng.uniform(100.0, 10000.0, len(zones))
+    opportunity_rng = np.random.default_rng(3)
+    projected["jobs"] = opportunity_rng.lognormal(-7.0, 1.5, len(zones))
+    projected["population"] = opportunity_rng.lognormal(-6.0, 1.0, len(zones))
+    projected["area"] = projected.geometry.area
     nodes_gdf, contiguity_edges_gdf = c2g.contiguity_graph(projected.set_index("loc_id"), set_point_nodes=True)
 
     nodes = nodes_gdf.to_crs(CRS)
@@ -427,8 +431,8 @@ def test_the_cache_carries_the_schema_of_every_tensor(survey_name, user_attribut
     locations, users, schema = build_survey(survey_name, tmp_path)
 
     assert schema.user_attributes == user_attributes
-    assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential"]
-    assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2]
+    assert schema.locations.names == ["pop_density", "poi_shop", "land_use_residential", "jobs", "population", "area"]
+    assert schema.locations.indices(ColumnKind.CONTINUOUS) == [0, 1, 2, 3, 4, 5]
     assert schema.locations.width == locations.x.shape[1]
     for kind, edges in locations.edges.items():
         assert schema.edges[kind].width == edges.attr.shape[1]
@@ -488,13 +492,13 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
 def test_an_excluded_location_feature_is_left_out_of_the_tensors():
     locations, _, schema = build_survey_tensors("cmap", excluded_location_features=("poi_shop",))
 
-    assert schema.locations.names == ["pop_density", "land_use_residential"]
-    assert locations.x.shape[1] == 2
+    assert schema.locations.names == ["pop_density", "land_use_residential", "jobs", "population", "area"]
+    assert locations.x.shape[1] == 5
 
 
 def test_excluding_a_column_the_graph_nodes_lack_raises():
-    with pytest.raises(KeyError, match="jobs"):
-        build_survey_tensors("cmap", excluded_location_features=("jobs",))
+    with pytest.raises(KeyError, match="poi_food"):
+        build_survey_tensors("cmap", excluded_location_features=("poi_food",))
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises():
