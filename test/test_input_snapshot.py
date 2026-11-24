@@ -211,8 +211,8 @@ def build_journeys(users: pl.DataFrame, loc_ids: list[str]) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=USER_JOURNEY_SCHEMA)
 
 
-def build_survey_tensors(survey_name: str, excluded_location_features: tuple[str, ...] = ()) -> SurveyTensors:
-    """Return the tensors of the synthetic survey ``survey_name``, without the ``excluded_location_features``."""
+def build_survey_tensors(survey_name: str) -> SurveyTensors:
+    """Return the tensors of the synthetic survey ``survey_name``."""
     zones = build_zones()
     graph = build_graph(zones)
     loc_ids = zones["loc_id"].tolist()
@@ -220,7 +220,7 @@ def build_survey_tensors(survey_name: str, excluded_location_features: tuple[str
     survey_cls = SURVEY_CLASSES[survey_name]
     survey = survey_cls(zones, build_journeys(users, loc_ids), users).with_filter("zone")
 
-    return build_tensors(survey, graph, excluded_location_features)
+    return build_tensors(survey, graph)
 
 
 def cache_survey_tensors(survey_name: str, root: Path) -> SurveyTensors:
@@ -487,18 +487,6 @@ def test_categorical_attributes_are_cached_as_codes_and_embedded(tmp_path):
     torch.testing.assert_close(batch.attributes_cat[:, employment_idx], expected_codes, rtol=0, atol=0)
     assert encoder.out_dim == plain.out_dim + DEMOGRAPHICS_SCHEMA.numeric.width + embedded_width
     assert encoder(locations, batch).shape == (batch.num_users, batch.num_nodes, encoder.out_dim)
-
-
-def test_an_excluded_location_feature_is_left_out_of_the_tensors():
-    locations, _, schema = build_survey_tensors("cmap", excluded_location_features=("poi_shop",))
-
-    assert schema.locations.names == ["pop_density", "land_use_residential", "jobs", "population", "area"]
-    assert locations.x.shape[1] == 5
-
-
-def test_excluding_a_column_the_graph_nodes_lack_raises():
-    with pytest.raises(KeyError, match="poi_food"):
-        build_survey_tensors("cmap", excluded_location_features=("poi_food",))
 
 
 def test_a_tensor_whose_width_differs_from_its_schema_raises():

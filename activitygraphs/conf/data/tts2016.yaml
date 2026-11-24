@@ -59,6 +59,3 @@ train_batch_fraction: 1.0
 
 # Number of training epochs.
 max_epochs: 50
-
-# Location feature columns of the graph nodes left out of the tensors.
-excluded_location_features: []

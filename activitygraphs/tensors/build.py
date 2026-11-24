@@ -276,28 +276,22 @@ def _build_group_ids(survey: SurveyData) -> torch.Tensor:
 # =========================================
 
 
-def build_tensors(survey: SurveyData, graph: GraphTables, excluded_location_features: Collection[str]) -> SurveyTensors:
+def build_tensors(survey: SurveyData, graph: GraphTables) -> SurveyTensors:
     """Convert the graph and the survey into tensor form.
 
     Args:
         survey: The survey.
         graph: The nodes, the edges of every kind and the travel times of the graph.
-        excluded_location_features: Columns of the graph nodes left out of the location features.
 
     Returns:
         Tuple ``(locations, users, schema)``: the tensors of the shared graph, the per-user tensors and the dataset
         schema.
 
     Raises:
-        KeyError: A column of ``excluded_location_features`` is not a column of the graph nodes.
         ValueError: The tensors fail ``check_tensors``.
     """
     nodes_gdf = graph.nodes
-    missing_cols = [col for col in excluded_location_features if col not in nodes_gdf.columns]
-    if missing_cols:
-        raise KeyError(f"The graph nodes have no columns {missing_cols} to leave out of the location features.")
-
-    excluded_cols = [*COLS_EXCLUDED_FROM_FEATURES, *ACCESS_SCHEMA.names, *excluded_location_features]
+    excluded_cols = [*COLS_EXCLUDED_FROM_FEATURES, *ACCESS_SCHEMA.names]
     node_feature_cols = [col for col in nodes_gdf.columns if col not in excluded_cols]
 
     node_ids = _build_node_ids(survey, nodes_gdf)
@@ -397,4 +391,4 @@ def _build_survey_tensors(cfg: DataConfig, project_root: Path) -> SurveyTensors:
     survey = load_survey(cfg, project_root).with_filter("zone")
     graph = load_graph(survey, cfg, project_root)
 
-    return build_tensors(survey, graph, cfg.excluded_location_features)
+    return build_tensors(survey, graph)

@@ -224,7 +224,6 @@ class DataConfig:
     distance_bands: list[float]
     train_batch_fraction: float
     max_epochs: int
-    excluded_location_features: list[str]
 
 
 @dataclass
