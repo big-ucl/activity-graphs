@@ -23,7 +23,7 @@ from activitygraphs.runs import run_dir
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = PROJECT_ROOT / "reports/figures/progress"
 
-RUNS = {"cmap": ("CMAP", 9), "tpg": ("TPG", 5)}
+RUNS = {"cmap": ("CMAP", "CMAP-core-20261030-163713"), "tpg": ("TPG", "TPG-network_hops-20261115-001137")}
 PANEL_TITLES = {"cmap": "CMAP (Chicago)", "tpg": "TPG (Geneva)"}
 
 GNN = "GATv2-8"

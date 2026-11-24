@@ -9,8 +9,13 @@ from torch.utils.data import DataLoader
 from activitygraphs.config import Config
 from activitygraphs.datasets.dataset import UserDataset, read_fingerprint
 from activitygraphs.datasets.locations import Locations
-from activitygraphs.datasets.splits import SplitStrategy, load_split_indices, read_split_indices
-from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms
+from activitygraphs.datasets.splits import (
+    SplitStrategy,
+    load_split_indices,
+    read_split_indices,
+    subsample_households,
+)
+from activitygraphs.datasets.transforms import FeatureTransforms, fit_transforms, read_current_transforms
 from activitygraphs.datasets.users import Users
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors import Fingerprint, load_tensors, read_tensors, tensors_path
@@ -34,6 +39,10 @@ class SurveyDataModule(L.LightningDataModule):
         batch_size: Number of users per DataLoader batch.
         num_workers: Number of DataLoader worker processes.
         project_root: Optional override for the project root path.
+        transforms: The feature transforms applied to the inputs, such as those fitted on another dataset with the
+            same schema. Reads the transforms fitted on the training split of this dataset if ``None``.
+        train_fraction: Share of the training households kept for training, drawn with ``seed``.
+        test_on_all_users: Test on every user, the training and validation users included.
     """
 
     def __init__(
@@ -44,6 +53,9 @@ class SurveyDataModule(L.LightningDataModule):
         batch_size: int,
         num_workers: int,
         project_root: Path | None = None,
+        transforms: FeatureTransforms | None = None,
+        train_fraction: float = 1.0,
+        test_on_all_users: bool = False,
     ):
         super().__init__()
         self.cfg = cfg
@@ -52,6 +64,9 @@ class SurveyDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.project_root = project_root
+        self.transforms = transforms
+        self.train_fraction = train_fraction
+        self.test_on_all_users = test_on_all_users
 
         self._locations: Locations | None = None
         self._schema: DatasetSchema | None = None
@@ -70,7 +85,13 @@ class SurveyDataModule(L.LightningDataModule):
             return
 
         self._locations, self._schema, self._train_dataset, self._val_dataset, self._test_dataset = _read_splits(
-            self.cfg, self.split, self.seed, self.project_root
+            self.cfg,
+            self.split,
+            self.seed,
+            self.transforms,
+            self.train_fraction,
+            self.test_on_all_users,
+            self.project_root,
         )
         self._home_coverage = _compute_home_coverage(self._train_dataset, self._test_dataset)
 
@@ -141,6 +162,22 @@ class SurveyDataModule(L.LightningDataModule):
         return self._home_coverage
 
 
+def read_transforms(
+    cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None
+) -> FeatureTransforms:
+    """Read the feature transforms fitted on the training split of the dataset of ``cfg``, cached by ``prepare_data``.
+
+    Raises:
+        FileNotFoundError: The dataset tensors or the transforms are not cached.
+        ValueError: The cached transforms were fitted on another dataset, or follow another transform policy.
+    """
+    project_root = get_project_root(project_root)
+    _, transforms_cache = _split_cache_paths(cfg, split, seed, project_root)
+    fingerprint = read_fingerprint(cfg, project_root)
+
+    return read_current_transforms(transforms_cache, fingerprint)
+
+
 def _split_cache_paths(cfg: Config, split: SplitStrategy, seed: int, project_root: Path) -> tuple[Path, Path]:
     """Return the paths of the cached split indices (``splits_*.json``) and transforms (``transforms_*.pkl``).
 
@@ -190,9 +227,24 @@ def _caches_match(splits_cache: Path, transforms_cache: Path, fingerprint: Finge
 
 
 def _read_splits(
-    cfg: Config, split: SplitStrategy, seed: int, project_root: Path | None = None
+    cfg: Config,
+    split: SplitStrategy,
+    seed: int,
+    transforms: FeatureTransforms | None,
+    train_fraction: float,
+    test_on_all_users: bool,
+    project_root: Path | None = None,
 ) -> tuple[Locations, DatasetSchema, UserDataset, UserDataset, UserDataset]:
     """Read the tensors, split indices and transforms cached by ``_prepare_splits``, and return the scaled splits.
+
+    Args:
+        cfg: The config, read for the dataset.
+        split: Strategy assigning the users to the train, validation and test splits.
+        seed: Seed of the split and of the subsample of the training households.
+        transforms: The feature transforms applied to the inputs. None reads the cached transforms of the dataset.
+        train_fraction: Share of the training households kept for training.
+        test_on_all_users: Put every user in the test split, the training and validation users included.
+        project_root: Optional override for the project root path.
 
     Returns:
         Tuple ``(locations, schema, train_dataset, val_dataset, test_dataset)``.
@@ -209,12 +261,13 @@ def _read_splits(
     fingerprint = read_fingerprint(cfg, project_root)
 
     train_idx, val_idx, test_idx = read_split_indices(splits_cache, fingerprint)
+    if test_on_all_users:
+        test_idx = sorted([*train_idx, *val_idx, *test_idx])
+    if train_fraction < 1:
+        train_idx = subsample_households(train_idx, user_tensors.group_ids, train_fraction, seed)
 
-    transforms = FeatureTransforms.read(transforms_cache)
-    if not transforms.is_current(fingerprint):
-        raise ValueError(
-            f"Cached transforms at `{transforms_cache.name}` do not match the dataset fingerprint or the transform policy."
-        )
+    if transforms is None:
+        transforms = read_current_transforms(transforms_cache, fingerprint)
 
     locations = Locations.from_tensors(location_tensors, transforms)
     users = Users.from_tensors(user_tensors, transforms)

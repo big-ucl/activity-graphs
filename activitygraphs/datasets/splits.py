@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
+import torch
 from sklearn.model_selection import GroupShuffleSplit
 
 from activitygraphs.tensors import Fingerprint, UserTensors
@@ -63,6 +65,32 @@ class HouseholdSplit:
         train_idx, val_idx = train_val_idx[rel_train_idx], train_val_idx[rel_val_idx]
 
         return train_idx.tolist(), val_idx.tolist(), test_idx.tolist()
+
+
+def subsample_households(indices: list[int], group_ids: torch.Tensor, fraction: float, seed: int) -> list[int]:
+    """Return the users of ``indices`` whose household is among a random share ``fraction`` of their households.
+
+    At least one household is kept. The users keep their order in ``indices``.
+
+    Args:
+        indices: Dataset indices of the users to subsample.
+        group_ids: Household of every user of the dataset, ``[num_users]``.
+        fraction: Share of the households of ``indices`` to keep, in ``(0, 1]``.
+        seed: Seed of the draw of the households.
+
+    Raises:
+        ValueError: If ``fraction`` is not in ``(0, 1]``.
+    """
+    if not 0 < fraction <= 1:
+        raise ValueError(f"The share of households kept is in (0, 1], got {fraction}")
+
+    user_group_ids = group_ids[indices].numpy()
+    household_ids = np.unique(user_group_ids)
+    num_kept = max(1, round(fraction * len(household_ids)))
+    kept_household_ids = np.random.default_rng(seed).permutation(household_ids)[:num_kept]
+    is_kept = np.isin(user_group_ids, kept_household_ids)
+
+    return [index for index, kept in zip(indices, is_kept, strict=True) if kept]
 
 
 def read_split_indices(cache_path: Path, fingerprint: Fingerprint) -> SplitIndices:

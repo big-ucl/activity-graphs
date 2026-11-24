@@ -1,0 +1,13 @@
+# @package _global_
+# The variants of TTS2016-edge_ablation-20261117-183417 tested on the users of the dataset of the run, with the
+# inputs scaled by the transforms of TTS 2016 and by those of the run's dataset, beside the baselines fitted on each
+# dataset.
+experiment:
+  name: transfer_tts2022
+  variants: []
+
+transfer:
+  source_run: TTS2016-edge_ablation-20261117-183417
+  variants: [ MLP, GATv2-2, GATv2-2-norail, GATv2-2-nocontig-norail, TwoTower-4, TwoTower-4-norail, TwoTower-4-nocontig-norail ]
+  scalings: [ source, target ]
+  fit_baselines_on_source: true

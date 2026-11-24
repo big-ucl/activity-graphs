@@ -203,6 +203,21 @@ def fit_transforms(
     return FeatureTransforms(groups=groups, policy=policy, fingerprint=fingerprint)
 
 
+def read_current_transforms(path: Path, fingerprint: Fingerprint) -> FeatureTransforms:
+    """Read the transforms pickled at ``path`` and check them against the dataset ``fingerprint``.
+
+    Raises:
+        ValueError: The cached transforms were fitted on another dataset, or follow another transform policy.
+    """
+    transforms = FeatureTransforms.read(path)
+    if not transforms.is_current(fingerprint):
+        raise ValueError(
+            f"Cached transforms at `{path.name}` do not match the dataset fingerprint or the transform policy."
+        )
+
+    return transforms
+
+
 def _scaled_column_indices(transforms: tuple[Transform, ...]) -> list[int]:
     """Return the indices of the columns that are z-scored."""
     return [idx for idx, transform in enumerate(transforms) if transform != Transform.PASSTHROUGH]

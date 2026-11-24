@@ -215,6 +215,7 @@ class DataConfig:
     distance_bands: list[float]
     train_batch_fraction: float
     max_epochs: int
+    excluded_location_features: list[str]
 
 
 @dataclass
@@ -281,6 +282,7 @@ class TrainerConfig:
     fast_dev_run: bool
     overfit_batches: int
     limit_train_batches: float
+    check_val_every_n_epoch: int
     enable_progress_bar: bool
     enable_model_summary: bool
 
@@ -328,7 +330,12 @@ class HomePEConfig:
 
 @dataclass
 class TrainConfig:
-    """Training configuration for development and debugging."""
+    """Training configuration for development and debugging.
+
+    Attributes:
+        train_fraction: Share of the training households kept for training, drawn with ``split_seed``. The validation
+            and test splits are kept whole.
+    """
 
     split_seed: int
     train_seeds: list[int]
@@ -336,6 +343,7 @@ class TrainConfig:
     loader: LoaderConfig
     val_size: float
     test_size: float
+    train_fraction: float
 
     overfit_lr: float | None
     overfit_epochs: int
@@ -374,6 +382,45 @@ class VariantConfig:
     set: dict[str, Any] = field(default_factory=dict)
     features: dict[str, bool] = field(default_factory=dict)
     sweep: dict[str, list[Any]] = field(default_factory=dict)
+
+
+VALID_SCALING_SOURCES = ("source", "target")
+"""Valid sources for the scaling of the features transforms given to a restored variant, 
+the ``scalings`` of ``TransferConfig``."""
+
+
+@dataclass
+class TransferConfig:
+    """Settings of 1) variants restored from the checkpoints of a recorded run, and 2) the baselines fit on the run dataset.
+
+    Each restored variant is run once per scaling in ``scalings``, and fine-tuned again when ``fine_tune`` is on.
+
+    Attributes:
+        source_run: Id of the recorded run, ``{dataset}-{experiment}-{YYYYmmdd-HHMMSS}``. Variants are not restored if ``None``.
+        variants: Names of the variants to be restored, as reported by the recorded run.
+        scalings: The feature transforms applied to the inputs of each restored variant, each one of ``SCALINGS``.
+            ``source`` reads the transforms fitted on the training split of the recorded run's dataset. ``target``
+            reads the transforms of the dataset of this run. A recorded run of this run's dataset takes ``source``
+            alone.
+        test_restored: Test the restored variants as they were trained in the recorded run (without fine-tuning).
+        fine_tune: Train each restored variant on the training split of this run, then test it.
+        fine_tune_lr_scale: Factor applied to the learning rate of a fine-tuned restored variant.
+        fit_baselines_on_source: Also fit the baselines on the dataset of the recorded run. Each one is then tested on
+            this run's test users under its own name suffixed with ``-from{dataset}``.
+        test_on_all_users: Test on every user of this run's dataset, the training and validation users included. The
+            experiment then does not train variants, and every restored variant comes from another dataset and is only
+            tested. The baselines fitted on this run's dataset are restricted to only ones that do not read visits,
+            i.e. ``Uniform`` and ``DistanceDecay``.
+    """
+
+    source_run: str | None
+    variants: list[str]
+    scalings: list[str]
+    test_restored: bool
+    fine_tune: bool
+    fine_tune_lr_scale: float
+    fit_baselines_on_source: bool
+    test_on_all_users: bool
 
 
 @dataclass
@@ -510,7 +557,7 @@ class AnalysisConfig:
     min_realised_size: int
     occupancy_thresholds: list[int]
     recall_curve_ks: list[int]
-    run: int | None
+    run: str | None
 
 
 @dataclass
@@ -523,6 +570,7 @@ class Config:
     train: TrainConfig
     experiment: ExperimentConfig
     models: dict[str, ModelConfig]
+    transfer: TransferConfig
     analysis: AnalysisConfig
 
 

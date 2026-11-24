@@ -13,7 +13,7 @@ from activitygraphs.models.baselines.popularity import popularity_logit
 from activitygraphs.models.scorers import Scorer
 from activitygraphs.tensors import tensors_path
 from activitygraphs.training.lightning_module import RankingModule
-from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.losses import _build_bce_loss
 
 SPLIT = HouseholdSplit(val_size=0.2, test_size=0.2)
 SPLIT_SEED = 42
@@ -63,6 +63,19 @@ def test_the_loader_yields_whole_rows_of_users(cfg, tmp_path):
     assert batch.num_users == min(BATCH_SIZE, len(datamodule.test_dataset))
 
 
+def test_testing_on_all_users_puts_every_user_in_the_test_split(cfg, tmp_path):
+    datamodule = make_datamodule(cfg, tmp_path)
+    all_users_datamodule = SurveyDataModule(
+        cfg, SPLIT, SPLIT_SEED, BATCH_SIZE, num_workers=0, project_root=tmp_path, test_on_all_users=True
+    )
+    all_users_datamodule.setup()
+    num_users = len(datamodule.train_dataset) + len(datamodule.val_dataset) + len(datamodule.test_dataset)
+
+    assert all_users_datamodule.test_dataset.user_idx.tolist() == list(range(num_users))
+    assert all_users_datamodule.train_dataset.user_idx.tolist() == datamodule.train_dataset.user_idx.tolist()
+    assert all_users_datamodule.val_dataset.user_idx.tolist() == datamodule.val_dataset.user_idx.tolist()
+
+
 def per_user_avg_recall(module: RankingModule) -> pl.DataFrame:
     per_user = pl.DataFrame(module.per_user_columns)
     return _with_ranking_metrics(per_user, MAX_RECALL_K).select("user_idx", "avg_recall").sort("user_idx")
@@ -79,7 +92,7 @@ def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tm
         scorer=baseline,
         locations=locations,
         lr=0.0,
-        loss=BCELoss,
+        loss=_build_bce_loss(),
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )
@@ -89,7 +102,7 @@ def test_a_row_model_at_the_popularity_logits_reproduces_visit_frequency(cfg, tm
         scorer=FixedNodeScores(popularity),
         locations=locations,
         lr=0.0,
-        loss=BCELoss,
+        loss=_build_bce_loss(),
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,
     )

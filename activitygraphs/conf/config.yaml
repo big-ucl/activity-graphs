@@ -28,6 +28,7 @@ trainer:
   overfit_batches: 0
   # Share of the training batches run each epoch, set per dataset. Ignored while overfitting.
   limit_train_batches: ${data.train_batch_fraction}
+  check_val_every_n_epoch: 1
   enable_progress_bar: true
   enable_model_summary: false
 
@@ -46,6 +47,7 @@ train:
   val_size: 0.1
   # Size of the test set.
   test_size: 0.2
+  train_fraction: 1.0
 
   # Learning rate forced on every architecture while overfitting. Set to null to keep the per-model rates.
   overfit_lr: 1e-2
@@ -98,6 +100,16 @@ train:
     # Max distance for hard negative samples (number of hops)
     is_near_threshold: 5
 
+transfer:
+  source_run: null
+  variants: []
+  scalings: [ source ]
+  test_restored: true
+  fine_tune: false
+  fine_tune_lr_scale: 0.1
+  fit_baselines_on_source: false
+  test_on_all_users: false
+
 analysis:
   # Reference model for paired per-user comparison.
   reference_model: Gravity
@@ -111,5 +123,5 @@ analysis:
   occupancy_thresholds: [ 10, 25, 60 ]
   # List of points k at which to evaluate the recall@k
   recall_curve_ks: [ 1, 3, 5, 10, 20, 50 ]
-  # Run number `n` of the run directory `{dataset}-{n}-{timestamp}`. null reads the latest.
+  # Id `{dataset}-{experiment}-{YYYYmmdd-HHMMSS}` of the run read, also the W&B group of its models. null reads the latest.
   run: null

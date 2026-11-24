@@ -9,7 +9,7 @@ from activitygraphs.datasets.locations import _compute_hop_distance
 from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import RankingModule
-from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.losses import _build_bce_loss
 from activitygraphs.training.metrics import (
     PerUserRanking,
     RetrievalAverageRecall,
@@ -442,7 +442,7 @@ class TestPerUserColumnsInModule:
             scorer=NodeScorer(encoder, model),
             locations=locations,
             lr=1e-3,
-            loss=BCELoss,
+            loss=_build_bce_loss(),
             max_recall_k=BUDGET,
             recall_ks=KS,
         )

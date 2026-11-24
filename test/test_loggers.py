@@ -13,7 +13,7 @@ from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import LEARNING_RATE_KEY, RankingModule
 from activitygraphs.training.loggers import MetricsLogger
-from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.losses import _build_bce_loss
 
 NUM_NODES = 6
 NUM_FEATURES = 3
@@ -48,7 +48,7 @@ def fit_and_test(num_epochs: int, loggers: list[Logger]) -> None:
         ),
         locations=locations,
         lr=1e-2,
-        loss=BCELoss,
+        loss=_build_bce_loss(),
         max_recall_k=3,
         recall_ks=[1, 3],
     )

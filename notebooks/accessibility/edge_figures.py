@@ -42,12 +42,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = PROJECT_ROOT / "reports" / "logs" / "edge-figures"
 
 RUNS = {
-    "tts2016 edge_ablation": ("tts2016", 21),
-    "tts2016 rail_redundancy": ("tts2016", 22),
-    "cmap edge_ablation": ("cmap", 28),
-    "tpg edge_ablation": ("tpg", 11),
+    "tts2016 edge_ablation": ("tts2016", "TTS2016-edge_ablation-20261117-183417"),
+    "tts2016 rail_redundancy": ("tts2016", "TTS2016-rail_redundancy-20261118-141949"),
+    "cmap edge_ablation": ("cmap", "CMAP-edge_ablation-20261117-182254"),
+    "tpg edge_ablation": ("tpg", "TPG-edge_ablation-20261117-175704"),
 }
-"""The runs shown, each named by its dataset and experiment, as the dataset config name and the run number."""
+"""The runs shown, each named by its dataset and experiment, as the dataset config name and the run id."""
 METRICS = ("within-band AUC", "recall by distance band", "recall by hop band")
 N_BOOTSTRAP = 1000
 DEFAULT_MIN_ZONE_COUNT = 20
@@ -85,7 +85,7 @@ class RunReads:
     """
 
     data: str
-    run: int
+    run: str
     names: list[str]
     per_user: pl.DataFrame
     band_recall: pl.DataFrame
@@ -93,7 +93,7 @@ class RunReads:
     zones: gpd.GeoDataFrame
 
 
-def load_run_reads(data: str, run: int) -> RunReads:
+def load_run_reads(data: str, run: str) -> RunReads:
     """Return the reads of run ``run`` of the dataset ``data``, with the within-band AUC read from the cache if there."""
     run_path = _run_path(data, run)
     cfg = cast(DictConfig, OmegaConf.load(run_path / CONFIG_FILE))
@@ -420,8 +420,8 @@ def degree_scatter(cells: gpd.GeoDataFrame, model: str, reference: str) -> alt.C
     )
 
 
-def _run_path(data: str, run: int) -> Path:
-    """Return the directory of run ``run`` of the dataset ``data``, under the default runs path."""
+def _run_path(data: str, run: str) -> Path:
+    """Return the directory of the run of id ``run`` of the dataset ``data``, under the default runs path."""
     cfg = OmegaConf.load(PROJECT_ROOT / "activitygraphs" / "conf" / "data" / f"{data}.yaml")
     return run_dir(PROJECT_ROOT / "reports" / "runs", cfg.name, run)
 

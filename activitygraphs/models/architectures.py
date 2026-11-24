@@ -84,6 +84,18 @@ def build_scorer(
     return build(config, features, locations, schema, home_pe_cfg)
 
 
+def has_node_weights(config: ModelConfig) -> bool:
+    """Return whether the scorer of ``config`` learns one weight per node, which ties it to the nodes it is trained on."""
+    if config.architecture == "home_zone_mf":
+        return True
+    if config.architecture != "two_tower":
+        return False
+
+    two_tower = cast(TwoTowerConfig, config)
+
+    return two_tower.bias == "node" or two_tower.node_embedding
+
+
 def _build_mlp(config: MLPConfig, sizes: NetworkSizes) -> NodeMLP:
     """Instantiate a ``NodeMLP`` from ``config``, sized by ``sizes``."""
     return NodeMLP(

@@ -4,9 +4,12 @@ import hashlib
 import json
 from pathlib import Path
 
+import polars as pl
+
 from activitygraphs.config import DataConfig
 from activitygraphs.schema import DatasetSchema
 from activitygraphs.tensors.bundles import (
+    LocationFile,
     LocationTensors,
     SurveyTensors,
     UserTensors,
@@ -52,6 +55,16 @@ def read_tensors(root: Path) -> SurveyTensors:
     check_tensors(locations, users, schema)
 
     return locations, users, schema
+
+
+def read_schema(root: Path) -> DatasetSchema:
+    """Read the dataset schema written by ``save_tensors`` to ``root``, without loading the tensors."""
+    return DatasetSchema.read(root / SCHEMA_FILE)
+
+
+def read_node_ids(root: Path) -> pl.DataFrame:
+    """Read the survey ``loc_id`` of each node written by ``save_tensors`` to ``root``, without loading the tensors."""
+    return pl.read_parquet(root / LOCATIONS_DIR / LocationFile.NODE_IDS)
 
 
 def read_tensors_fingerprint(root: Path) -> Fingerprint:

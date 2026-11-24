@@ -50,7 +50,7 @@ from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.runs import PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.training.lightning_module import RankingModule
-from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.losses import _build_bce_loss
 
 MAIN_METRIC = "test_r_precision"
 PER_USER_METRIC = "r_precision"
@@ -865,7 +865,7 @@ def synthetic_test_run(budget: int, num_graphs: int = 6, num_nodes: int = 40) ->
         ),
         locations=locations,
         lr=1e-3,
-        loss=BCELoss,
+        loss=_build_bce_loss(),
         max_recall_k=budget,
         recall_ks=[1, 5],
     )

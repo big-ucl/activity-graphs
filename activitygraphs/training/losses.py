@@ -32,11 +32,15 @@ class Loss:
 def build_loss(cfg: LossConfig, max_recall_k: int) -> Loss:
     """Build the loss selected by ``cfg.type``, over the ``[num_users, num_nodes]`` grid of a ``UserBatch``."""
     if cfg.type == "bce":
-        return BCELoss
+        return _build_bce_loss()
     if cfg.type == "bpr":
         return _build_bpr_loss(cfg, max_recall_k)
 
     raise ValueError(f"Unknown loss type {cfg.type}")
+
+
+def _build_bce_loss() -> Loss:
+    return Loss(name="bce", loss_fn=_bce_loss, monitor="val_bce", monitor_mode="min")
 
 
 def _bce_loss(
@@ -134,6 +138,3 @@ def _dense_bpr_loss(
 
     diff = row_scores.gather(1, pos_idx) - row_scores.gather(1, neg_idx)  # [n_rows_with_pairs, n_pairs]
     return -F.logsigmoid(diff).mean()
-
-
-BCELoss = Loss(name="bce", loss_fn=_bce_loss, monitor="val_bce", monitor_mode="min")

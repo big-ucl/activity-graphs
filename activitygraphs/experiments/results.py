@@ -1,6 +1,5 @@
 """This module creates the run directory, records the config used by the run and writes the result frames to parquet."""
 
-from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -17,7 +16,6 @@ from activitygraphs.runs import (
     PER_USER_FILE,
     RESULTS_FILE,
     SCORES_FILE,
-    create_overfit_dir,
     create_run_dir,
 )
 
@@ -25,19 +23,19 @@ KEPT_EMPTY_COLUMNS = ("seed",)
 """Columns kept by ``save_results`` even when null for every row, since the analysis groups by them."""
 
 
-def create_output_dir(cfg: Config, started: datetime) -> Path | None:
-    """Create the run directory.
+def create_output_dir(cfg: Config, run: str) -> Path | None:
+    """Create the directory of the run of id ``run``.
 
     Returns:
-        A new numbered directory under ``cfg.paths.runs``, or an unnumbered one under ``cfg.paths.overfit`` when
-        ``cfg.trainer.overfit_batches > 0``. None on a ``fast_dev_run``, which records nothing.
+        A new directory under ``cfg.paths.runs``, or under ``cfg.paths.overfit`` when ``cfg.trainer.overfit_batches > 0``.
+        None on a ``fast_dev_run``, which records nothing.
     """
     if cfg.trainer.fast_dev_run:
         return None
     if cfg.trainer.overfit_batches > 0:
-        return create_overfit_dir(Path(cfg.paths.overfit), cfg.data.name, started)
+        return create_run_dir(Path(cfg.paths.overfit), run)
 
-    return create_run_dir(Path(cfg.paths.runs), cfg.data.name, started)
+    return create_run_dir(Path(cfg.paths.runs), run)
 
 
 def run_config(cfg: Config) -> dict:

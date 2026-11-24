@@ -44,6 +44,33 @@ Only `model` is required. An unknown key raises an error, and so does an unknown
 The command line can override one entry of the list by its position, for example
 `experiment.variants.1.sweep.hidden_channels=[64,128]`.
 
+### Restore the variants of a recorded run
+
+An experiment can also test the variants of a recorded run on its own users, or fine-tune them there. These variants
+are listed in the `transfer` block (`TransferConfig` in `activitygraphs/config.py`), not in `variants`:
+
+```yaml
+experiment:
+  name: transfer_finetune
+  variants:
+    - { model: mlp }
+
+transfer:
+  source_run: TTS2016-edge_ablation-20261117-183417
+  variants: [ MLP, TwoTower-4 ]
+  scalings: [ source ]
+  fine_tune: true
+  fit_baselines_on_source: true
+```
+
+`transfer.variants` names the variants as the recorded run reported them. Each one is rebuilt from the config saved
+in that run, so the model config and the input features are not repeated here. Each restored variant is tested once
+per scaling. With `fine_tune` on, each one is also fine-tuned once per scaling, at the learning rate of the recorded
+run times `fine_tune_lr_scale`. The `source` scaling reads the feature transforms of the recorded run's dataset. The
+`target` scaling reads the transforms of this run's dataset. A recorded run of another dataset must have the same
+columns in every tensor group as this run's dataset. A variant restored from another dataset gets the suffix
+`from{dataset}`, then `tgtscale` for the `target` scaling. A fine-tuned variant then gets `ft`.
+
 ## 3. Check the variant names
 
 The results, the checkpoint directories, and the W&B runs are all keyed by the variant name, so every variant of an
@@ -118,10 +145,11 @@ uv run activity-graphs experiment=width_sweep data=cmap
 uv run report-results data=cmap
 ```
 
-Each run writes a numbered directory `reports/runs/{dataset}-{N}-{timestamp}/`, with the config used by the run, the
-result parquet files, and the checkpoints of every variant. `report-results` reads the latest run of the dataset by
-default, and `analysis.run=N` picks another one. Read the paired comparison against `analysis.reference_model`
-(`Gravity` by default) rather than the aggregate means, and report each metric as mean +- sd over the training seeds.
+Each run writes a directory `reports/runs/{dataset}-{experiment}-{timestamp}/`, named by its run id, with the
+config used by the run, the result parquet files, and the checkpoints of every variant. `report-results` reads the
+latest run of the dataset by default, and `analysis.run=<run id>` picks another one. Read the paired comparison
+against `analysis.reference_model` (`Gravity` by default) rather than the aggregate means, and report each metric
+as mean +- sd over the training seeds.
 
 ## 7. Update the documentation
 

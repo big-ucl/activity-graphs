@@ -10,7 +10,7 @@ import torch
 from omegaconf import OmegaConf
 
 from activitygraphs.datasets.dataset import _dataset_fingerprint, read_fingerprint
-from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices
+from activitygraphs.datasets.splits import HouseholdSplit, load_split_indices, read_split_indices, subsample_households
 from activitygraphs.schema import ColumnKind, ColumnSpec, DatasetSchema, EdgeKind, TensorSchema
 from activitygraphs.tensors import EdgeTensors, Fingerprint, LocationTensors, UserTensors, tensors_path
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
@@ -301,3 +301,43 @@ class TestGroupedSplit:
         load_split_indices(dataset.users, SPLIT, 42, fingerprint_of(cfg, dataset), cache_path=cache)
 
         assert json.loads(cache.read_text())["train"]
+
+
+class TestSubsampleHouseholds:
+    GROUP_IDS = torch.tensor([0, 0, 1, 2, 2, 2, 3, 4, 5, 5])
+
+    def test_keeps_whole_households(self):
+        kept_idx = subsample_households(list(range(10)), self.GROUP_IDS, 0.5, seed=0)
+        kept_households = set(self.GROUP_IDS[kept_idx].tolist())
+
+        assert sorted(kept_idx) == [i for i in range(10) if self.GROUP_IDS[i].item() in kept_households]
+
+    def test_keeps_the_share_of_households(self):
+        kept_idx = subsample_households(list(range(10)), self.GROUP_IDS, 0.5, seed=0)
+
+        assert len(set(self.GROUP_IDS[kept_idx].tolist())) == 3
+
+    def test_keeps_the_order_of_the_users(self):
+        indices = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+        kept_idx = subsample_households(indices, self.GROUP_IDS, 0.5, seed=0)
+
+        assert kept_idx == [index for index in indices if index in kept_idx]
+
+    def test_draws_the_households_from_the_seed(self):
+        first = subsample_households(list(range(10)), self.GROUP_IDS, 0.5, seed=3)
+        second = subsample_households(list(range(10)), self.GROUP_IDS, 0.5, seed=3)
+
+        assert first == second
+
+    def test_draws_only_among_the_given_users(self):
+        kept_idx = subsample_households([0, 1, 2], self.GROUP_IDS, 1.0, seed=0)
+
+        assert kept_idx == [0, 1, 2]
+
+    def test_keeps_at_least_one_household(self):
+        assert len(subsample_households(list(range(10)), self.GROUP_IDS, 0.01, seed=0)) > 0
+
+    @pytest.mark.parametrize("fraction", [0.0, 1.5])
+    def test_a_share_outside_the_unit_interval_raises(self, fraction):
+        with pytest.raises(ValueError, match="share"):
+            subsample_households(list(range(10)), self.GROUP_IDS, fraction, seed=0)

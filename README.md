@@ -44,7 +44,7 @@ Once a run has finished, report its results:
 
 ```bash
 uv run report-results                                     # analyse the latest run of the default dataset
-uv run report-results data=tpg analysis.run=3             # a specific dataset and run number
+uv run report-results data=tpg analysis.run=TPG-headline-20261113-154652   # a specific dataset and run id
 uv run report-results analysis.reference_model=MLP-nohpe  # change reference model for comparisons
 ```
 
@@ -89,13 +89,13 @@ width).
 - `two_tower_pair_inputs` trains the two-tower model with the location features in its pairwise block, and at the
   embedding width 128 (`-d128`), beside `MLP`.
 
-Each experiment writes per-epoch metrics to WandB and to a run directory `reports/runs/{name}-{N}-{timestamp}/`
-(`reports/overfit/{name}-{timestamp}/` for overfit runs): the config
-used by the run, `results.parquet`, per-test-user scores in `per-user.parquet`, the per-node score vectors in
-`scores.parquet`, the per-node distances from home in `distances.parquet`, and the best and last checkpoints of
-each model under `checkpoints/`. The train/val/test split is drawn with
-`train.split_seed`; every model in every run is scored on the same test users;
-`train.train_seeds` reseeds each model run to measure spread.
+Each experiment writes per-epoch metrics to WandB and to a run directory
+`reports/runs/{name}-{experiment}-{timestamp}/` (`reports/overfit/{name}-{experiment}-{timestamp}/` for overfit
+runs), named by the run id that is also its W&B group: the config used by the run, `results.parquet`, per-test-user
+scores in `per-user.parquet`, the per-node score vectors in `scores.parquet`, the per-node distances from home in
+`distances.parquet`, and the best and last checkpoints of each model under `checkpoints/`. The train/val/test split
+is drawn with `train.split_seed`; every model in every run is scored on the same test users; `train.train_seeds`
+reseeds each model run to measure spread.
 
 ## Tests
 

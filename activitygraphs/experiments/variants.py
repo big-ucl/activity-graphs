@@ -85,7 +85,8 @@ def build_variants(entries: Sequence[VariantConfig], models: dict[str, ModelConf
             _check_overrides_are_named(model, features, overrides)
             variants.append(Variant(with_overrides(model, overrides), features))
 
-    _check_distinct_names(variants)
+    variant_names = [variant.name for variant in variants]
+    check_distinct_names(variant_names)
 
     return variants
 
@@ -104,6 +105,19 @@ def variant_hyperparams(variant: Variant) -> dict:
         "use_network_hops": features.use_network_hops,
         "use_tt": features.use_tt,
     }
+
+
+def check_distinct_names(names: list[str]) -> None:
+    """Check that no two variants of an experiment share a name.
+
+    Raises:
+        ValueError: If two variants share a name.
+    """
+    counts = Counter(names)
+    repeated_names = sorted(name for name, count in counts.items() if count > 1)
+
+    if repeated_names:
+        raise ValueError(f"Every variant of an experiment needs its own name, but these repeat: {repeated_names}")
 
 
 def _validated_entry(entry: VariantConfig) -> VariantConfig:
@@ -153,19 +167,6 @@ def _check_overrides_are_named(model: ModelConfig, features: InputFeatures, over
                 f"Setting `{key}` of `{model.architecture}` leaves the variant name {base_name!r} unchanged. "
                 f"Add a suffix for it to OPTION_SUFFIXES or interpolate it in the model's `name`."
             )
-
-
-def _check_distinct_names(variants: list[Variant]) -> None:
-    """Check that no two variants share a name.
-
-    Raises:
-        ValueError: If two variants share a name.
-    """
-    counts = Counter(variant.name for variant in variants)
-    repeated = sorted(name for name, count in counts.items() if count > 1)
-
-    if repeated:
-        raise ValueError(f"Every variant of an experiment needs its own name, but these repeat: {repeated}")
 
 
 def _two_tower_suffixes(model: ModelConfig) -> list[str]:

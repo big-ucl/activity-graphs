@@ -1,9 +1,10 @@
 """Tests for the variants, the seed loop and the aggregate / per-user result split."""
 
+import contextlib
 import dataclasses
 import inspect
 import types
-from datetime import datetime
+from pathlib import Path
 from typing import cast
 
 import lightning as L
@@ -15,13 +16,29 @@ from graphs import chain_edge_index, join_users, make_users
 from graphs import make_locations as make_graph_locations
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.demos.boring_classes import BoringModel
+from lightning.pytorch.loggers import Logger
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
+from torch.utils.data import DataLoader
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.config import Config, HomePEConfig, read_config
-from activitygraphs.datasets import Locations, Users
-from activitygraphs.experiments import runners
+from activitygraphs.config import Config, HomePEConfig, TransferConfig, read_config
+from activitygraphs.datasets import HouseholdSplit, Locations, Users
+from activitygraphs.datasets.datamodule import _compute_home_coverage
+from activitygraphs.datasets.dataset import UserDataset
+from activitygraphs.experiments import runners, training
+from activitygraphs.experiments.baselines import _closed_form_baselines
+from activitygraphs.experiments.restore import (
+    RestoredVariant,
+    SourceRun,
+    _check_same_schema,
+    build_restored_variants,
+    check_checkpoints,
+    check_node_weights,
+    check_same_split,
+    read_source_run,
+    restore_scorer,
+)
 from activitygraphs.experiments.results import (
     _drop_empty_columns,
     create_output_dir,
@@ -30,16 +47,24 @@ from activitygraphs.experiments.results import (
     save_results,
 )
 from activitygraphs.experiments.runners import _run_variants
-from activitygraphs.experiments.setup import ExperimentSetup
-from activitygraphs.experiments.training import WandBParams, _build_callbacks, _trainer_arguments
+from activitygraphs.experiments.setup import ExperimentSetup, _check_tested_across_datasets
+from activitygraphs.experiments.training import (
+    WandBParams,
+    _build_callbacks,
+    _trainer_arguments,
+    evaluate_model,
+    train_model,
+)
 from activitygraphs.experiments.variants import (
     FEATURE_SUFFIXES,
     Variant,
     build_variants,
+    check_distinct_names,
     variant_hyperparams,
     with_overrides,
 )
-from activitygraphs.models.architectures import BUILDERS, _lookup_architecture, build_scorer
+from activitygraphs.graph.travel_times import TRAVEL_TIME_SCHEMA
+from activitygraphs.models.architectures import BUILDERS, _lookup_architecture, build_scorer, has_node_weights
 from activitygraphs.models.baselines import HomeZoneMFBaseline
 from activitygraphs.models.features import (
     AccessFeatures,
@@ -54,10 +79,10 @@ from activitygraphs.models.two_tower import TwoTowerScorer
 from activitygraphs.runs import CHECKPOINTS_DIR, CONFIG_FILE, DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE
 from activitygraphs.schema import DatasetSchema, EdgeKind
 from activitygraphs.tensors.build import USER_NODE_SCHEMA
-from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.losses import _build_bce_loss, build_loss
 from activitygraphs.utils import get_project_root
 
-STARTED = datetime(2026, 10, 26, 15, 30, 0)
+RUN = "TPG-core-20261026-153000"
 EXPERIMENT_CONFIGS = sorted((get_project_root() / "activitygraphs/conf/experiment").glob("*.yaml"))
 HOME_PE = HomePEConfig(bins=8, max_hops=40)
 DEFAULT_FEATURES = InputFeatures()
@@ -68,7 +93,7 @@ def cfg() -> Config:
     return read_config(get_project_root(), verbose=False)
 
 
-def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
+def make_setup(cfg: Config, train_seeds: list[int], variants: list[Variant]) -> ExperimentSetup:
     """An ExperimentSetup with no datamodule; ``build_scorer`` is stubbed by the tests, so no data is needed."""
     return ExperimentSetup(
         cfg=cfg,
@@ -76,6 +101,9 @@ def make_setup(cfg: Config, train_seeds: list[int]) -> ExperimentSetup:
         datamodule=types.SimpleNamespace(locations=None, schema=None),  # type: ignore[arg-type]
         loss=None,  # type: ignore[arg-type]
         models=dict(cfg.models),
+        variants=variants,
+        restored_variants=[],
+        scaled_datamodules={},
         baseline_results=[],
         home_distances=pl.DataFrame(),
         train_seeds=train_seeds,
@@ -146,15 +174,29 @@ def make_survey(rail_edge_index: torch.Tensor | None = None) -> tuple[Locations,
 
 
 def record_training(monkeypatch, frame=None) -> list[dict]:
-    """Replace scorer building and training with stubs, returning the list each training call is recorded into."""
+    """Replace scorer building, logging, training and testing with stubs; return one record per tested model.
+
+    Each record holds the logger ``run_name`` and ``hyperparams``, the ``model`` trained (None when the scorer is only
+    tested), and the ``name`` and ``scorer`` tested.
+    """
     calls: list[dict] = []
 
-    def train_and_evaluate_model(**kwargs):
-        calls.append(kwargs)
-        name = kwargs["variant"].name
+    @contextlib.contextmanager
+    def model_logger(run_name, hyperparams, wandb_params, log_dir):
+        calls.append({"run_name": run_name, "hyperparams": hyperparams, "model": None})
+        yield None
+
+    def train_model(scorer, run_name, model, *args):
+        calls[-1]["model"] = model
+        return []
+
+    def evaluate_model(scorer, name, *args):
+        calls[-1] |= {"name": name, "scorer": scorer}
         return frame(name) if frame else pl.DataFrame({"name": [name], "stage": ["test"]})
 
-    monkeypatch.setattr(runners, "train_and_evaluate_model", train_and_evaluate_model)
+    monkeypatch.setattr(runners, "model_logger", model_logger)
+    monkeypatch.setattr(runners, "train_model", train_model)
+    monkeypatch.setattr(runners, "evaluate_model", evaluate_model)
     monkeypatch.setattr(
         runners, "build_scorer", lambda config, features, locations, schema, home_pe_cfg: torch.nn.Linear(1, 1)
     )
@@ -489,6 +531,9 @@ EXPECTED_VARIANTS = {
     ],
     "two_tower_bias_head": ["MLP", "TwoTower-4", "TwoTower-4-mlpbias", "TwoTower-4-featbias", "TwoTower-4-nodebias"],
     "two_tower_pair_inputs": ["MLP", "TwoTower-4", "TwoTower-4-pairloc", "TwoTower-4-d128"],
+    "transfer_tts2022": [],
+    "transfer_all_users": [],
+    "transfer_finetune": ["MLP", "TwoTower-4"],
 }
 
 
@@ -556,14 +601,14 @@ class TestRunVariants:
 
     def test_trains_every_variant_once_per_seed(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        frames = _run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
+        frames = _run_variants(make_setup(cfg, [1, 2], self._variants(cfg)))
 
         assert len(frames) == 4
-        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-8-nohpe", "MLP", "GATv2-8-nohpe"]
+        assert [call["name"] for call in calls] == ["MLP", "GATv2-8-nohpe", "MLP", "GATv2-8-nohpe"]
 
     def test_tags_each_frame_with_its_training_seed(self, cfg, monkeypatch):
         record_training(monkeypatch)
-        seeds = pl.concat(_run_variants(make_setup(cfg, [1, 2]), self._variants(cfg)))["seed"].to_list()
+        seeds = pl.concat(_run_variants(make_setup(cfg, [1, 2], self._variants(cfg))))["seed"].to_list()
 
         assert seeds == [1, 1, 2, 2]
 
@@ -576,7 +621,7 @@ class TestRunVariants:
             return built[-1]
 
         monkeypatch.setattr(runners, "build_scorer", build)
-        _run_variants(make_setup(cfg, [1, 2]), [Variant(cfg.models.mlp)])
+        _run_variants(make_setup(cfg, [1, 2], [Variant(cfg.models.mlp)]))
 
         assert len(built) == 2
         assert built[0] is not built[1]
@@ -590,27 +635,45 @@ class TestRunVariants:
             return torch.nn.Linear(1, 1)
 
         monkeypatch.setattr(runners, "build_scorer", build)
-        _run_variants(make_setup(cfg, [1]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [1], self._variants(cfg)))
 
         assert draws[0] == draws[1]
 
     def test_run_tag_separates_checkpoints_across_seeds(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        _run_variants(make_setup(cfg, [1, 2]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [1, 2], self._variants(cfg)))
 
-        assert [call["run_tag"] for call in calls] == ["seed1", "seed1", "seed2", "seed2"]
+        assert [call["hyperparams"]["run_tag"] for call in calls] == ["seed1", "seed1", "seed2", "seed2"]
+        assert [call["run_name"] for call in calls] == [
+            "MLP-seed1",
+            "GATv2-8-nohpe-seed1",
+            "MLP-seed2",
+            "GATv2-8-nohpe-seed2",
+        ]
 
     def test_no_run_tag_for_a_single_seed(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        _run_variants(make_setup(cfg, [42]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [42], self._variants(cfg)))
 
-        assert [call["run_tag"] for call in calls] == [None, None]
+        assert [call["run_name"] for call in calls] == ["MLP", "GATv2-8-nohpe"]
 
     def test_forwards_each_variant(self, cfg, monkeypatch):
         calls = record_training(monkeypatch)
-        _run_variants(make_setup(cfg, [42]), self._variants(cfg))
+        _run_variants(make_setup(cfg, [42], self._variants(cfg)))
 
-        assert [call["variant"] for call in calls] == self._variants(cfg)
+        variants = self._variants(cfg)
+
+        assert [call["name"] for call in calls] == [variant.name for variant in variants]
+        assert [call["model"] for call in calls] == [variant.model for variant in variants]
+        expected_hyperparams = []
+        for variant in variants:
+            expected_hyperparams.append({
+                "model": variant.name,
+                "run_tag": None,
+                "model_type": "trained",
+                **variant_hyperparams(variant),
+            })
+        assert [call["hyperparams"] for call in calls] == expected_hyperparams
 
 
 class TestVariantHyperparams:
@@ -649,7 +712,8 @@ class TestRunExperiment:
 
         def setup_experiment(cfg, with_baselines: bool = True):
             baselines_fitted.append(with_baselines)
-            return make_setup(cfg, [42, 43])
+            variants = build_variants(cfg.experiment.variants, dict(cfg.models))
+            return make_setup(cfg, [42, 43], variants)
 
         monkeypatch.setattr(runners, "setup_experiment", setup_experiment)
         monkeypatch.setattr(runners, "save_results", lambda *a, **kw: None)
@@ -661,7 +725,7 @@ class TestRunExperiment:
     def test_trains_every_variant_once_per_seed_in_order(self, compose_config, monkeypatch):
         calls, _ = self._run(compose_config, monkeypatch, "experiment=headline")
 
-        assert [call["variant"].name for call in calls] == ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"] * 2
+        assert [call["name"] for call in calls] == ["MLP", "GATv2-2", "TwoTower-4", "HomeZoneMF"] * 2
 
     def test_fits_the_baselines(self, compose_config, monkeypatch):
         _, with_baselines = self._run(compose_config, monkeypatch, "experiment=core")
@@ -686,15 +750,17 @@ class TestBuildCallbacks:
 
     def _early_stopping(self, cfg, **overrides) -> list[EarlyStopping]:
         run_cfg = cast(Config, OmegaConf.merge(cfg, overrides))
-        callbacks = _build_callbacks(BCELoss, run_cfg, run_dir=None, run_name="MLP", debug=False)
+        loss = _build_bce_loss()
+        callbacks = _build_callbacks(loss, run_cfg, run_dir=None, run_name="MLP", debug=False)
 
         return [callback for callback in callbacks if isinstance(callback, EarlyStopping)]
 
     def test_early_stopping_monitors_the_checkpoint_metric(self, cfg):
         (early_stopping,) = self._early_stopping(cfg, train={"early_stopping": {"patience": 7}})
+        loss = _build_bce_loss()
 
-        assert early_stopping.monitor == BCELoss.monitor
-        assert early_stopping.mode == BCELoss.monitor_mode
+        assert early_stopping.monitor == loss.monitor
+        assert early_stopping.mode == loss.monitor_mode
         assert early_stopping.patience == 7
 
     def test_null_patience_turns_early_stopping_off(self, cfg):
@@ -704,7 +770,8 @@ class TestBuildCallbacks:
         assert self._early_stopping(cfg, trainer={"overfit_batches": 1}) == []
 
     def test_the_best_checkpoint_holds_the_best_epoch_and_the_last_the_final_epoch(self, cfg, tmp_path):
-        callbacks = _build_callbacks(BCELoss, cfg, run_dir=tmp_path, run_name="MLP", debug=False)
+        loss = _build_bce_loss()
+        callbacks = _build_callbacks(loss, cfg, run_dir=tmp_path, run_name="MLP", debug=False)
         checkpoints = [callback for callback in callbacks if isinstance(callback, ModelCheckpoint)]
         trainer = L.Trainer(
             max_epochs=4,
@@ -824,20 +891,20 @@ class TestRunRecord:
         }
         return cast(Config, OmegaConf.merge(cfg, overrides))
 
-    def test_a_run_gets_a_numbered_directory(self, cfg, tmp_path):
-        run_dir = create_output_dir(self._cfg(cfg, tmp_path), STARTED)
+    def test_a_run_gets_the_directory_named_by_its_id(self, cfg, tmp_path):
+        run_dir = create_output_dir(self._cfg(cfg, tmp_path), RUN)
 
-        assert run_dir == tmp_path / "runs" / f"{cfg.data.name}-1-20261026-153000"
+        assert run_dir == tmp_path / "runs" / RUN
         assert run_dir.is_dir()
 
-    def test_an_overfit_run_gets_an_unnumbered_directory_elsewhere(self, cfg, tmp_path):
-        run_dir = create_output_dir(self._cfg(cfg, tmp_path, overfit_batches=1), STARTED)
+    def test_an_overfit_run_gets_its_directory_elsewhere(self, cfg, tmp_path):
+        run_dir = create_output_dir(self._cfg(cfg, tmp_path, overfit_batches=1), RUN)
 
-        assert run_dir == tmp_path / "overfit" / f"{cfg.data.name}-20261026-153000"
+        assert run_dir == tmp_path / "overfit" / RUN
         assert not (tmp_path / "runs").exists()
 
     def test_a_fast_dev_run_records_nothing(self, cfg, tmp_path):
-        assert create_output_dir(self._cfg(cfg, tmp_path, fast_dev_run=True), STARTED) is None
+        assert create_output_dir(self._cfg(cfg, tmp_path, fast_dev_run=True), RUN) is None
         assert list(tmp_path.iterdir()) == []
 
     def test_the_saved_config_holds_the_architectures_as_trained(self, cfg, tmp_path):
@@ -861,3 +928,560 @@ class _WorseningModel(BoringModel):
 
     def validation_step(self, batch, batch_idx):
         self.log("val_bce", float(self.current_epoch))
+
+
+def source_run_id(name: str) -> str:
+    """The id of the recorded run of the dataset ``name`` that the restored variants come from."""
+    return f"{name}-edge_ablation-20261117-183417"
+
+
+def write_source_run(tmp_path, compose_config, *overrides: str):
+    """Record the config of a run of the composed config under ``tmp_path/runs``; return the runs path and config."""
+    cfg = compose_config(*overrides)
+    run_path = tmp_path / "runs" / source_run_id(cfg.data.name)
+    run_path.mkdir(parents=True)
+    OmegaConf.save(cfg, run_path / CONFIG_FILE, resolve=True)
+
+    return tmp_path / "runs", cfg
+
+
+def write_checkpoint(run_path, run_name: str, scorer: torch.nn.Module) -> None:
+    """Write ``scorer``'s weights to ``checkpoints/{run_name}/best.ckpt`` of ``run_path``, as Lightning names them."""
+    checkpoint_dir = run_path / CHECKPOINTS_DIR / run_name
+    checkpoint_dir.mkdir(parents=True)
+    state_dict = {f"scorer.{key}": value for key, value in scorer.state_dict().items()}
+    torch.save({"state_dict": state_dict}, checkpoint_dir / "best.ckpt")
+
+
+def read_source(tmp_path, compose_config, *overrides: str) -> SourceRun:
+    """Record a run of the ``edge_ablation`` experiment under ``tmp_path`` and read it back."""
+    runs_path, cfg = write_source_run(tmp_path, compose_config, "experiment=edge_ablation", *overrides)
+
+    return SourceRun.read(runs_path, source_run_id(cfg.data.name))
+
+
+def transfer_config(cfg: Config, **settings) -> TransferConfig:
+    """The transfer settings of ``cfg`` with ``settings`` merged in."""
+    return cast(TransferConfig, OmegaConf.merge(cfg.transfer, settings))
+
+
+def restore(source: SourceRun, dataset_name: str = "TTS2022", **settings) -> list[RestoredVariant]:
+    """The variants restored from ``source`` in an experiment on ``dataset_name``, with ``settings`` as the transfer."""
+    transfer = transfer_config(source.cfg, source_run=source.run, **settings)
+
+    return build_restored_variants(transfer, source, dataset_name)
+
+
+def restored_names(source: SourceRun, dataset_name: str = "TTS2022", **settings) -> list[str]:
+    """Names of the variants restored from ``source`` in an experiment on ``dataset_name``."""
+    return [restored_variant.name for restored_variant in restore(source, dataset_name, **settings)]
+
+
+class TestRestoredVariantNames:
+    def test_a_variant_restored_from_another_dataset_names_it(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        assert restored_names(source, variants=["MLP"]) == ["MLP-fromTPG"]
+
+    def test_the_target_scaling_is_named(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        assert restored_names(source, variants=["MLP"], scalings=["source", "target"]) == [
+            "MLP-fromTPG",
+            "MLP-fromTPG-tgtscale",
+        ]
+
+    def test_the_tested_copies_come_before_the_fine_tuned_ones(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        names = restored_names(source, variants=["MLP", "GATv2-2-norail"], fine_tune=True)
+
+        assert names == ["MLP-fromTPG", "MLP-fromTPG-ft", "GATv2-2-norail-fromTPG", "GATv2-2-norail-fromTPG-ft"]
+
+    def test_a_variant_can_be_fine_tuned_only(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        assert restored_names(source, variants=["MLP"], test_restored=False, fine_tune=True) == ["MLP-fromTPG-ft"]
+
+    def test_a_variant_restored_from_its_own_dataset_keeps_its_name(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        assert restored_names(source, source.dataset_name, variants=["MLP"]) == ["MLP"]
+
+    def test_a_variant_fine_tuned_on_its_own_dataset_is_named_ft(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        names = restored_names(source, source.dataset_name, variants=["MLP"], test_restored=False, fine_tune=True)
+
+        assert names == ["MLP-ft"]
+
+
+class TestBuildRestoredVariants:
+    def test_keeps_the_model_config_of_the_recorded_run(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        (restored_variant,) = restore(source, variants=["GATv2-2-norail"])
+
+        assert restored_variant.variant.model.num_gcn_layers == 2
+        assert restored_variant.variant.features == InputFeatures(use_rail_edges=False)
+
+    def test_a_variant_the_run_did_not_train_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        with pytest.raises(KeyError, match="MLP-nott"):
+            restore(source, variants=["MLP-nott"])
+
+    def test_an_unknown_scaling_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        with pytest.raises(ValueError, match="scaled by one of"):
+            restore(source, variants=["MLP"], scalings=["other"])
+
+    def test_the_target_scaling_of_the_own_dataset_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        with pytest.raises(ValueError, match="`source` scaling alone"):
+            restore(source, source.dataset_name, variants=["MLP"], scalings=["source", "target"])
+
+    def test_variants_neither_tested_nor_fine_tuned_raise(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        with pytest.raises(ValueError, match="tested, fine-tuned or both"):
+            restore(source, variants=["MLP"], test_restored=False)
+
+    def test_logs_the_restore_settings(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        (restored_variant,) = restore(source, variants=["MLP"], scalings=["target"])
+
+        assert restored_variant.hyperparams["restore"] == {
+            "source_run": source.run,
+            "scaling": "target",
+            "fine_tune": False,
+        }
+
+
+class TestReadSourceRun:
+    def test_no_recorded_run_restores_nothing(self, cfg, tmp_path):
+        assert read_source_run(tmp_path, cfg.transfer) is None
+
+    @pytest.mark.parametrize("settings", [{"variants": ["MLP"]}, {"fit_baselines_on_source": True}])
+    def test_settings_that_read_the_run_need_one(self, cfg, tmp_path, settings):
+        with pytest.raises(ValueError, match="source_run"):
+            read_source_run(tmp_path, transfer_config(cfg, **settings))
+
+    def test_reads_the_run_of_its_id(self, tmp_path, compose_config):
+        runs_path, cfg = write_source_run(tmp_path, compose_config, "experiment=edge_ablation")
+        transfer = transfer_config(cfg, source_run=source_run_id(cfg.data.name))
+        source = read_source_run(runs_path, transfer)
+
+        assert source is not None
+        assert source.run == source_run_id(cfg.data.name)
+
+
+class TestSourceRun:
+    def test_reads_the_checkpoint_of_each_seed(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        write_checkpoint(source.path, "MLP-seed43", torch.nn.Linear(1, 1))
+
+        assert source.checkpoint_path("MLP", 43) == source.path / CHECKPOINTS_DIR / "MLP-seed43" / "best.ckpt"
+
+    def test_a_seed_the_run_did_not_train_with_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        with pytest.raises(ValueError, match="seeds"):
+            source.checkpoint_path("MLP", 7)
+
+    def test_a_missing_checkpoint_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        with pytest.raises(FileNotFoundError, match="MLP"):
+            source.checkpoint_path("MLP", 42)
+
+    def test_a_single_seed_run_names_the_checkpoint_after_the_variant(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config, "train.train_seeds=[5]")
+        write_checkpoint(source.path, "MLP", torch.nn.Linear(1, 1))
+
+        assert source.checkpoint_path("MLP", 5).parent.name == "MLP"
+
+
+class TestCheckCheckpoints:
+    def test_checks_every_seed_of_every_restored_variant(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        write_checkpoint(source.path, "MLP-seed42", torch.nn.Linear(1, 1))
+        restored_variants = restore(source, variants=["MLP"])
+
+        with pytest.raises(FileNotFoundError, match="seed 43"):
+            check_checkpoints(restored_variants, [42, 43])
+
+    def test_the_fine_tuned_copies_read_the_checkpoint_of_the_variant(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        write_checkpoint(source.path, "MLP-seed42", torch.nn.Linear(1, 1))
+
+        check_checkpoints(restore(source, variants=["MLP"], fine_tune=True), [42])
+
+
+class TestRestoreScorer:
+    def test_restores_the_weights_of_the_checkpoint(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config, "train.train_seeds=[42]")
+        (restored_variant,) = restore(source, variants=["MLP"])
+        locations, _ = make_survey()
+        torch.manual_seed(0)
+        trained_scorer = build_scorer(
+            source.cfg.models.mlp, DEFAULT_FEATURES, locations, make_schema(), source.cfg.train.home_pe
+        )
+        write_checkpoint(source.path, "MLP", trained_scorer)
+
+        torch.manual_seed(1)
+        scorer = restore_scorer(restored_variant, 42, locations, make_schema())
+
+        for key, value in trained_scorer.state_dict().items():
+            assert torch.equal(scorer.state_dict()[key], value)
+
+    def test_a_checkpoint_of_other_widths_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config, "train.train_seeds=[42]")
+        (restored_variant,) = restore(source, variants=["MLP"])
+        locations, _ = make_survey()
+        trained_scorer = build_scorer(
+            source.cfg.models.mlp, DEFAULT_FEATURES, locations, make_schema(), source.cfg.train.home_pe
+        )
+        write_checkpoint(source.path, "MLP", trained_scorer)
+        wider_schema = make_schema(num_location_features=7)
+
+        with pytest.raises(RuntimeError, match="size mismatch"):
+            restore_scorer(restored_variant, 42, locations, wider_schema)
+
+
+class TestCheckSameSchema:
+    def test_equal_schemas_pass(self):
+        _check_same_schema(make_schema(), make_schema(), "TTS2016", "TTS2022")
+
+    def test_names_the_groups_that_differ_and_their_columns(self):
+        with pytest.raises(ValueError, match=r"`locations`: \[.*\] in TTS2016, \[.*'c6'\] in CMAP") as error:
+            _check_same_schema(make_schema(), make_schema(num_location_features=7), "TTS2016", "CMAP")
+
+        assert "user_attributes" not in str(error.value)
+
+
+class TestCheckTestedAcrossDatasets:
+    def test_variants_of_another_dataset_only_tested_pass(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        restored_variants = restore(source, variants=["MLP"], scalings=["source", "target"])
+        cfg = compose_config("data=tts2022")
+
+        _check_tested_across_datasets(cfg, [], restored_variants, source)
+
+    def test_a_variant_trained_from_scratch_raises(self, cfg):
+        with pytest.raises(ValueError, match="only tested"):
+            _check_tested_across_datasets(cfg, [Variant(cfg.models.mlp)], [], None)
+
+    def test_baselines_fitted_on_a_run_of_this_dataset_raise(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        cfg = compose_config("transfer.fit_baselines_on_source=true")
+
+        with pytest.raises(ValueError, match="baselines fitted on TPG"):
+            _check_tested_across_datasets(cfg, [], [], source)
+
+    def test_baselines_fitted_on_a_run_of_another_dataset_pass(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        cfg = compose_config("data=tts2022", "transfer.fit_baselines_on_source=true")
+
+        _check_tested_across_datasets(cfg, [], [], source)
+
+    @pytest.mark.parametrize(
+        ("dataset_name", "settings"),
+        [("TTS2022", {"fine_tune": True}), ("TPG", {})],
+        ids=["fine-tuned", "own-dataset"],
+    )
+    def test_a_restored_variant_trained_on_this_dataset_raises(self, tmp_path, compose_config, dataset_name, settings):
+        source = read_source(tmp_path, compose_config)
+        restored_variants = restore(source, dataset_name, variants=["MLP"], **settings)
+
+        cfg = compose_config()
+
+        with pytest.raises(ValueError, match="only tested"):
+            _check_tested_across_datasets(cfg, [], restored_variants, source)
+
+
+class TestCheckSameSplit:
+    def test_the_split_of_the_recorded_run_passes(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+
+        check_same_split(source, source.split, source.cfg.train.split_seed)
+
+    def test_another_split_seed_raises(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        other_seed = source.cfg.train.split_seed + 1
+
+        with pytest.raises(ValueError, match="trained on"):
+            check_same_split(source, source.split, other_seed)
+
+    def test_other_split_fractions_raise(self, tmp_path, compose_config):
+        source = read_source(tmp_path, compose_config)
+        other_split = HouseholdSplit(val_size=source.split.val_size, test_size=0.5)
+
+        with pytest.raises(ValueError, match="trained on"):
+            check_same_split(source, other_split, source.cfg.train.split_seed)
+
+
+class TestCheckNodeWeights:
+    def _locations(self, loc_ids: list[int]):
+        return types.SimpleNamespace(node_ids=pl.DataFrame({"loc_id": loc_ids}))
+
+    def _source_nodes(self, monkeypatch, loc_ids: list[int]) -> None:
+        source_node_ids = pl.DataFrame({"loc_id": loc_ids})
+        monkeypatch.setattr(SourceRun, "node_ids", lambda self: source_node_ids)
+
+    def test_a_node_bias_of_reordered_nodes_raises(self, tmp_path, compose_config, monkeypatch):
+        source = read_source(tmp_path, compose_config, "models.two_tower.bias=node")
+        restored_variants = restore(source, variants=["TwoTower-4-nodebias"])
+        self._source_nodes(monkeypatch, [2, 1, 3])
+
+        with pytest.raises(ValueError, match="TwoTower-4-nodebias-fromTPG"):
+            check_node_weights(restored_variants, self._locations([1, 2, 3]))  # type: ignore[arg-type]
+
+    def test_a_node_bias_of_the_same_nodes_passes(self, tmp_path, compose_config, monkeypatch):
+        source = read_source(tmp_path, compose_config, "models.two_tower.bias=node")
+        restored_variants = restore(source, variants=["TwoTower-4-nodebias"])
+        self._source_nodes(monkeypatch, [1, 2, 3])
+
+        check_node_weights(restored_variants, self._locations([1, 2, 3]))  # type: ignore[arg-type]
+
+    def test_a_variant_with_no_node_weights_takes_other_nodes(self, tmp_path, compose_config, monkeypatch):
+        source = read_source(tmp_path, compose_config)
+        restored_variants = restore(source, variants=["MLP", "TwoTower-4"])
+        self._source_nodes(monkeypatch, [7, 8])
+
+        check_node_weights(restored_variants, self._locations([1, 2, 3]))  # type: ignore[arg-type]
+
+
+class TestHasNodeWeights:
+    @pytest.mark.parametrize(
+        ("key", "overrides", "expected"),
+        [
+            ("mlp", {}, False),
+            ("gat", {}, False),
+            ("two_tower", {}, False),
+            ("two_tower", {"bias": "node"}, True),
+            ("two_tower", {"node_embedding": True}, True),
+            ("home_zone_mf", {}, True),
+        ],
+    )
+    def test_flags_the_models_with_one_weight_per_node(self, cfg, key, overrides, expected):
+        model = with_overrides(cfg.models[key], overrides)
+
+        assert has_node_weights(model) is expected
+
+
+TRANSFER_RESTORED_NAMES = {
+    "transfer_tts2022": [
+        f"{name}-fromTTS2016{scaling}"
+        for name in [
+            "MLP",
+            "GATv2-2",
+            "GATv2-2-norail",
+            "GATv2-2-nocontig-norail",
+            "TwoTower-4",
+            "TwoTower-4-norail",
+            "TwoTower-4-nocontig-norail",
+        ]
+        for scaling in ["", "-tgtscale"]
+    ],
+    "transfer_finetune": [
+        "MLP-fromTTS2016",
+        "MLP-fromTTS2016-ft",
+        "TwoTower-4-fromTTS2016",
+        "TwoTower-4-fromTTS2016-ft",
+    ],
+}
+TRANSFER_RESTORED_NAMES["transfer_all_users"] = TRANSFER_RESTORED_NAMES["transfer_tts2022"]
+
+
+class TestTransferExperiments:
+    @pytest.mark.parametrize("experiment", sorted(TRANSFER_RESTORED_NAMES))
+    def test_restores_variants_trained_by_the_recorded_run(self, tmp_path, compose_config, experiment):
+        runs_path, _ = write_source_run(tmp_path, compose_config, "data=tts2016", "experiment=edge_ablation")
+        cfg = compose_config("data=tts2022", f"experiment={experiment}")
+        source = read_source_run(runs_path, cfg.transfer)
+        assert source is not None
+
+        restored_variants = build_restored_variants(cfg.transfer, source, cfg.data.name)
+
+        assert [restored_variant.name for restored_variant in restored_variants] == TRANSFER_RESTORED_NAMES[experiment]
+
+
+class TestRunRestoredVariants:
+    def _setup(self, cfg: Config, restored_variants: list[RestoredVariant]) -> ExperimentSetup:
+        setup = make_setup(cfg, [42], [])
+        datamodules = {
+            "source": types.SimpleNamespace(locations="source", schema=None),
+            "target": types.SimpleNamespace(locations="target", schema=None),
+        }
+
+        return dataclasses.replace(setup, restored_variants=restored_variants, scaled_datamodules=datamodules)  # type: ignore[arg-type]
+
+    def _restored_variant(self, cfg: Config, scaling: str, fine_tune: bool) -> RestoredVariant:
+        source = SourceRun(Path(source_run_id(cfg.data.name)), cfg, {})
+
+        return RestoredVariant(source, Variant(cfg.models.mlp), scaling, fine_tune, across_datasets=True)
+
+    def _record(self, monkeypatch) -> list[dict]:
+        """Stub the restoring, logging, training and testing of a restored variant; return one record per model."""
+        calls = record_training(monkeypatch)
+        monkeypatch.setattr(runners, "restore_scorer", lambda restored_variant, seed, locations, schema: locations)
+
+        return calls
+
+    def test_a_restored_variant_is_tested_on_the_datamodule_of_its_scaling(self, cfg, monkeypatch):
+        calls = self._record(monkeypatch)
+        restored_variants = [self._restored_variant(cfg, "source", False), self._restored_variant(cfg, "target", False)]
+        _run_variants(self._setup(cfg, restored_variants))
+
+        assert [call["scorer"] for call in calls] == ["source", "target"]
+        assert [call["model"] for call in calls] == [None, None]
+        assert [call["hyperparams"]["model_type"] for call in calls] == ["restored", "restored"]
+
+    def test_a_fine_tuned_variant_trains_at_the_scaled_learning_rate_then_is_tested(self, cfg, monkeypatch):
+        calls = self._record(monkeypatch)
+        _run_variants(self._setup(cfg, [self._restored_variant(cfg, "source", True)]))
+
+        (call,) = calls
+        assert call["name"] == "MLP-fromTPG-ft"
+        assert call["model"].lr == pytest.approx(cfg.models.mlp.lr * cfg.transfer.fine_tune_lr_scale)
+        assert call["hyperparams"]["model_type"] == "fine_tuned"
+
+
+class _SurveyStub(L.LightningDataModule):
+    """The two users of ``make_survey``, each in the training, validation and test splits."""
+
+    def __init__(self):
+        super().__init__()
+        self.locations, users = make_survey()
+        self.schema = make_schema()
+        self.dataset = UserDataset(users, [0, 1])
+        self.home_coverage = _compute_home_coverage(self.dataset, self.dataset)
+
+    def setup(self, stage: str | None = None) -> None:
+        """Hold the users already."""
+
+    def train_dataloader(self) -> DataLoader:
+        """Return a loader over both users."""
+        return DataLoader(self.dataset, batch_size=2)
+
+    def val_dataloader(self) -> DataLoader:
+        """Return a loader over both users."""
+        return DataLoader(self.dataset, batch_size=2)
+
+    def test_dataloader(self) -> DataLoader:
+        """Return a loader over both users."""
+        return DataLoader(self.dataset, batch_size=2)
+
+
+class _HyperparamsLogger(Logger):
+    """Keeps every set of hyperparameters logged to it."""
+
+    def __init__(self):
+        super().__init__()
+        self.logged_hyperparams: list = []
+
+    @property
+    def name(self) -> str:
+        """Name of the logger."""
+        return "hyperparams"
+
+    @property
+    def version(self) -> int:
+        """Version of the logger."""
+        return 0
+
+    def log_hyperparams(self, params, *args, **kwargs) -> None:
+        """Keep ``params``."""
+        self.logged_hyperparams.append(params)
+
+    def log_metrics(self, metrics, step=None) -> None:
+        """Ignore the metrics."""
+
+
+class TestTrainAndEvaluateModel:
+    def _cfg(self, cfg: Config) -> Config:
+        overrides = {
+            "trainer": {
+                "max_epochs": 2,
+                "accelerator": "cpu",
+                "enable_progress_bar": False,
+                "limit_train_batches": 1.0,
+            },
+            "train": {"compile": False, "schedule_lr": False, "early_stopping": {"patience": None}},
+        }
+
+        return cast(Config, OmegaConf.merge(cfg, overrides))
+
+    def _scorer(self, cfg: Config, datamodule: _SurveyStub):
+        return build_scorer(cfg.models.mlp, DEFAULT_FEATURES, datamodule.locations, datamodule.schema, HOME_PE)
+
+    def _evaluate(self, cfg: Config, fit_rows: list[dict] | None, logger: Logger | None = None) -> pl.DataFrame:
+        cfg = self._cfg(cfg)
+        datamodule = _SurveyStub()
+        loss = build_loss(cfg.train.loss, cfg.train.max_recall_k)
+        scorer = self._scorer(cfg, datamodule)
+
+        return evaluate_model(scorer, "MLP", datamodule, loss, cfg, logger, fit_rows)  # type: ignore[arg-type]
+
+    def test_testing_logs_no_hyperparameters_over_those_of_the_training(self, cfg):
+        logger = _HyperparamsLogger()
+        self._evaluate(cfg, fit_rows=None, logger=logger)
+
+        assert logger.logged_hyperparams == []
+
+    def test_an_untrained_scorer_is_validated_once_then_tested(self, cfg):
+        results = self._evaluate(cfg, fit_rows=None)
+        aggregate = results.filter(pl.col("stage").is_in(["fit", "test"]))
+
+        assert aggregate["stage"].to_list() == ["fit", "test"]
+        assert aggregate["epoch"].to_list() == [0, None]
+        assert results.filter(pl.col("stage") == PER_USER_STAGE).height == 2
+
+    def test_the_epoch_rows_of_a_trained_scorer_replace_its_validation(self, cfg):
+        fit_rows = [{"stage": "fit", "epoch": 3, "train_loss": 0.5}]
+        results = self._evaluate(cfg, fit_rows)
+        fit = results.filter(pl.col("stage") == "fit")
+
+        assert fit["epoch"].to_list() == [3]
+        assert fit["train_loss"].to_list() == [0.5]
+
+    def test_training_loads_the_best_checkpoint_into_the_scorer(self, cfg, tmp_path, monkeypatch):
+        cfg = self._cfg(cfg)
+        datamodule = _SurveyStub()
+        loss = build_loss(cfg.train.loss, cfg.train.max_recall_k)
+        scorer = self._scorer(cfg, datamodule)
+        loaded_checkpoints: list[tuple] = []
+        monkeypatch.setattr(
+            training, "load_scorer_weights", lambda scorer, path: loaded_checkpoints.append((scorer, path))
+        )
+
+        fit_rows = train_model(scorer, "MLP", cfg.models.mlp, datamodule, loss, cfg, tmp_path, None, False)  # type: ignore[arg-type]
+
+        assert [row["epoch"] for row in fit_rows] == [0, 1]
+        assert loaded_checkpoints == [(scorer, tmp_path / CHECKPOINTS_DIR / "MLP" / "best.ckpt")]
+
+    def test_training_with_no_run_directory_writes_and_loads_no_checkpoint(self, cfg, tmp_path, monkeypatch):
+        cfg = self._cfg(cfg)
+        datamodule = _SurveyStub()
+        loss = build_loss(cfg.train.loss, cfg.train.max_recall_k)
+        loaded_checkpoints: list[tuple] = []
+        monkeypatch.setattr(
+            training, "load_scorer_weights", lambda scorer, path: loaded_checkpoints.append((scorer, path))
+        )
+        monkeypatch.chdir(tmp_path)
+
+        train_model(self._scorer(cfg, datamodule), "MLP", cfg.models.mlp, datamodule, loss, cfg, None, None, False)  # type: ignore[arg-type]
+
+        assert loaded_checkpoints == []
+
+
+def test_two_variants_of_one_name_raise():
+    with pytest.raises(ValueError, match="repeat"):
+        check_distinct_names(["MLP", "MLP-fromTPG", "MLP"])
+
+
+def test_only_uniform_and_distance_decay_read_no_visit():
+    specs = _closed_form_baselines(num_nodes=4, travel_time_schema=TRAVEL_TIME_SCHEMA)
+    visit_free_names = [spec.name for spec in specs if not spec.reads_visits]
+
+    assert visit_free_names == ["Uniform", "DistanceDecay"]

@@ -73,7 +73,7 @@ def _(
     _graph = load_graph(survey, cfg.data, project_root)
     nodes_gdf, edges_gdf = _graph.nodes, _graph.edges[EdgeKind.CONTIGUITY]
 
-    survey_tensors = build_tensors(survey, _graph)
+    survey_tensors = build_tensors(survey, _graph, cfg.data.excluded_location_features)
 
     dataset_path = tensors_path(cfg.data, project_root)
 

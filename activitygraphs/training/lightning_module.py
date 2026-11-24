@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, cast
 
 import lightning as L
@@ -325,7 +326,10 @@ class RankingModule(L.LightningModule):
         self.log(LEARNING_RATE_KEY, learning_rate, on_step=False, on_epoch=True)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        """Return AdamW, with a plateau LR scheduler when scheduling is on and not overfitting."""
+        """Return AdamW, with a plateau LR scheduler when scheduling is on and not overfitting.
+
+        The scheduler steps after each validation, every ``check_val_every_n_epoch`` epochs of the trainer.
+        """
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
         # Only add a scheduler if not trying to overfit (i.e. not in diagnostic mode). Validation error is not a useful
@@ -335,13 +339,30 @@ class RankingModule(L.LightningModule):
                 optimizer, mode=self.loss.monitor_mode, **self.lr_scheduler
             )
 
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": self.loss.monitor}}
+            frequency = cast(int, self.trainer.check_val_every_n_epoch)  # pyrefly: ignore[missing-attribute]
+
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "monitor": self.loss.monitor, "frequency": frequency},
+            }
 
         return optimizer
 
     def compute_logits(self, batch: UserBatch) -> torch.Tensor:
         """Return the scorer's logits of every node for every user of ``batch``, ``[num_users, num_nodes]``."""
         return self.scorer(self.locations, batch)
+
+
+def load_scorer_weights(scorer: Scorer, checkpoint_path: Path) -> None:
+    """Load into ``scorer`` the scorer weights saved in a ``RankingModule`` checkpoint.
+
+    Raises:
+        RuntimeError: The checkpoint does not hold exactly the weights of ``scorer``, at their shapes.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    module_weights = checkpoint["state_dict"].items()
+    scorer_state = {key.removeprefix("scorer."): value for key, value in module_weights if key.startswith("scorer.")}
+    scorer.load_state_dict(scorer_state, strict=True)
 
 
 def _flat_user_idx(batch: UserBatch) -> Tensor:

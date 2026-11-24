@@ -132,7 +132,7 @@ train_batch_fraction: 1.0
 
 Three keys need a decision for each dataset:
 
-- `name` names the processed cache directory, the run directories (`reports/runs/XYZ-{N}-{timestamp}/`), and the W&B
+- `name` names the processed cache directory, the run directories (`reports/runs/XYZ-{experiment}-{timestamp}/`), and the W&B
   group.
 - `survey` is the key of the survey loader in the registry (step 7). Two configs may share one survey key, as the two
   TTS configs do.

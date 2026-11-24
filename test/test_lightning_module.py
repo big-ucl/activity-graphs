@@ -14,7 +14,7 @@ from activitygraphs.models.features import HomeAnchoredPE, RandomWalkPE
 from activitygraphs.models.networks import NodeMLP
 from activitygraphs.models.scorers import NodeScorer
 from activitygraphs.training.lightning_module import RankingModule
-from activitygraphs.training.losses import BCELoss
+from activitygraphs.training.losses import _build_bce_loss
 from activitygraphs.training.metrics import _per_user_pair_accuracy
 
 MAX_RECALL_K = 50
@@ -104,7 +104,7 @@ def make_module(
     return RankingModule(
         scorer=NodeScorer(make_default_encoder(), model),
         lr=1e-3,
-        loss=BCELoss,
+        loss=_build_bce_loss(),
         lr_scheduler=lr_scheduler,
         store_score_vectors=store_score_vectors,
         locations=chain_locations(),
@@ -141,9 +141,13 @@ def capture_logs(module: RankingModule, monkeypatch) -> dict:
     return logged
 
 
-def attach_fake_trainer(module: RankingModule, overfit_batches: int = 0) -> RankingModule:
-    """Give the module a minimal stand-in trainer so ``configure_optimizers`` can read ``overfit_batches``."""
-    module._trainer = types.SimpleNamespace(overfit_batches=overfit_batches)
+def attach_fake_trainer(
+    module: RankingModule, overfit_batches: int = 0, check_val_every_n_epoch: int = 1
+) -> RankingModule:
+    """Give the module a minimal stand-in trainer so ``configure_optimizers`` can read its settings."""
+    module._trainer = types.SimpleNamespace(
+        overfit_batches=overfit_batches, check_val_every_n_epoch=check_val_every_n_epoch
+    )
     return module
 
 
@@ -292,7 +296,7 @@ class TestUseDemographics:
         return RankingModule(
             scorer=NodeScorer(encoder, model),
             lr=1e-3,
-            loss=BCELoss,
+            loss=_build_bce_loss(),
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -330,7 +334,7 @@ class TestRwpe:
         return RankingModule(
             scorer=NodeScorer(encoder, model),
             lr=1e-3,
-            loss=BCELoss,
+            loss=_build_bce_loss(),
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -373,7 +377,7 @@ class TestTrainRanking:
                 NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
             ),
             lr=1e-3,
-            loss=BCELoss,
+            loss=_build_bce_loss(),
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -632,6 +636,12 @@ class TestConfigureOptimizers:
         result = attach_fake_trainer(make_module(lr_scheduler=LR_SCHEDULER), overfit_batches=5).configure_optimizers()
         assert isinstance(result, torch.optim.AdamW)
 
+    def test_scheduler_steps_with_each_validation(self):
+        module = attach_fake_trainer(make_module(lr_scheduler=LR_SCHEDULER), check_val_every_n_epoch=10)
+        result = module.configure_optimizers()
+
+        assert result["lr_scheduler"]["frequency"] == 10
+
     def test_scheduler_takes_the_given_settings(self):
         result = attach_fake_trainer(make_module(lr_scheduler={"factor": 0.25, "patience": 3})).configure_optimizers()
         scheduler = result["lr_scheduler"]["scheduler"]
@@ -647,7 +657,7 @@ class TestCalibration:
                 NodeMLP(num_layers=2, in_channels=IN_CHANNELS, hidden_channels=8, out_channels=1),
             ),
             lr=1e-3,
-            loss=BCELoss,
+            loss=_build_bce_loss(),
             locations=chain_locations(),
             max_recall_k=MAX_RECALL_K,
             recall_ks=RECALL_KS,
@@ -699,7 +709,7 @@ class TestCheckpoint:
         reloaded = RankingModule.load_from_checkpoint(
             path,
             scorer=NodeScorer(make_default_encoder(), model),
-            loss=BCELoss,
+            loss=_build_bce_loss(),
             locations=chain_locations(),
         )
 
@@ -729,7 +739,7 @@ def make_home_pe_module(num_nodes: int = 8, n_bins: int = HOME_PE_BINS) -> Ranki
     return RankingModule(
         scorer=NodeScorer(encoder, model),
         lr=1e-3,
-        loss=BCELoss,
+        loss=_build_bce_loss(),
         locations=chain_locations(num_nodes),
         max_recall_k=MAX_RECALL_K,
         recall_ks=RECALL_KS,

@@ -1,5 +1,7 @@
-"""Training orchestration: train_and_evaluate_model, evaluate_baseline, and their result frames."""
+"""Training orchestration: train_model, evaluate_model, evaluate_baseline, and their result frames."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -7,17 +9,16 @@ from typing import cast
 import lightning as L
 import polars as pl
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 from omegaconf import OmegaConf
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
-from activitygraphs.config import Config
+from activitygraphs.config import Config, ModelConfig
 from activitygraphs.datasets import SurveyDataModule
-from activitygraphs.experiments.variants import Variant, variant_hyperparams
 from activitygraphs.models.scorers import FittedScorer, Scorer
-from activitygraphs.runs import CHECKPOINTS_DIR, LOGS_DIR
+from activitygraphs.runs import CHECKPOINTS_DIR
 from activitygraphs.training.callbacks import OverfitDebugCallback
-from activitygraphs.training.lightning_module import RankingModule
+from activitygraphs.training.lightning_module import RankingModule, load_scorer_weights
 from activitygraphs.training.loggers import MetricsLogger
 from activitygraphs.training.losses import Loss
 
@@ -65,6 +66,49 @@ class WandBParams:
         return [tag for tag in [self.dataset_name, self.experiment, *extra] if tag]
 
 
+@contextmanager
+def model_logger(
+    run_name: str, hyperparams: dict, wandb_params: WandBParams, log_dir: Path | None
+) -> Iterator[Logger | None]:
+    """Open the logger of one model: a W&B run when ``wandb_params.use_wandb`` is set, else a CSV log.
+
+    Args:
+        run_name: Name of the logger run.
+        hyperparams: The settings of the model, logged to W&B beside ``wandb_params.config``. Its ``model_type``
+            is added to the W&B tags.
+        wandb_params: parameters to configure WandB logging.
+        log_dir: Directory of the logs. None writes no CSV log.
+
+    Yields:
+        The logger, or None when W&B is off and ``log_dir`` is None. The W&B run is finished on exit.
+    """
+    save_dir = "." if log_dir is None else str(log_dir)
+
+    if not wandb_params.use_wandb:
+        csv_logger = None if log_dir is None else CSVLogger(save_dir=save_dir, name=run_name)
+        yield csv_logger
+        return
+
+    tags = wandb_params.tags(hyperparams["model_type"])
+    logger = WandbLogger(
+        project=wandb_params.project,
+        entity=wandb_params.entity,
+        name=run_name,
+        group=wandb_params.group,
+        save_dir=save_dir,
+        tags=tags,
+    )
+    logged_params = {**wandb_params.config, "run_dir": wandb_params.run_dir, **hyperparams}
+    logger.log_hyperparams(logged_params)
+
+    try:
+        yield logger
+    finally:
+        import wandb
+
+        wandb.finish()
+
+
 def evaluate_baseline(
     baseline: FittedScorer,
     datamodule: SurveyDataModule,
@@ -72,130 +116,69 @@ def evaluate_baseline(
     name: str,
     cfg: Config,
     wandb_params: WandBParams,
-    run_tag: str | None = None,
 ) -> pl.DataFrame:
-    """Evaluate a baseline model and return a results DataFrame matching the ``run_experiment`` format.
-
-    Returns two stage-tagged rows (one ``stage="fit"`` with the ``val_*`` metrics, one
-    ``stage="test"`` with the ``test_*`` metrics) so baseline frames align with the
-    ``run_experiment`` output.
+    """Evaluate a fitted baseline and return its result frame, in the layout of ``evaluate_model``.
 
     Args:
         baseline: Fitted baseline module to evaluate.
         datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance, for the BCE and the monitored metric.
         name: Baseline name used for logging and in the returned frame.
-        cfg: The config used by the experiment, read for the evaluation settings under ``train`` and the
-            ``recall@k`` cutoffs under ``analysis``.
+        cfg: The config used by the experiment.
         wandb_params: parameters to configure WandB logging.
-        run_tag: Suffix distinguishing repeated fits of one baseline in the logger, e.g. per training seed. It
-            does not reach the returned frame, whose ``name`` stays ``name``.
     """
-    baseline_module = RankingModule(
-        scorer=baseline,
-        locations=datamodule.locations,
-        lr=0.0,
-        loss=loss,
-        max_recall_k=cfg.train.max_recall_k,
-        recall_ks=list(cfg.analysis.recall_curve_ks),
-        calibration_bins=cfg.train.calibration_bins,
-        store_score_vectors=cfg.train.save_score_vectors,
-    )
+    hyperparams = {"model": name, "run_tag": None, "model_type": "baseline"}
 
-    if wandb_params.use_wandb:
-        logger = WandbLogger(
-            project=wandb_params.project,
-            entity=wandb_params.entity,
-            name=name if run_tag is None else f"{name}-{run_tag}",
-            group=wandb_params.group,
-            tags=wandb_params.tags("baseline"),
-        )
-        logger.log_hyperparams({
-            **wandb_params.config,
-            "run_dir": wandb_params.run_dir,
-            "model": name,
-            "run_tag": run_tag,
-            "model_type": "baseline",
-        })
+    with model_logger(name, hyperparams, wandb_params, log_dir=None) as logger:
+        results = evaluate_model(baseline, name, datamodule, loss, cfg, logger, fit_rows=None)
 
-    else:
-        logger = False
-
-    trainer = L.Trainer(logger=logger, enable_progress_bar=False)
-
-    try:
-        (val_results,) = trainer.validate(baseline_module, datamodule=datamodule)
-        (test_results,) = trainer.test(baseline_module, datamodule=datamodule)
-    finally:
-        if wandb_params.use_wandb:
-            import wandb
-
-            wandb.finish()
-
-    fit_row = {"name": name, "stage": "fit", "epoch": 0, "train_loss": 0.0, **val_results}
-    test_row = {"name": name, "stage": "test", "epoch": None, **test_results}
-
-    aggregate_results = pl.DataFrame([fit_row, test_row])
-    per_user_results = _per_user_frame(baseline_module, name, datamodule.home_coverage)
-    score_vectors = _score_vector_frame(baseline_module, name)
-
-    return pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal").with_columns(
-        is_baseline=pl.lit(True)
-    )
+    return results.with_columns(is_baseline=pl.lit(True))
 
 
-def train_and_evaluate_model(
+def train_model(
     scorer: Scorer,
-    variant: Variant,
+    run_name: str,
+    model: ModelConfig,
     datamodule: SurveyDataModule,
     loss: Loss,
     cfg: Config,
     run_dir: Path | None,
-    wandb_params: WandBParams,
+    logger: Logger | None,
     debug: bool,
-    run_tag: str | None = None,
-) -> pl.DataFrame:
-    """Train a model and return per-epoch metrics as a Polars DataFrame.
+) -> list[dict]:
+    """Train ``scorer`` on the training users, leave in it the weights of its best epoch, and return the epoch rows.
 
     Args:
-        scorer: Scorer to train.
-        variant: The variant ``scorer`` was built from, giving its name, optimiser settings and input features.
+        scorer: Scorer to train, built from scratch or restored from a checkpoint.
+        run_name: Name of the training run, which names its checkpoint directory.
+        model: The model config, giving the learning rate and the weight decay.
         datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
         loss: ``Loss`` instance
-        cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, ``cfg.train`` the
-            training and evaluation settings, and ``analysis.recall_curve_ks`` the ``recall@k`` cutoffs.
-        run_dir: Run directory. Checkpoints are written to ``checkpoints/<run name>/`` (``best.ckpt``,
-            ``last.ckpt``) and the logs to ``logs/``. None disables both.
-        wandb_params: parameters to configure WandB logging.
+        cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, and ``cfg.train``
+            the training settings.
+        run_dir: Run directory. Checkpoints are written to ``checkpoints/<run_name>/`` (``best.ckpt``,
+            ``last.ckpt``). None writes no checkpoint and leaves the weights of the last epoch in ``scorer``.
+        logger: The logger of the model, from ``model_logger``. None keeps the metrics in memory only.
         debug: Flag that enables `OverfitDebugCallback` statistics printing at the start and end of training.
-        run_tag: Suffix distinguishing repeated runs of the same model (e.g. per training seed). It
-            qualifies the checkpoint directory and logger run name only; the variant name still identifies
-            the model in the returned frame, so repeated runs group together.
 
     Returns:
-        Long-format DataFrame tagged by ``stage``: one ``stage="fit"`` row per epoch carrying
-        ``train_loss`` and the ``val_*`` metrics, plus (when a test run executed) one
-        ``stage="test"`` row carrying the ``test_*`` metrics and one ``stage="test_user"`` row per
-        test user carrying that user's ``r_precision``. Columns: ``name``, ``stage``,
-        ``epoch``, ``train_loss``, ``val_*``, ``test_*``, ``user_idx``, ``n_pos``, ``r_precision``;
-        cells absent for a row's stage are null. Empty on a ``fast_dev_run``.
+        One ``stage="fit"`` row per epoch, with the ``epoch``, the ``train_loss`` and the ``val_*`` metrics.
     """
-    name = variant.name
-    run_name = name if run_tag is None else f"{name}-{run_tag}"
     train = cfg.train
 
     datamodule.setup()
 
     lr_scheduler = cast(dict, OmegaConf.to_container(train.lr_scheduler)) if train.schedule_lr else None
+    recall_ks = list(cfg.analysis.recall_curve_ks)
 
     lit_model = RankingModule(
         scorer=scorer,
         locations=datamodule.locations,
-        lr=variant.model.lr,
+        lr=model.lr,
         loss=loss,
         max_recall_k=train.max_recall_k,
-        recall_ks=list(cfg.analysis.recall_curve_ks),
-        weight_decay=variant.model.weight_decay,
+        recall_ks=recall_ks,
+        weight_decay=model.weight_decay,
         lr_scheduler=lr_scheduler,
         calibration_bins=train.calibration_bins,
         compile_model=train.compile,
@@ -204,65 +187,83 @@ def train_and_evaluate_model(
     )
 
     callbacks = _build_callbacks(loss, cfg, run_dir, run_name, debug)
-
-    log_dir = str(run_dir / LOGS_DIR) if run_dir is not None else "."
-
-    # Configure logging
-
-    if wandb_params.use_wandb:
-        logger = WandbLogger(
-            project=wandb_params.project,
-            entity=wandb_params.entity,
-            name=run_name,
-            group=wandb_params.group,
-            save_dir=log_dir,
-            tags=wandb_params.tags(),
-        )
-        logger.log_hyperparams({
-            **wandb_params.config,
-            "run_dir": wandb_params.run_dir,
-            "model": name,
-            "run_tag": run_tag,
-            **variant_hyperparams(variant),
-        })
-    else:
-        logger = CSVLogger(save_dir=log_dir, name=run_name)
-
     metrics_logger = MetricsLogger()
+    loggers: list[Logger] = [metrics_logger] if logger is None else [logger, metrics_logger]
 
-    # Create trainer and fit
-
-    trainer = L.Trainer(**_trainer_arguments(cfg), logger=[logger, metrics_logger], callbacks=callbacks)
-
+    trainer_arguments = _trainer_arguments(cfg)
+    trainer = L.Trainer(**trainer_arguments, logger=loggers, callbacks=callbacks)
     trainer.fit(lit_model, datamodule=datamodule)
 
-    # Process results
+    if run_dir is not None:
+        best_checkpoint = cast(ModelCheckpoint, trainer.checkpoint_callback)
+        best_path = Path(best_checkpoint.best_model_path)
+        load_scorer_weights(scorer, best_path)
 
-    try:
-        if cfg.trainer.fast_dev_run:
-            return pl.DataFrame()
+    return metrics_logger.rows
 
-        if run_dir is not None:
-            trainer.test(lit_model, datamodule=datamodule, ckpt_path="best")
 
-        aggregate_results = _aggregate_frame(metrics_logger.rows, name)
-        per_user_results = _per_user_frame(lit_model, name, datamodule.home_coverage)
-        score_vectors = _score_vector_frame(lit_model, name)
+def evaluate_model(
+    scorer: Scorer,
+    name: str,
+    datamodule: SurveyDataModule,
+    loss: Loss,
+    cfg: Config,
+    logger: Logger | None,
+    fit_rows: list[dict] | None,
+) -> pl.DataFrame:
+    """Test ``scorer`` with its weights as they are, and return its result frame.
 
-        results = pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal").with_columns(
-            is_baseline=pl.lit(False)
-        )
+    Args:
+        scorer: The scorer tested. It is not trained here.
+        name: Name of the model in the returned frame.
+        datamodule: ``SurveyDataModule`` instance (``setup()`` is called internally if needed).
+        loss: ``Loss`` instance, for the BCE and the monitored metric.
+        cfg: The config used by the experiment. ``cfg.trainer`` holds the ``Trainer`` arguments, ``cfg.train`` the
+            evaluation settings, and ``analysis.recall_curve_ks`` the ``recall@k`` cutoffs.
+        logger: The logger of the model, from ``model_logger``. None logs nothing.
+        fit_rows: The epoch rows returned by ``train_model`` when ``scorer`` was trained. None validates ``scorer``
+            once, as one ``stage="fit"`` row at epoch 0.
 
-        first_cols = ["name", "stage", "epoch"]
-        other_cols = [c for c in results.columns if c not in first_cols]
-        results = results.select(first_cols + other_cols)
+    Returns:
+        Long-format DataFrame tagged by ``stage``: the ``stage="fit"`` rows, one ``stage="test"`` row carrying the
+        ``test_*`` metrics, one ``stage="test_user"`` row per test user, and one ``stage="test_scores"`` row per test
+        user when the score vectors are stored. Cells absent for a row's stage are null.
+    """
+    datamodule.setup()
+    recall_ks = list(cfg.analysis.recall_curve_ks)
 
-        return results
-    finally:
-        if wandb_params.use_wandb:
-            import wandb
+    module = RankingModule(
+        scorer=scorer,
+        locations=datamodule.locations,
+        lr=0.0,
+        loss=loss,
+        max_recall_k=cfg.train.max_recall_k,
+        recall_ks=recall_ks,
+        calibration_bins=cfg.train.calibration_bins,
+        store_score_vectors=cfg.train.save_score_vectors,
+    )
 
-            wandb.finish()
+    trainer_logger = False if logger is None else logger
+    trainer_arguments = _trainer_arguments(cfg)
+    trainer = L.Trainer(**trainer_arguments, logger=trainer_logger, enable_autolog_hparams=False)
+
+    if fit_rows is None:
+        (val_results,) = trainer.validate(module, datamodule=datamodule)
+        fit_rows = [{"stage": "fit", "epoch": 0, "train_loss": 0.0, **val_results}]
+
+    (test_results,) = trainer.test(module, datamodule=datamodule)
+    test_row = {"stage": "test", "epoch": None, **test_results}
+
+    aggregate_rows = [*fit_rows, test_row]
+    aggregate_results = _aggregate_frame(aggregate_rows, name)
+    per_user_results = _per_user_frame(module, name, datamodule.home_coverage)
+    score_vectors = _score_vector_frame(module, name)
+
+    results = pl.concat([aggregate_results, per_user_results, score_vectors], how="diagonal")
+    first_cols = ["name", "stage", "epoch"]
+    other_cols = [c for c in results.columns if c not in first_cols]
+
+    return results.select(first_cols + other_cols)
 
 
 def _score_vector_frame(module: RankingModule, name: str) -> pl.DataFrame:
@@ -331,7 +332,7 @@ def _build_callbacks(loss: Loss, cfg: Config, run_dir: Path | None, run_name: st
         The best and the last checkpoint when ``run_dir`` is set, early stopping unless its patience is None or the run
         is overfitting, and the ``OverfitDebugCallback`` when ``debug`` is set.
         ``best.ckpt`` holds the epoch with the best monitored metric, and ``last.ckpt`` the latest epoch. The best
-        checkpoint comes first, since ``ckpt_path="best"`` reads the first checkpoint callback.
+        checkpoint comes first, since ``trainer.checkpoint_callback`` is the first checkpoint callback.
     """
     callbacks: list[L.Callback] = []
 

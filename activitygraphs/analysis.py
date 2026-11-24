@@ -22,7 +22,7 @@ from scipy.stats import rankdata, wilcoxon
 
 from activitygraphs.base import HOME_DISTANCE_STAGE, PER_USER_STAGE, SCORE_VECTOR_STAGE
 from activitygraphs.config import AnalysisConfig
-from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, latest_run, run_dir
+from activitygraphs.runs import DISTANCES_FILE, PER_USER_FILE, RESULTS_FILE, SCORES_FILE, run_dir
 from activitygraphs.training.metrics import DEFAULT_HOP_BANDS
 from activitygraphs.training.ranking import average_recall, expected_recall_at_k, positive_band_auc
 from activitygraphs.wandb_tables import band_seed_means
@@ -754,17 +754,20 @@ def distance_band_recall(
     """
     lower_edges, upper_edges = _band_edges(bands)
     distances = home_distances.select("user_idx", "distances")
+    per_user = per_user_results.filter(pl.col("stage") == PER_USER_STAGE)
 
-    positives = (
-        per_user_results
-        .filter(pl.col("stage") == PER_USER_STAGE)
-        .join(distances, on="user_idx")
-        .with_columns(
-            pos_distance=pl.col("distances").list.gather(pl.col(PER_POSITIVE_NODE_COLUMN)),
+    model_positives = []
+    for model_rows in per_user.partition_by("name", maintain_order=True):
+        model_positives.append(
+            model_rows
+            .join(distances, on="user_idx")
+            .with_columns(
+                pos_distance=pl.col("distances").list.gather(pl.col(PER_POSITIVE_NODE_COLUMN)),
+            )
+            .select("name", "seed", "user_idx", "n_pos", PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
+            .explode(PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
         )
-        .select("name", "seed", "user_idx", "n_pos", PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
-        .explode(PER_POSITIVE_AVG_RECALL_COLUMN, "pos_distance")
-    )
+    positives = pl.concat(model_positives)
     band_index = _distance_band_index(positives["pos_distance"].to_numpy().astype(np.float64), bands)
 
     return (
@@ -1237,7 +1240,7 @@ def print_report(
     name: str,
     max_recall_k: int,
     distance_bands: Sequence[float],
-    run: int | None = None,
+    run: str | None = None,
     analysis: AnalysisConfig | None = None,
 ) -> pl.DataFrame:
     """Print results analyses for a run of the whole comparison experiment.
@@ -1246,17 +1249,16 @@ def print_report(
 
     Args:
         runs_path: path to the run directories (e.g. ``reports/runs/``).
-        name: Dataset name used in the run directory names, e.g. ``"TPG"``.
+        name: Dataset name that starts the run ids, e.g. ``"TPG"``.
         max_recall_k: Largest rank cutoff ``K`` of ``avg_recall@K``.
         distance_bands: Upper edges in km of the distance bands, for the band split and the within-band AUC.
-        run: Run number ``n`` of the run directory ``{name}-{n}-{timestamp}``. Uses latest available if None.
+        run: Id of the run, ``{name}-{experiment}-{YYYYmmdd-HHMMSS}``. Uses latest available if None.
         analysis: Analysis configuration. Uses ``DEFAULT_ANALYSIS`` if None.
 
     Returns:
         The band means of every model, seed and distance band, from ``band_seed_means``.
     """
     runs_path = Path(runs_path)
-    run = run if run is not None else latest_run(runs_path, name)
     run_path = run_dir(runs_path, name, run)
     analysis = DEFAULT_ANALYSIS if analysis is None else analysis
     aggregate, per_user = read_report_run(run_path, max_recall_k)
@@ -1267,7 +1269,7 @@ def print_report(
     ks = analysis.recall_curve_ks
 
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200, float_precision=4):
-        print(f"\n=== {name} run {run} ===")
+        print(f"\n=== {run_path.name} ===")
         print(f"test users: {n_scored} scored, {n_dropped} dropped due to empty RG_i")
 
         print(f"\n-- per-user {metric} (K = {max_recall_k}), avg over seeds --")

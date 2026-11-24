@@ -30,7 +30,12 @@ from activitygraphs.training.ranking import expected_recall_at_k
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Run read for each dataset.
-RUNS = {"tpg": 3, "cmap": 17, "tts2016": 11, "tts2022": 3}
+RUNS = {
+    "tpg": "TPG-headline-20261113-154652",
+    "cmap": "CMAP-headline-20261113-153850",
+    "tts2016": "TTS2016-headline-20261109-183052",
+    "tts2022": "TTS2022-core-20261106-005303",
+}
 
 # OSM extract of each dataset, clipped to the zone hull plus 10 km.
 OSM_CLIPS = {
@@ -114,7 +119,7 @@ class DatasetRun:
 def read_dataset_run(data: str) -> DatasetRun:
     """Read the zones, the contiguity hops and the test users of ``data`` from its graph cache and its run.
 
-    The run is the one numbered in ``RUNS``.
+    The run is the one named in ``RUNS``.
     """
     cfg = read_config(PROJECT_ROOT, data=data)
     graph_path = PROJECT_ROOT / cfg.data.paths.processed / "Graph"

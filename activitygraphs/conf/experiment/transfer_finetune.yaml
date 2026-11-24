@@ -1,0 +1,15 @@
+# @package _global_
+# The MLP and the two-tower model trained from scratch, tested as trained on TTS 2016
+# (TTS2016-edge_ablation-20261117-183417), and fine-tuned from TTS 2016, beside the baselines fitted on each dataset.
+# Set train.train_fraction for the share of the training households.
+experiment:
+  name: transfer_finetune
+  variants:
+    - { model: mlp }
+    - { model: two_tower }
+
+transfer:
+  source_run: TTS2016-edge_ablation-20261117-183417
+  variants: [ MLP, TwoTower-4 ]
+  fine_tune: true
+  fit_baselines_on_source: true

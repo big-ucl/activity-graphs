@@ -1,6 +1,6 @@
 """Detection reads of message passing over the rail edges (accessibility plan, step 6), read from a recorded run.
 
-Run with ``uv run python notebooks/accessibility/edge_reads.py <data> <run>`` to print every table of one run of the
+Run with ``uv run python notebooks/accessibility/edge_reads.py <run id>`` to print every table of one run of the
 ``edge_ablation`` experiment. Each read compares a model with the arms of its family that pass messages over fewer
 edges: ``-norail`` (the contiguity edges alone) and ``-nocontig-norail`` (no edge).
 
@@ -26,32 +26,26 @@ once, with no user. The model reads run on the CPU, so they can run beside a tra
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import polars as pl
 import torch
-from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 
 from activitygraphs.analysis import aggregate_metrics, paired_comparison, read_report_run
 from activitygraphs.base import PER_USER_STAGE
-from activitygraphs.config import Config
-from activitygraphs.datasets import HouseholdSplit, Locations, SurveyDataModule, UserBatch, UserRows
-from activitygraphs.experiments.variants import build_variants
-from activitygraphs.models.architectures import build_scorer
+from activitygraphs.datasets import Locations, SurveyDataModule, UserBatch, UserRows
+from activitygraphs.experiments.restore import SourceRun
 from activitygraphs.models.networks import GAT
 from activitygraphs.models.scorers import GraphScorer, Scorer
 from activitygraphs.models.two_tower import TwoTowerScorer
-from activitygraphs.runs import CHECKPOINTS_DIR, CONFIG_FILE, run_dir
-from activitygraphs.schema import DatasetSchema, EdgeKind
+from activitygraphs.schema import EdgeKind
 from activitygraphs.training.metrics import DEFAULT_HOP_BANDS
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUNS_PATH = Path(__file__).resolve().parents[2] / "reports" / "runs"
 
 ARM_SUFFIXES = ("", "-norail", "-nocontig-norail")
 REFERENCE_SUFFIXES = ("-norail", "-nocontig-norail")
-SEEDS = (42, 43, 44)
 
 HUB_SHARE = 0.05
 TAIL_RANK = 50
@@ -360,48 +354,6 @@ def attention_summary(
     )
 
 
-def load_datamodule(run_path: Path) -> tuple[DictConfig, SurveyDataModule]:
-    """Return the config of the run at ``run_path`` and its datamodule, set up on the split used by the run."""
-    cfg = cast(DictConfig, OmegaConf.load(run_path / CONFIG_FILE))
-    split = HouseholdSplit(val_size=cfg.train.val_size, test_size=cfg.train.test_size)
-    datamodule = SurveyDataModule(
-        cast(Config, cfg),
-        split,
-        seed=cfg.train.split_seed,
-        batch_size=cfg.train.loader.batch_size,
-        num_workers=0,
-        project_root=PROJECT_ROOT,
-    )
-    datamodule.prepare_data()
-    datamodule.setup()
-
-    return cfg, datamodule
-
-
-def restore_scorer(run_path: Path, cfg: DictConfig, name: str, seed: int, datamodule: SurveyDataModule) -> Scorer:
-    """Return the scorer of the variant ``name`` at its best checkpoint for training ``seed``, in eval mode on the CPU.
-
-    Raises:
-        KeyError: The run has no variant named ``name``.
-    """
-    variants = {variant.name: variant for variant in build_variants(cfg.experiment.variants, dict(cfg.models))}
-    if name not in variants:
-        raise KeyError(f"The run has no variant `{name}`; its variants are {sorted(variants)}.")
-
-    variant = variants[name]
-    locations = datamodule.locations
-    schema: DatasetSchema = datamodule.schema
-    scorer = build_scorer(variant.model, variant.features, locations, schema, cfg.train.home_pe)
-
-    checkpoint_path = run_path / CHECKPOINTS_DIR / f"{name}-seed{seed}" / "best.ckpt"
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    scorer_weights = checkpoint["state_dict"].items()
-    scorer_state = {key.removeprefix("scorer."): value for key, value in scorer_weights if key.startswith("scorer.")}
-    scorer.load_state_dict(scorer_state)
-
-    return scorer.eval()
-
-
 def first_test_users(datamodule: SurveyDataModule, num_users: int) -> UserBatch:
     """Return the first ``num_users`` users of the test split, joined with the locations."""
     rows: UserRows = next(iter(datamodule.test_dataloader()))
@@ -436,11 +388,13 @@ def probe_scorer(scorer: Scorer, locations: Locations, batch: UserBatch) -> GATP
 # =========================================
 
 
-def print_edge_reads(data: str, run: int) -> None:
-    """Print every detection read of run ``run`` of the dataset ``data``."""
-    run_path = _run_path(data, run)
-    cfg, datamodule = load_datamodule(run_path)
+def print_edge_reads(run: str) -> None:
+    """Print every detection read of the run of id ``run``."""
+    source = SourceRun.read(RUNS_PATH, run)
+    train = source.cfg.train
+    datamodule = source.datamodule(train.loader.batch_size, num_workers=0)
     locations = datamodule.locations
+    schema = datamodule.schema
     num_nodes = locations.num_nodes
     rail_edges = locations.edges[EdgeKind.RAIL]
     contiguity_edges = locations.edges[EdgeKind.CONTIGUITY]
@@ -451,7 +405,7 @@ def print_edge_reads(data: str, run: int) -> None:
     hub_idx = np.flatnonzero(classes == ZONE_CLASSES[0])
     hub_ids = locations.node_ids["loc_id"].to_numpy()[hub_idx]
 
-    aggregate, per_user = read_report_run(run_path, cfg.train.max_recall_k)
+    aggregate, per_user = read_report_run(source.path, train.max_recall_k)
     positives = positive_frame(per_user, classes)
     names = per_user["name"].unique().to_list()
     families = arm_families(names)
@@ -459,7 +413,7 @@ def print_edge_reads(data: str, run: int) -> None:
     ranks = grouping_ranks(positives, mlp_name)
 
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=200, float_precision=4):
-        print(f"\n=== {data} run {run}: step 6 detection reads ===")
+        print(f"\n=== {run}: step 6 detection reads ===")
         print(
             f"station zones {int(is_station.sum())}, hubs {len(hub_idx)}: "
             + ", ".join(f"{loc_id} ({degree[node]})" for loc_id, node in zip(hub_ids, hub_idx, strict=True))
@@ -489,8 +443,8 @@ def print_edge_reads(data: str, run: int) -> None:
         for family in families:
             for suffix in ARM_SUFFIXES:
                 name = family + suffix
-                for seed in SEEDS:
-                    scorer = restore_scorer(run_path, cfg, name, seed, datamodule)
+                for seed in train.train_seeds:
+                    scorer = source.scorer(name, seed, locations, schema).eval()
                     probe = probe_scorer(scorer, locations, batch)
                     embeddings = probe.embeddings
                     if embeddings is None:
@@ -563,11 +517,5 @@ def _paired_by_group(
     return pl.concat(comparisons).select("group", pl.all().exclude("group"))
 
 
-def _run_path(data: str, run: int) -> Path:
-    """Return the directory of run ``run`` of the dataset ``data``, under the default runs path."""
-    cfg = OmegaConf.load(PROJECT_ROOT / "activitygraphs" / "conf" / "data" / f"{data}.yaml")
-    return run_dir(PROJECT_ROOT / "reports" / "runs", cfg.name, run)
-
-
 if __name__ == "__main__":
-    print_edge_reads(sys.argv[1], int(sys.argv[2]))
+    print_edge_reads(sys.argv[1])

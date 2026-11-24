@@ -11,6 +11,8 @@ from activitygraphs.tensors.build import USER_NODE_SCHEMA, build_tensors, load_t
 from activitygraphs.tensors.bundles import EdgeTensors, LocationTensors, SurveyTensors, UserTensors, check_tensors
 from activitygraphs.tensors.cache import (
     Fingerprint,
+    read_node_ids,
+    read_schema,
     read_tensors,
     read_tensors_fingerprint,
     save_tensors,
@@ -27,6 +29,8 @@ __all__ = [
     "build_tensors",
     "check_tensors",
     "load_tensors",
+    "read_node_ids",
+    "read_schema",
     "read_tensors",
     "read_tensors_fingerprint",
     "save_tensors",
