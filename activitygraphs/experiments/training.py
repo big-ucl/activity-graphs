@@ -324,7 +324,9 @@ def _aggregate_frame(rows: list[dict], name: str) -> pl.DataFrame:
     Polars' default 100-row inference window would silently drop the ``test_*`` metrics on any run
     longer than that many epochs.
     """
-    return pl.DataFrame(rows, infer_schema_length=None).with_columns(name=pl.lit(name))
+    aggregate_df = pl.DataFrame(rows, infer_schema_length=None, schema_overrides={"epoch": pl.Int64})
+
+    return aggregate_df.with_columns(name=pl.lit(name))
 
 
 def _per_user_frame(module: RankingModule, name: str, home_coverage_df: pl.DataFrame) -> pl.DataFrame:

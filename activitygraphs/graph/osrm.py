@@ -75,7 +75,7 @@ def build_road_travel_times(nodes_gdf: gpd.GeoDataFrame, osm_path: Path, osrm_di
 
     mode_times = []
     for mode in OSRM_PROFILES:
-        mode_dir = osrm_dir / mode
+        mode_dir = osrm_dir.resolve() / mode        # Absolute path needed for docker mount.
         _prepare_network(mode, osm_path, mode_dir)
 
         with _osrm_server(mode_dir, len(zone_ids)) as base_url:
